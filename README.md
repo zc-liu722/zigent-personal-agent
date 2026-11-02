@@ -2,85 +2,81 @@
 
 **Your Personal Agent with Giant Context**
 
-Zigent 是一个可自行部署、可借 AI coding 持续改造的个人 Agent 开源架构。
+Zigent is a self-hosted personal agent architecture that you can continuously adapt with AI coding.
 
-个人 Agent 追求的目标只有四个字：**有用，且主动**。
-但泛泛的主动毫无意义，只有精准的主动才值得存在——它主动发来的信息，是你真正愿意点开看一眼，而不是顺手往上滑掉的通知。
+A personal agent has two goals: **be useful and proactive**. Generic proactivity is noise. A worthwhile notification is specific enough that you want to open it, not simply swipe it away.
 
-精准的主动，前提是足够广泛、真实的个人上下文（Giant Context）：你的项目正在推进什么、今天有哪些硬安排、昨晚睡得怎么样、手机刚收到什么重要通知、之前做过什么决定——这些信息拼在一起，再加上一点好模型的智能，衍生出的提醒、建议和日程规划，才可能对你个人而言是具体且有用的。
+Relevant proactivity starts with broad, real personal context: what your projects are working toward, your commitments today, how you slept, an important notification that just arrived, and the decisions you made earlier. Combined with the intelligence of a capable model, these signals can produce reminders, recommendations, and plans that are useful to you personally.
 
-这里的 Giant Context 不只是指模型拥有多大的上下文窗口，更指向一套完整的数据与运行时工程：把关于生活与工作的上下文自动化采集入库、持久化沉淀、按需检索，并在会话中精简、动态地组织进 Prompt，最终转化为可靠的行动。
+**Giant Context** means more than a model's context window. It is the data and runtime engineering needed to collect authorized context from your life and work, persist it, retrieve it on demand, and dynamically organize a concise prompt during a conversation—ultimately turning context into reliable action.
 
-## 为什么个人 Agent 不应该是一个“通用产品”？
+## Why shouldn't a personal agent be a generic product?
 
-因为个人 Agent 的本质要求是 Personal。每个人的生活轨迹、工作流和真正在意的信号完全不同——研究者的项目文档、常出差的人的行程、关注身体状态的人盯着的睡眠与 HRV，需要的触发条件和处理方式截然不同。做成一个大而全的通用产品，往往意味着谁都无法真正兼顾。
+A personal agent needs to be personal. People's lives, workflows, and important signals differ: a researcher's project documents, a frequent traveler's itinerary, and the sleep and HRV data of someone monitoring their health call for different triggers and handling. A one-size-fits-all product can struggle to serve all of them well.
 
-在 AI coding 已经成熟的今天，更好的解法是提供一套扎实、非技术用户也能跑起来的开源底座，把个性化需求和迭代交还给用户自己：
+With AI coding, a better approach is a solid open-source foundation that nontechnical users can run, while leaving customization and iteration in their hands:
 
-- **不指望靠“用户手动喂”跑通数据飞轮**：所有寄希望于用户每天手动交代背景的产品，最后都会因为摩擦力太大而停摆。对话只是入口，真正的上下文应该通过明确授权的数据链路在后台自动入库。
-- **用 AI coding 极速长出自己的能力**：Zigent 把可复用的运行时、会话与权限底座做好，你可以直接借助 AI 编程快速接入自己的数据源、工具和行为规则，比等任何商业团队排期都快。
-- **个人 Agent 不必事事亲手干活**：写代码、跑复杂分析完全可以交给 Codex、Claude 等专业执行环境。Zigent 扮演的是那个“最懂你的人”——它负责掌握你的全局上下文，决定何时委派、自动补齐背景、盯住执行进度，并在任务完成后把结果带回你的持续对话中。
+- **Don't rely on users manually feeding every detail.** Asking someone to restate their background every day creates friction. Conversation is an entry point; authorized data pipelines can collect context in the background.
+- **Grow your own capabilities with AI coding.** Zigent provides a reusable runtime, conversation layer, and permission foundation. Use AI coding to connect your own data sources, tools, and behavioral rules without waiting for a commercial product roadmap.
+- **A personal agent need not do every task itself.** Coding and complex analysis can be delegated to specialized environments such as Codex and Claude. Zigent keeps the broader context, decides when to delegate, supplies relevant background, tracks progress, and brings the result back to your ongoing conversation.
 
-## 让主动建立在上下文与算法之上
+## Ground proactivity in context and algorithms
 
-一条值得看的提醒，必须切中你手头正在发生的事，并且出现在恰当的时机。
+A reminder worth reading should relate to what is happening now and arrive at the right time.
 
-在系统中，后端、算法与模型各司其职：
+The backend, algorithms, and model have distinct responsibilities:
 
-1. **后端负责自动化拿数据与提供工具**：接收用户授权的各类数据，按 Agent 和账号范围隔离入库；为模型提供干净的按需读库工具。
-2. **程序与算法决定何时触发**：不是所有事都靠轮询大模型。时间窗口、地点进出、去重、冷却与过期由确定性程序控制；状态与情绪等复杂时机，则结合健康数据与基线算法（如 HRV 实时波动与日常中位数对比）进行前置判断。
-3. **模型负责决策“要不要看、看了怎么用”**：触发后，模型结合当前上下文决定还需要调取哪些证据，如何理解新信息，以及是否真的需要打扰你、给出什么具体建议。
-4. **执行、确认并保留结果**：涉及日历、待办、记忆或外部执行的写操作，通过会话内的交互确认组件安全落地，进度与交付结果完整留在对话流中。
+1. **The backend collects data and provides tools.** It receives authorized data, stores it within agent and account boundaries, and provides tools for models to query records on demand.
+2. **Programs and algorithms decide when to trigger.** Time windows, location entry and exit, deduplication, cooldowns, and expiration are handled by deterministic code. More complex timing, such as changes in state or mood, can use health data and baseline algorithms—for example, comparing real-time HRV fluctuations with a daily median.
+3. **The model decides what to examine and how to use it.** After a trigger, it considers the current context, requests any further evidence it needs, interprets new information, and decides whether to interrupt you and what specific advice to offer.
+4. **Execute, confirm, and retain results.** Write operations involving calendars, tasks, memory, or external execution use in-conversation confirmation components, with progress and deliverables retained in the conversation.
 
-当用户接入相应数据并配置任务后，系统可以自然跑起这样的闭环（默认示例不含任何个人数据，也不会预置提醒任务）：
+Once a user connects the relevant data and configures tasks, workflows can include the following. The default example contains no personal data and creates no reminder tasks:
 
-- **健康与状态复盘**：清晨新的睡眠或 HRV 数据到达，结合近期基线、当天日程强度和个人计划，生成有据可查的睡眠复盘或节奏调整建议。
-- **地点与情境联动**：到达或离开常去地点时，结合当时的日程与通勤状态触发跟进；若提前离开或前置条件失效，自动取消尚未发出的过期提醒。
-- **项目与会议跟进**：登记项目中出现新资料或上传了会议录音，自动调用文件与转录归档链路查询背景，辅助梳理下一步行动。
-- **专业任务委派闭环**：后台委派给 Codex 的研发或文档任务完成后，自动审阅并将执行结果带回原对话，由你拍板下一步。
+- **Health and wellbeing review:** When new sleep or HRV data arrives in the morning, combine recent baselines, the day's schedule, and personal plans into an evidence-backed review or suggested adjustment.
+- **Location-aware follow-up:** Trigger a follow-up on arrival at or departure from a familiar place, considering the schedule and commute. Cancel unsent reminders when the person leaves early or the conditions no longer hold.
+- **Project and meeting follow-up:** When new material appears in a registered project or a meeting recording is uploaded, use file and transcription workflows to retrieve background and help identify next steps.
+- **Delegated work:** After a development or document task delegated to Codex finishes, review and bring the result back to the original conversation for your decision.
 
-## 可以接入哪些上下文？
+## What context can be connected?
 
-仓库中已内置以下数据源与工具适配入口：
+The repository contains these data-source and tool integration entry points:
 
-| 上下文维度 | 仓库中已有的相关能力 | 接入与使用条件 |
+| Context | Available code and integrations | Requirements |
 | --- | --- | --- |
-| 对话、决定与个人偏好 | 会话历史检索、长期记忆（Markdown）、行为规则与技能维护 | 基础示例默认启用，内容随日常使用逐步沉淀 |
-| 日程与待办 | Google Calendar、Todoist 等账号工具 | 绑定并授权个人账号 |
-| 项目、文档与会议记录 | 本地/登记项目文件检索、文档解析、飞书、Google Drive、Notion、XMind 适配 | 登记项目目录或授权对应云端服务；会议录音转录需额外配置 |
-| 全天定位与地点事件 | 轨迹与停留状态解析、常去区域/地理围栏触发、主动任务联动 | 配置个人设备（如 OwnTracks）上报与任务规则 |
-| Apple Watch 等健康数据 | 健康指标接收、日记、睡眠与 HRV 异常/实时波动触发算法 | 用户明确授权的数据导出链路与私有存储配置 |
-| iPhone 通知内容 | 手机通知实时接收、按 Agent 隔离入库与关键词/应用检索 | 配置个人设备采集端与接入凭据 |
-| 编程与专业工作进度 | Codex / Claude 等执行环境适配、任务委派、进度跟踪与结果审阅 | 配置本地或远程执行客户端与登录环境 |
-| 饮食与其他生活记录 | 对话随手记、健康日记、长期记忆与自定义技能扩展 | 日常对话记录，或借助 AI coding 自行扩展数据源 |
+| Conversations, decisions, and preferences | Conversation history search, long-term Markdown memory, behavioral rules, and skills | Enabled in the basic example; context accumulates through use |
+| Calendar and tasks | Google Calendar, Todoist, and account tools | Connect and authorize personal accounts |
+| Projects, documents, and meetings | Local or registered project-file search, document parsing, Feishu, Google Drive, Notion, and XMind integrations | Register project directories or authorize services; recording transcription requires additional setup |
+| Location and place events | Track and stay-state analysis, familiar areas, geofences, and proactive tasks | Configure a personal device, such as OwnTracks, and task rules |
+| Apple Watch and other health data | Health metrics, diaries, sleep, and HRV anomaly or real-time fluctuation triggers | Explicitly authorized data export and private storage |
+| iPhone notifications | Notification ingestion, per-agent storage, and keyword or application search | Configure a personal device and ingestion credentials |
+| Coding and professional work | Codex/Claude integration, delegation, progress tracking, and result review | Configure local or remote clients and sign-in |
+| Food and other life records | Conversation notes, health diaries, long-term memory, and custom skills | Record information in conversation or add a data source with AI coding |
 
-说明：上表列出的是仓库已包含的源码模块与扩展入口。不同集成的开箱程度与配置门槛不同，不能由这张表推断它们在默认安装下已自动连入（例如：支持委派任务记录，不等于自动扫描并导入你电脑上的全部历史代码库）。各模块的详细就绪情况请参考 [功能支持表](docs/SUPPORT.md)。
+The table describes source modules and extension points already in the repository. Integrations differ in readiness and setup requirements and are not necessarily connected by default. For example, recording delegated tasks does not mean automatically scanning and importing every historical codebase on your computer. See the [feature support matrix](docs/SUPPORT.md) for current status.
 
-## Context 是怎么被长期、高效管理的？
+## How is context managed over time?
 
-拥有海量上下文不代表把所有数据一股脑塞进每一次请求的 Prompt 里。Zigent 在工程实现上把 Context 管理拆成数据底座与会话窗口两层来解决：
+A large body of context does not mean putting every record into every prompt. Zigent separates the data foundation from the conversation window:
 
-- **结构化入库与按需读取**：前端与采集链路负责把多源数据干净地存入数据库；会话中模型通过受控的分页、搜索与时间窗工具按需调取原始记录，而不是靠死记硬背。
-- **Prompt 的渐进式加载与动态丢弃**：会话中的上下文按职责分块管理（核心记忆、当前技能、近期对话、工具结果等）。不常用的技能、归档记忆和长文档只在需要时渐进式加载；历史大体积输出与陈旧片段按模型路由策略动态摘要、压缩或卸载，保持会话上下文高度精简，同时保留回溯原始证据的指针。
-- **严格的数据归属与隔离**：会话、账号授权、主动任务与设备上报数据按 Agent 与用户范围隔离保存；状态变更与规则修改均保留版本校验与人工确认门禁。
-- **分清“开始执行”与“真正交付”**：委派任务、文件生成、视觉预览与最终交付物分别记录状态，杜绝把“命令已发出”当成“结果已完成”。
+- **Structured storage and on-demand reads:** Collection pipelines store data from multiple sources; models retrieve original records using bounded pagination, search, and time-window tools.
+- **Progressive loading and dynamic removal:** Context is organized by purpose, including core memory, current skills, recent conversation, and tool results. Less frequently used skills, archived memory, and long documents are loaded when needed. Large historical outputs and stale material can be summarized, compacted, or unloaded according to the model route while retaining references to original evidence.
+- **Data ownership and isolation:** Conversations, account grants, proactive tasks, and device reports are scoped to agents and users. State and rule changes use version checks and human confirmation.
+- **Distinguish execution from delivery:** Delegation, file generation, visual previews, and final deliverables have separate states, so sending a command is not mistaken for completing the result.
 
-此外，仓库还内置了结构化富交互输出（图表、可交互模拟器、动画与写作卡片）、并发子 Agent 协作、工具写操作确认组件、用量统计，以及独立的文档（Word/PDF/PPT/Excel）与代码执行运行时。
+The repository also includes structured interactive output—charts, simulations, animations, and writing cards—concurrent subagents, confirmation components for tool writes, usage accounting, and independent document (Word/PDF/PPT/Excel) and code execution runtimes.
 
-## 隐私、数据安全与自行部署
+## Privacy, data security, and self-hosting
 
-定位轨迹、手机通知、健康指标、飞书文档和代码库记录，每一项都是极度敏感的个人隐私，交给任何一个外部黑盒产品都很难让人彻底放心。这正是自搭个人 Agent 最大的底气：大 Context 留在自己手里。
+Location history, phone notifications, health metrics, Feishu documents, and code records can all be sensitive. Self-hosting a personal agent keeps control of your context in your hands: you choose which sources to connect, where the database runs, what permissions to grant, and when to disconnect an integration.
 
-Zigent 采用自行部署模式，让你完全掌控接入哪些数据源、数据库落在哪台机器、授予什么权限，以及随时切断任何接入。
+**Self-hosting does not mean data never leaves your machine.** When a conversation or task calls an external model API, web search, or a third-party cloud service such as Google, Notion, or Feishu, selected context, queries, or files may be sent to that provider. Choose models and tools according to the sensitivity of the data you connect.
 
-同时也需要坦诚说明：**本地/私有部署不等于数据永远不离开本机。**
-当你发起对话或触发任务，调用外部大模型 API、网页搜索或第三方云服务（如 Google、Notion、飞书）时，当前被选入 Prompt 的上下文片段、检索词或文件仍会发送给对应的模型或服务供应商。请根据你接入的数据敏感度，审慎选择模型路由与外部工具。
+This repository provides a general architecture and example configuration. It contains no one's production credentials, personal projects, conversations, or device grants. Advanced integrations are disabled by default, and runtime data and local secrets are excluded from Git tracking.
 
-本仓库仅提供通用架构与示例配置，不包含任何人的生产凭据、个人项目、会话数据或设备授权。高级集成默认关闭，所有运行时数据与本机密钥均严格排除在 Git 追踪之外。
+## Getting started
 
-## 开始使用
-
-首版以 Node.js 24 LTS 为部署基线（源码最低版本声明为 22.5）。开始前请准备好你的模型 API Key、用于网页登录的密码，以及用于提供本地 HTTPS 的 Caddy。
+The initial deployment baseline is Node.js 24 LTS; the source declares Node.js 22.5 as its minimum. You will need your own model API key, a web login password, and Caddy for local HTTPS.
 
 ```bash
 git clone https://github.com/zc-liu722/zigent-personal-agent.git
@@ -90,7 +86,7 @@ cp .env.example .env
 npm run setup:password
 ```
 
-打开 `.env` 填写 `DEEPSEEK_API_KEY`，并将上一步密码工具输出的 `ASSISTANT_WEB_PASSWORD_HASH` 整行复制进去，随后构建并启动：
+Fill in `DEEPSEEK_API_KEY` in `.env` and copy the complete `ASSISTANT_WEB_PASSWORD_HASH` line produced by the password tool into the same file. Then build and start:
 
 ```bash
 npm run check
@@ -98,27 +94,26 @@ npm run build
 npm run start:prod -- assistant
 ```
 
-默认 Agent ID 为 `assistant`，示例配置使用 `deepseek-v4.1flash-official`，后端默认监听 `127.0.0.1:8790`。另开一个终端启动本地 HTTPS 反向代理：
+The default agent ID is `assistant`, the example model is `deepseek-v4.1flash-official`, and the backend listens on `127.0.0.1:8790`. Start the local HTTPS reverse proxy in another terminal:
 
 ```bash
 caddy run --config ops/community/Caddyfile.local --adapter caddyfile
 ```
 
-按 [本地 HTTPS 说明](docs/DEPLOYMENT.md#本地-https) 信任本地证书后，即可在浏览器打开 [https://localhost:8443/assistant/](https://localhost:8443/assistant/)。
-仓库已公开，可直接克隆源码。项目许可证及依赖分发事项见 [许可说明](docs/LICENSING.md)。
+Follow the [local HTTPS instructions](docs/DEPLOYMENT.md#本地-https) to trust your local certificate, then open https://localhost:8443/assistant/ in a browser. The repository is public and can be cloned directly. See the [licensing notes](docs/LICENSING.md) for project licensing and dependency distribution.
 
-关于 Windows PowerShell 环境、自定义配置、启动后验收及常见问题，请参阅 [安装指南](docs/GETTING_STARTED.md)；公网域名配置与 Linux 常驻服务示例请参阅 [部署说明](docs/DEPLOYMENT.md)。
+For Windows PowerShell, custom configuration, startup verification, and troubleshooting, see the [installation guide](docs/GETTING_STARTED.md). For public domains and a Linux service example, see the [deployment guide](docs/DEPLOYMENT.md).
 
-## 开发与维护
+## Development and maintenance
 
-仓库目录结构清晰，方便直接交给 AI coding 工具理解与改造：
+The repository is organized for development with AI coding tools:
 
-- `src/`：核心运行时、上下文管理、任务调度与外部数据源集成。
-- `web/`：前端交互界面与对话组件。
-- `skills/`：通用指令技能。
-- `ops/`：部署配置、文档处理、编辑器及独立执行模块源码。
+- `src/`: Core runtime, context management, task scheduling, and data-source integrations.
+- `web/`: Frontend and conversation components.
+- `skills/`: Reusable instruction skills.
+- `ops/`: Deployment configuration, document processing, editor, and independent execution sources.
 
-常用开发命令：
+Common commands:
 
 ```bash
 npm run dev -- assistant
@@ -127,6 +122,6 @@ npm run build
 npm run build:web
 ```
 
-本地组件工作台可通过 `npm run dev:components` 启动（组件内联调需独立完成本地登录）。
-网页构建产物输出至 `build/web/`，默认开发运行时直接读取 `web/`。
-维护源码通过逐文件清单与独立覆盖模板同步至本仓库，确保个人生产环境与开源社区构建完全隔离。仓库已内置 GitHub Actions 构建工作流配置（当前默认关闭）。
+Start the local component studio with `npm run dev:components`; its integrated chat requires a separate local sign-in. Web build output goes to `build/web/`; the default development runtime reads `web/` directly.
+
+Source updates are synchronized into this repository through an explicit file allowlist and independent overlay templates, keeping personal production and community builds separate. A GitHub Actions build workflow is included and currently disabled.
