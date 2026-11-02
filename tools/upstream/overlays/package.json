@@ -53,5 +53,5 @@
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
   },
-  "description": "Self-hosted web agent runtime; private open-source preparation snapshot."
+  "description": "Zigent — Your Personal Agent with Giant Context. Self-hosted personal agent runtime."
 }

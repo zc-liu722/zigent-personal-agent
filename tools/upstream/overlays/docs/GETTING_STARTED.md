@@ -10,7 +10,7 @@
 
 ## 获取源码
 
-仓库目前私有，需要先拥有读取权限并完成 GitHub 认证。克隆到自己的开发或部署目录；不要使用任何已有生产服务目录。
+仓库已公开，可以通过下面的 HTTPS 地址直接克隆。克隆到自己的开发或部署目录；不要使用任何已有生产服务目录。
 
 ```bash
 git clone https://github.com/zc-liu722/zigent-personal-agent.git

@@ -105,7 +105,7 @@ caddy run --config ops/community/Caddyfile.local --adapter caddyfile
 ```
 
 按 [本地 HTTPS 说明](docs/DEPLOYMENT.md#本地-https) 信任本地证书后，即可在浏览器打开 [https://localhost:8443/assistant/](https://localhost:8443/assistant/)。
-（注：仓库当前处于私有审核阶段，克隆需具备相应访问权限。）
+仓库已公开，可直接克隆源码。项目许可证及依赖分发事项见 [许可说明](docs/LICENSING.md)。
 
 关于 Windows PowerShell 环境、自定义配置、启动后验收及常见问题，请参阅 [安装指南](docs/GETTING_STARTED.md)；公网域名配置与 Linux 常驻服务示例请参阅 [部署说明](docs/DEPLOYMENT.md)。
 

@@ -1,8 +1,8 @@
 # Repository instructions
 
-This repository is the independent community preparation tree for Zigent.
+This repository is the independent public community source tree for Zigent.
 
-- Keep it private until the owner explicitly requests public release. Do not change repository visibility automatically.
+- The owner has authorized public source access. Do not change repository visibility, enable Actions, publish packages, or choose a root project license without an explicit request.
 - Work only in this checkout. Do not operate upstream production services or import their credentials, user data, diagnostics, local snapshots, workflows, or Git history.
 - Prioritize rapid iteration. Do not add or run automated tests unless the user explicitly requests them for the current task. Do not require browser previews or screenshots for frontend edits unless requested.
 - Keep type checking, compilation, dependency locks, third-party notices, and necessary packaging checks. Do not add test runners or deployment gates.

@@ -24,4 +24,4 @@ Zigent 面向可以自行部署和修改的个人 Agent。Giant Context 包括�
 
 ## 第三方来源
 
-原生模块的来源、版本和本地改动记录见 `ops/execution/native/UPSTREAM.md`。前端 KaTeX、highlight.js、Vaul 和文档编辑器的许可证随对应目录保留。完整项目许可证和依赖分发策略须在正式公开前完成审核。
+原生模块的来源、版本和本地改动记录见 `ops/execution/native/UPSTREAM.md`。前端 KaTeX、highlight.js、Vaul 和文档编辑器的许可证随对应目录保留。完整项目许可证和依赖分发策略仍待维护者决定及审核，详见许可说明。
