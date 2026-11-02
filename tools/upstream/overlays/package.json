@@ -22,7 +22,8 @@
     "check": "tsc --noEmit",
     "setup:password": "node tools/setup-password.mjs",
     "build:web": "node tools/build-web.mjs",
-    "upstream:export": "python3 tools/upstream/export.py"
+    "upstream:export": "python3 tools/upstream/export.py",
+    "licenses:inventory": "python3 tools/license-inventory.py"
   },
   "dependencies": {
     "@larksuite/cli": "1.0.83",

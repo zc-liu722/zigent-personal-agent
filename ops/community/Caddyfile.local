@@ -1,0 +1,23 @@
+{
+	admin off
+	auto_https disable_redirects
+	skip_install_trust
+}
+
+https://localhost:8443 {
+	bind 127.0.0.1
+	tls internal
+
+	redir / /assistant/ 308
+	redir /assistant /assistant/ 308
+
+	handle /assistant/* {
+		reverse_proxy 127.0.0.1:8790 {
+			header_up -Cf-Connecting-Ip
+		}
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}

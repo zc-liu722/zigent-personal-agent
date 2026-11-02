@@ -1,0 +1,18 @@
+[Unit]
+Description=Zigent personal Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zigent
+Group=zigent
+WorkingDirectory=/opt/zigent
+ExecStart=/usr/bin/node dist/index.js assistant
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

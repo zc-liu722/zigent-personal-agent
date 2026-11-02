@@ -10,6 +10,10 @@
       "04f27395a6502741a5163d546c2863a78f3adb2e6b73079299513f0815e19d66"
     ],
     [
+      ".github/workflows/build.yml",
+      "61ca56920dd34a00ecac0850855bae01f5e401a71b3c6b51d47689a4d90cdbad"
+    ],
+    [
       ".gitignore",
       "8d01bd592339cfc9a1edb6611765b75caed6e8960a766bbd46f20b3f40754df7"
     ],
@@ -19,7 +23,11 @@
     ],
     [
       "README.md",
-      "8bff42a3ffd7706d20b6abc163c438ad7585f8a12405f33d1319cf86ce836f41"
+      "e5a8d9c2951506a212e00b746f8e7f9085ef67cd6fa73c98d298f327ce6aa480"
+    ],
+    [
+      "THIRD_PARTY_NOTICES.md",
+      "9bded806414183f6d5f685bfe2b43a30784b555cbc656f1a042a836819be22e9"
     ],
     [
       "config/agents.example.json",
@@ -35,19 +43,55 @@
     ],
     [
       "docs/ARCHITECTURE.md",
-      "3f625bdc406c9ca054ba22ffaac3a64c4e362e35a4ac3058f41c5b0943f0f00f"
+      "729abc420e4442a5d531a6a2b5e2f3d386c46affb66e4fb1628e692399338eb3"
+    ],
+    [
+      "docs/DEPENDENCIES.md",
+      "233faf9503e0485b66e6176e41c2058d1939885f48ad999dcd025547e80fd32f"
+    ],
+    [
+      "docs/DEPLOYMENT.md",
+      "5238428ce07523c21fcfa3c70716d7fd388e8076df61399b7f7e58fde290ed1d"
+    ],
+    [
+      "docs/GETTING_STARTED.md",
+      "75f05d8a8d90c988155a676178826b0ea80b1fa5dae092063e0e388f6fe9e06f"
+    ],
+    [
+      "docs/LICENSING.md",
+      "d6befa82c27fc3c546787e71930a10aad73c0299e74f04f5423d0fac4f86beac"
     ],
     [
       "docs/RELEASE_REVIEW.md",
-      "d3da94dacdcdc539165670f84c9dcc22d30370522e8036626e5ef2c3fe989303"
+      "129359337a3bce741a0b30d75adcecb06c21c78757ea67b4b2f622c5979bc5ea"
+    ],
+    [
+      "docs/SUPPORT.md",
+      "f3ca5a2d2ce5f7426ef2d8c0427320a3ae9a390a8d063f3e2b8d0db0f2cc6a4f"
     ],
     [
       "docs/SYNC.md",
-      "b567f56583c012d92b206e8e8982afceb557c92ea94fb0d3dedd11e10036d863"
+      "d1b8905138901b9aa17d073cc798b03c9a88105e6686398e1611c733cbf57020"
+    ],
+    [
+      "docs/dependency-inventory.json",
+      "516a268faf69e352168c3790034db6b8402eeaa7f260864b45ee0a42916dd72b"
     ],
     [
       "ops/build-web.mjs",
       "a28019867a4b873e6b49435858f77839c369bdf3af6e48ec195b2d14b615e62f"
+    ],
+    [
+      "ops/community/Caddyfile.domain",
+      "62c0abcb1f8dd5a0d52dd84104c95d94ff17b759dcf85e4c08584f52a17f47c5"
+    ],
+    [
+      "ops/community/Caddyfile.local",
+      "c88ef417489f9ecc6d1f97d3e4ff7c20ecf0af26759280654beacbb0c3384dba"
+    ],
+    [
+      "ops/community/zigent.service.example",
+      "c56d599cb90062846c67d9e13839540082a2a4b7b0797d683e4b52255fc34e4d"
     ],
     [
       "ops/component-studio/README.md",
@@ -367,7 +411,7 @@
     ],
     [
       "package.json",
-      "148994d78a371b1f27917521b9dcfc088db755396030f10883484a23cecbef80"
+      "17a6cfd810278e14cbb2221f05dc8161a44a41fc7116a21bf88b4faebbb87cc4"
     ],
     [
       "skills/coding/SKILL.md",
@@ -1896,6 +1940,10 @@
     [
       "tools/build-web.mjs",
       "37d0a951cfdd6dd9ff01bae9bca3c31ad03541ebea17b716df5e7b618faef77d"
+    ],
+    [
+      "tools/license-inventory.py",
+      "dd1604bdfafd3472a5f5cd8a6841cce5ff76bd4d4f80847fd9249768ca3ef659"
     ],
     [
       "tools/setup-password.mjs",

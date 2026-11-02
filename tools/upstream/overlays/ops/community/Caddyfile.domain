@@ -1,0 +1,18 @@
+{
+	admin off
+}
+
+{$ZIGENT_DOMAIN} {
+	redir / /assistant/ 308
+	redir /assistant /assistant/ 308
+
+	handle /assistant/* {
+		reverse_proxy 127.0.0.1:8790 {
+			header_up -Cf-Connecting-Ip
+		}
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}
