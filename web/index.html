@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+  <meta name="theme-color" content="#faf9f5">
+  <meta name="color-scheme" content="light">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="description" content="Aletheia · 你的私人对话空间">
+  <script src="./telemetry.js" defer></script>
+  <script src="./startup.js" async fetchpriority="high"></script>
+  <link id="speech-worklet" rel="preload" href="./pcm-worklet.js" as="script" crossorigin="anonymous" fetchpriority="low">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+  <link rel="stylesheet" href="./style.css">
+  <link rel="stylesheet" href="./components/interaction.css">
+<link rel="stylesheet" href="./components/activity.css">
+<link rel="stylesheet" href="./components/subagent.css">
+  <link rel="stylesheet" href="./message-actions.css">
+  <link rel="stylesheet" href="./components/output-components.css">
+  <link rel="stylesheet" href="./components/interactive-tokens.css">
+  <script src="./components/interactive-output.js" defer></script>
+  <script src="./components/output-components.js" defer></script>
+  <link rel="stylesheet" href="./components/document-cards.css">
+  <link rel="stylesheet" href="./theme.css">
+  <link rel="stylesheet" href="./components/operation-preview.css">
+  <script src="./theme.js" defer></script>
+  <script src="./speech.js" defer></script>
+  <script src="./message-actions.js" defer></script>
+  <link rel="stylesheet" href="./components/trigger.css">
+  <script src="./components/trigger-diagram.js" defer></script>
+  <script src="./components/trigger-visual.js" defer></script>
+  <script src="./components/trigger-context.js" defer></script>
+  <script type="module" src="./app.js"></script>
+  <title>Aletheia</title>
+</head>
+<body>
+  <section id="startup-error" class="login-screen" hidden>
+    <main class="login-content">
+      <a class="wordmark" href="./">Aletheia<span class="brand-symbol" aria-hidden="true">a</span></a>
+      <p id="startup-error-message" role="alert"></p>
+      <button id="startup-retry" class="primary login-submit" type="button">重试</button>
+    </main>
+  </section>
+  <section id="login" class="login-screen" hidden>
+    <main class="login-content">
+      <a class="wordmark" href="./">Aletheia<span class="brand-symbol" aria-hidden="true">a</span></a>
+      <h1>让想法，有个着落。</h1>
+      <form id="login-form">
+        <label for="password">访问密码</label>
+        <div class="password-field"><input id="password" type="password" autocomplete="current-password" required placeholder="输入密码" maxlength="256"><button id="show-password" class="text-button" type="button" aria-label="显示密码">显示</button></div>
+        <button class="primary login-submit" type="submit">开始对话 <span aria-hidden="true">→</span></button>
+        <p id="login-error" role="alert"></p>
+      </form>
+      <p class="remember-note">此设备会保持登录。</p>
+    </main>
+  </section>
+  <div id="app" class="app-shell" hidden>
+    <button id="scrim" class="scrim" aria-label="关闭对话列表" hidden tabindex="-1"></button>
+    <aside id="sidebar" class="conversation-sidebar" aria-label="对话列表">
+      <div class="sidebar-heading"><a class="wordmark" href="./">Aletheia</a><button id="close-sidebar" class="icon-button" type="button" aria-label="收起对话列表" aria-controls="sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16m6-11-3 3 3 3"/></svg></button></div>
+      <label class="history-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span class="sr-only">搜索对话</span><input id="history-search" type="search" placeholder="搜索对话" autocomplete="off" maxlength="500"></label>
+      <div class="history-heading">最近对话 <span id="history-count" hidden></span></div>
+      <nav id="history" aria-label="历史对话"></nav>
+      <p id="history-empty" class="history-empty" hidden>还没有对话</p>
+      <button id="history-more" class="quiet history-more" type="button" hidden>加载更多</button>
+      <div class="sidebar-bottom">
+        <button id="settings" class="profile" type="button" aria-label="个人档案" aria-haspopup="dialog" aria-controls="account-dialog"><span class="avatar" aria-hidden="true">我</span><span>个人档案</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+        <button id="install" class="quiet" type="button" hidden>添加到主屏幕</button>
+      </div>
+    </aside>
+    <main class="chat-main">
+      <nav class="topbar" aria-label="对话操作">
+        <button id="menu" class="icon-button nav-button" type="button" aria-label="打开对话列表" aria-controls="sidebar" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/></svg></button>
+        <div class="topbar-actions"><button id="new-mobile" class="icon-button" type="button" aria-label="开始新对话" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button id="open-browser" class="icon-button browser-indicator" type="button" aria-label="进入浏览器" aria-haspopup="dialog" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8M12 16v5"/></svg></button></div>
+      </nav>
+      <div id="connection-status" class="connection-status" role="status" aria-live="polite" aria-atomic="true" hidden><i id="connection-dot" aria-hidden="true"></i><span id="connection">正在连接</span><span id="toast" hidden></span><button id="dismiss-notice" type="button" aria-label="关闭提示" hidden>×</button></div>
+      <div id="timeline" class="timeline"><div class="timeline-content"><div id="welcome" class="welcome" hidden><span class="welcome-mark" aria-hidden="true">a</span><h1 id="welcome-greeting"></h1></div><button id="branch-origin" class="branch-origin" type="button" hidden>会话分支 · 查看原会话 ↗</button><button id="older" class="older" type="button" hidden>查看更早的消息</button><p id="messages-loading" class="history-empty" role="status" hidden>正在加载…</p><div id="messages" role="log" aria-label="对话消息"></div></div></div>
+      <div class="composer-area">
+        <section id="message-queue" class="message-queue" aria-label="等待消息" hidden>
+          <div class="queue-heading"><span id="queue-count" role="status" aria-live="polite"></span></div>
+          <div id="queue-list" class="queue-list" role="list"></div>
+        </section>
+        <form id="composer" class="composer">
+          <div class="composer-context"><div id="reply-quotes" class="composer-quotes" aria-label="待发送引用"></div><div id="attachments" class="attachments"></div></div><label class="sr-only" for="message">发送消息</label><textarea id="message" rows="1" placeholder="和 Aletheia 聊聊" maxlength="16000"></textarea>
+          <div class="composer-tools"><button id="add-attachment" class="icon-button attach-button" type="button" aria-label="添加附件" aria-haspopup="dialog" aria-describedby="upload-hint"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button id="model-picker" class="model-picker" type="button" aria-label="选择模型" aria-haspopup="dialog" aria-controls="model-dialog"><span id="model-name">选择模型</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3 3 3-3"/></svg></button><span class="composer-hint" aria-hidden="true">⇧ Enter 换行</span><button id="microphone" class="icon-button microphone-button" type="button" aria-label="开始语音输入" title="开始语音输入" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg></button><button id="send" class="send" type="submit" aria-label="发送消息">↑</button></div>
+        </form>
+      </div>
+    </main>
+  </div>
+  <p id="upload-hint" class="sr-only">支持图片、录音、Word、PPT、Excel、PDF、压缩包和源代码，每次最多 4 个附件。图片 10 MB，文档 128 MB，文本 8 MB。</p>
+  <input id="upload" type="file" accept="image/png,image/jpeg,image/webp,image/gif,.mp3,.m4a,.wav,.ogg,.aac,.amr,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.odt,.ods,.odp,.zip,.txt,.md,.csv,.tsv,.json,.xml,.html,.htm,.yaml,.yml,.py,.js,.mjs,.cjs,.ts,.tsx,.jsx,.css,.scss,.sql,.sh,.ps1,.bat,.cmd,.c,.cpp,.h,.hpp,.java,.go,.rs,.rb,.toml,.ini,.log,.ipynb,.tex,.r" multiple aria-label="选择附件" aria-describedby="upload-hint" hidden>
+  <dialog id="conversation-delete-dialog" class="sheet conversation-delete-sheet" aria-labelledby="conversation-delete-title" aria-describedby="conversation-delete-name"><div class="sheet-content">
+    <h2 id="conversation-delete-title">删除对话？</h2><p id="conversation-delete-name"></p><p id="conversation-delete-status" role="status" hidden></p>
+    <div class="conversation-delete-actions"><button id="conversation-delete-cancel" class="secondary" type="button" autofocus>取消</button><button id="conversation-delete-submit" class="primary" type="button">删除</button></div>
+  </div></dialog>
+  <dialog id="model-dialog" class="sheet model-sheet" aria-labelledby="model-title"><div class="sheet-content"><div class="sheet-handle" aria-hidden="true"></div><div class="dialog-heading"><h2 id="model-title">选择模型</h2><button id="close-model" class="icon-button" type="button" aria-label="关闭模型选择"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div><button id="set-default-model" class="secondary" type="button">设为默认</button><div id="model-library"></div><p id="model-library-status" class="sheet-note" role="status"></p><button id="retry-models" class="secondary" type="button" hidden>重新加载模型库</button></div></dialog>
+  <dialog id="settings-dialog" class="sheet" aria-labelledby="settings-title"><div class="sheet-content"><div class="sheet-handle" aria-hidden="true"></div><form id="password-form"><div class="dialog-heading"><h2 id="settings-title">修改密码</h2><button type="button" id="close-settings" class="icon-button" aria-label="关闭设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div><label for="current-password">当前密码</label><input id="current-password" type="password" autocomplete="current-password" required maxlength="256"><label for="new-password">新密码</label><input id="new-password" type="password" autocomplete="new-password" required minlength="12" maxlength="256" placeholder="至少 12 个字符"><p id="settings-error" role="status"></p><button type="submit" class="primary">更新密码</button></form></div></dialog>
+  <dialog id="account-dialog" class="sheet more-sheet" aria-labelledby="account-title"><div class="sheet-content">
+    <div class="dialog-heading"><h2 id="account-title">个人档案</h2><button id="close-account" class="icon-button" type="button" aria-label="关闭个人档案"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <button id="open-schedule" class="more-action" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 10h18"/></svg><span>日程与待办</span></button>
+    <button id="open-automation" class="more-action" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="5"/></svg><span>主动任务</span></button>
+    <button id="open-memory" class="more-action" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6a3 3 0 0 1 3 3v14a4 4 0 0 0-4-2H4zm9 3a3 3 0 0 1 3-3h4v15h-3a4 4 0 0 0-4 2"/></svg><span>我的记忆</span></button>
+    <button id="open-files" class="more-action" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2-3h9v16H3z"/></svg><span>文件与项目</span></button>
+    <button id="open-password" class="more-action" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg><span>修改密码</span></button>
+    <button id="open-usage" class="more-action" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M7 16v-5M12 16V5M17 16V8"/></svg><span>费用统计</span></button>
+    <button id="open-recovery" class="more-action" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10h10a6 6 0 0 1 0 12M4 10l5-5M4 10l5 5"/></svg><span>回退</span></button>
+    <p id="account-error" role="status" hidden></p>
+    <button id="logout" class="logout" type="button">退出此设备</button>
+  </div></dialog>
+  <dialog id="schedule-dialog" class="sheet more-sheet" aria-labelledby="schedule-title"><div class="sheet-content">
+    <div class="dialog-heading"><h2 id="schedule-title">日程与待办</h2><button id="close-schedule" class="icon-button" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div id="schedule-root"></div>
+  </div></dialog>
+  <dialog id="memory-dialog" class="sheet more-sheet" aria-labelledby="memory-title"><div class="sheet-content">
+    <div class="dialog-heading"><h2 id="memory-title">我的记忆</h2><button id="close-memory" class="icon-button" type="button" aria-label="关闭我的记忆"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div id="memory-documents"></div><p id="memory-status" role="status" hidden></p><button id="memory-retry" class="secondary" type="button" hidden>重新加载</button>
+  </div></dialog>
+  <dialog id="usage-dialog" class="sheet usage-sheet" aria-labelledby="usage-title"><div class="sheet-content">
+    <div class="dialog-heading"><h2 id="usage-title">费用统计</h2><div class="usage-heading-actions"><button id="usage-refresh" class="icon-button" type="button" aria-label="刷新统计"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg></button><button id="close-usage" class="icon-button" type="button" aria-label="关闭费用统计"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div></div>
+    <div class="usage-filter-bar"><div id="usage-periods" class="usage-segments" role="group" aria-label="统计时间"><button type="button" data-period="today" aria-pressed="false">今天</button><button type="button" data-period="7d" aria-pressed="false">近 7 天</button><button type="button" data-period="30d" aria-pressed="true">近 30 天</button><button type="button" data-period="all" aria-pressed="false">全部</button></div><select id="usage-model" aria-label="筛选模型"><option value="">全部模型</option></select></div>
+    <div class="usage-feedback" role="status"><p id="usage-status"></p><button id="usage-retry" type="button" hidden>重新加载</button></div>
+    <div id="usage-content" hidden>
+      <div class="usage-overview"><div><h3 id="usage-cost-label" class="usage-label">费用合计</h3><div id="usage-cost"></div></div><dl class="usage-overview-metrics"><div><dt>Token</dt><dd id="usage-tokens"></dd></div><div><dt>调用</dt><dd id="usage-requests"></dd></div><div><dt>缓存命中</dt><dd id="usage-cache"></dd></div></dl></div>
+      <dl id="usage-generations" class="usage-generation-metrics" hidden><div><dt>图像</dt><dd><span id="usage-images"></span><span class="usage-unit">张</span></dd></div><div><dt>视频</dt><dd><span id="usage-videos"></span><span class="usage-unit">条</span></dd></div><div><dt>视频时长</dt><dd><span id="usage-seconds"></span><span class="usage-unit">秒</span></dd></div></dl>
+      <section class="usage-trend" aria-label="统计趋势"><div class="usage-section-heading"><div id="usage-chart-metrics" class="usage-segments" role="group" aria-label="图表指标"><button type="button" data-metric="tokens" aria-pressed="true">Token</button><button type="button" data-metric="USD" aria-pressed="false">USD</button></div></div><div class="usage-trend-value"><strong id="usage-chart-value"></strong><span id="usage-chart-day"></span></div><div id="usage-chart" class="usage-chart" role="group" aria-label="每日统计"></div><div id="usage-chart-axis" class="usage-chart-axis" aria-hidden="true"></div><div id="usage-chart-legend" class="usage-chart-legend"><span>输入</span><span>输出</span></div></section>
+      <section class="usage-model-section" aria-labelledby="usage-model-title"><div class="usage-section-heading"><h3 id="usage-model-title">模型明细</h3></div><div id="usage-models"></div><p id="usage-empty" hidden>这段时间还没有用量</p></section>
+    </div>
+  </div></dialog>
+  <dialog id="automation-dialog" class="sheet automation-sheet" aria-labelledby="automation-title"><div class="sheet-content">
+    <div class="dialog-heading"><h2 id="automation-title">主动任务</h2><div class="automation-heading-actions"><button id="automation-refresh" class="icon-button" type="button" aria-label="刷新主动任务"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg></button><button id="close-automation" class="icon-button" type="button" aria-label="关闭主动任务"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div></div>
+    <div id="automation-toolbar" class="automation-toolbar"><div id="automation-tabs" class="usage-segments" role="tablist" aria-label="主动任务管理"><button id="automation-tab-tasks" type="button" role="tab" data-tab="tasks" aria-controls="automation-list" aria-selected="true" aria-pressed="true">任务</button><button id="automation-tab-triggers" type="button" role="tab" data-tab="triggers" aria-controls="automation-list" aria-selected="false" aria-pressed="false" tabindex="-1">触发</button></div><button id="automation-create" class="automation-create" type="button" hidden>新建触发点 <span aria-hidden="true">＋</span></button></div>
+    <div class="automation-feedback" role="status"><p id="automation-status"></p><button id="automation-retry" type="button" hidden>重新加载</button></div>
+    <div id="automation-list" role="tabpanel" aria-labelledby="automation-tab-tasks"></div>
+  </div></dialog>
+  <dialog id="automation-delete-dialog" class="sheet automation-delete-sheet" aria-labelledby="automation-delete-title"><div class="sheet-content">
+    <h2 id="automation-delete-title">删除任务？</h2><p id="automation-delete-status" role="status"></p>
+    <div class="automation-delete-actions"><button id="automation-delete-cancel" class="automation-button" type="button" autofocus>取消</button><button id="automation-delete-submit" class="automation-button danger" type="button">删除</button></div>
+  </div></dialog>
+  <dialog id="recovery-dialog" class="sheet recovery-sheet" aria-labelledby="recovery-title"><div class="sheet-content">
+    <div class="dialog-heading"><h2 id="recovery-title">服务回退</h2><div class="recovery-heading-actions"><button id="recovery-refresh" class="icon-button" type="button" aria-label="刷新可回退版本"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg></button><button id="close-recovery" class="icon-button" type="button" aria-label="关闭服务回退"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div></div>
+    <form id="recovery-login" hidden><label for="recovery-password">访问密码</label><input id="recovery-password" type="password" autocomplete="current-password" required maxlength="256"><button id="recovery-login-submit" class="recovery-control" type="submit">登录</button></form>
+    <div id="recovery-content" hidden><div class="recovery-current"><span>当前服务版本</span><strong id="recovery-current"></strong><time id="recovery-current-time"></time></div><h3 class="recovery-section-label">可回退版本</h3><div id="recovery-versions"></div></div>
+    <section id="recovery-confirm" class="recovery-confirm" aria-label="确认服务回退" hidden><strong>确认回退全部服务</strong><span id="recovery-target"></span><div class="recovery-confirm-actions"><button id="recovery-cancel" class="recovery-control" type="button">取消</button><button id="recovery-submit" class="recovery-control confirm" type="button">确认回退全部服务</button></div></section>
+    <div role="status"><p id="recovery-status"></p><button id="recovery-retry" class="recovery-control" type="button" hidden>重新加载</button><a id="recovery-return" class="recovery-return" href="./" hidden>返回对话 →</a></div>
+  </div></dialog>
+</body>
+</html>

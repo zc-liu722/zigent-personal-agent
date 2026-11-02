@@ -1,0 +1,4 @@
+# Runtime packages bind exact source bytes across Windows and Linux builds.
+ops/execution/** text eol=lf
+ops/file-runtime/** text eol=lf
+skills/** text eol=lf

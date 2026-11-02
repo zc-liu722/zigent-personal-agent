@@ -1,0 +1,13 @@
+[package]
+name = "codex-apply-patch"
+version = "0.80.0"
+edition = "2024"
+license = "Apache-2.0"
+[lib]
+name = "codex_apply_patch"
+[dependencies]
+anyhow = "1"
+similar = "2.7"
+thiserror = "2"
+tree-sitter = "0.25.10"
+tree-sitter-bash = "0.25"

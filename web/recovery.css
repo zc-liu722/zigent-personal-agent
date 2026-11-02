@@ -1,0 +1,43 @@
+.recovery-sheet { width: min(620px, calc(var(--app-width, 100vw) - 40px)); }
+.recovery-sheet .sheet-content { padding: 28px 32px 32px; }
+.recovery-heading-actions { display: flex; gap: 8px; }
+.recovery-current { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: baseline; gap: 8px 18px; padding: 8px 0 24px; border-bottom: 1px solid var(--line); }
+.recovery-current span { color: var(--muted); font-size: 13px; }
+.recovery-current strong { font-weight: 500; font-size: 17px; overflow-wrap: anywhere; }
+.recovery-current time { color: var(--muted); font-size: 12px; }
+.recovery-section-label { margin: 24px 0 10px; font-size: 13px; color: var(--muted); font-weight: 400; }
+.recovery-version { display: flex; justify-content: space-between; align-items: center; gap: 16px; min-height: 78px; width: 100%; padding: 16px 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
+.recovery-version-identity { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.recovery-version-identity strong { font-weight: 500; font-size: 16px; overflow-wrap: anywhere; }
+.recovery-version-identity time { font-size: 12px; color: var(--muted); }
+.recovery-version-action { font-size: 13px; color: var(--accent); white-space: nowrap; }
+.recovery-version:hover { background: var(--soft); }
+.recovery-confirm { margin-top: 22px; padding: 20px; border-radius: 14px; background: var(--soft); }
+.recovery-confirm strong { display: block; font-size: 16px; font-weight: 500; }
+#recovery-target { display: block; margin: 12px 0 20px; font-size: 13px; overflow-wrap: anywhere; }
+.recovery-confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.recovery-control { min-height: 42px; padding: 10px 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); color: var(--ink); font: inherit; font-size: 14px; cursor: pointer; }
+.recovery-control.confirm { background: var(--accent); border-color: transparent; color: var(--paper); }
+#recovery-status { margin: 20px 0 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
+#recovery-status:empty { display: none; }
+#recovery-retry { margin-top: 14px; }
+.recovery-return { display: inline-block; margin-top: 18px; color: var(--accent); font-size: 14px; text-decoration: none; }
+.recovery-empty { margin: 24px 0; color: var(--muted); font-size: 14px; }
+#recovery-login label { display: block; margin: 24px 0 10px; font-size: 14px; }
+#recovery-login input { box-sizing: border-box; width: 100%; min-height: 46px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font: inherit; font-size: 16px; margin: 0 0 16px; }
+.recovery-standalone { --paper: #faf9f5; --ink: #302e28; --muted: #73716b; --line: #e7e4db; --surface: #fffdf8; --soft: #f0ede5; --accent: #ad5739; margin: 0; background: var(--paper); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; color-scheme: light dark; }
+.recovery-standalone * { box-sizing: border-box; }
+.recovery-standalone [hidden] { display: none !important; }
+.recovery-standalone .recovery-shell { width: min(620px, calc(100% - 40px)); margin: 8vh auto; padding: 28px 0; }
+.recovery-standalone .dialog-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 28px; }
+.recovery-standalone h1 { font: 500 28px/1.4 Georgia, "Songti SC", serif; margin: 0; }
+.recovery-standalone .icon-button { display: grid; place-items: center; width: 38px; height: 38px; padding: 8px; border: 0; border-radius: 10px; background: var(--soft); color: var(--ink); cursor: pointer; }
+.recovery-standalone svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.recovery-standalone button:disabled { opacity: .5; cursor: wait; }
+.recovery-standalone :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (prefers-color-scheme: dark) { .recovery-standalone { --paper: #1d1c19; --ink: #ede8dd; --muted: #a49e91; --line: #3c3932; --surface: #24221e; --soft: #2d2a24; --accent: #cf8a6a; } }
+@media (max-width: 650px), (max-width: 1024px) and (pointer: coarse) {
+  .recovery-sheet .sheet-content { padding: 24px 20px calc(24px + env(safe-area-inset-bottom)); }
+  .recovery-sheet { width: calc(var(--app-width, 100vw) - 16px); left: calc(var(--app-left, 0px) + 8px); top: calc(var(--app-top, 0px) + var(--app-height, 100dvh) - 8px); }
+  .recovery-confirm { padding: 16px; }
+}

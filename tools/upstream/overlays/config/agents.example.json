@@ -1,0 +1,115 @@
+{
+  "runtime": {
+    "modelConnectTimeoutMs": 30000,
+    "modelFirstProgressTimeoutMs": 120000,
+    "modelProgressIdleTimeoutMs": 120000,
+    "imageGenerationTimeoutMs": 600000,
+    "modelCircuitBreakerMs": 600000,
+    "modelRetryAttempts": 2,
+    "modelNetworkRetryAttempts": 5,
+    "modelRetryDelayMs": 1000
+  },
+  "catalog": {
+    "suppliers": {
+      "deepseek-official": {
+        "apiKeyEnv": [
+          "DEEPSEEK_API_KEY",
+          "{ENV_PREFIX}_DEEPSEEK_API_KEY"
+        ],
+        "network": "direct",
+        "cost": {
+          "type": "official"
+        },
+        "endpoints": {
+          "anthropic-messages": "https://api.deepseek.com/anthropic"
+        }
+      }
+    },
+    "models": [
+      {
+        "name": "deepseek-v4.1flash-official",
+        "brand": "deepseek",
+        "supplier": "deepseek-official",
+        "apiModel": "deepseek-flash",
+        "protocol": "anthropic-messages",
+        "maxTokens": 64000,
+        "reasoningEffort": "high",
+        "reasoning": {
+          "levels": [
+            "none",
+            "low",
+            "high",
+            "max"
+          ],
+          "mode": "effort",
+          "sources": [
+            "https://api-docs.deepseek.com/guides/thinking_mode/"
+          ],
+          "checkedAt": "2026-10-20"
+        },
+        "capabilities": {
+          "imageInput": true,
+          "functionTools": true,
+          "hostedTools": [
+            "web_search"
+          ],
+          "reasoningReplay": true
+        },
+        "context": {
+          "windowTokens": 1048576,
+          "strategy": "summary",
+          "confidence": "verified",
+          "sources": [
+            "https://api-docs.deepseek.com/quick_start/pricing/",
+            "https://api-docs.deepseek.com/api/list-models/"
+          ],
+          "checkedAt": "2026-10-28",
+          "maxOutputTokens": 393216,
+          "discoveryUrl": "https://api.deepseek.com/models",
+          "triggerRatio": 0.75,
+          "note": "Anthropic 兼容协议不代表支持 Anthropic 原生压缩；按 DeepSeek 路由使用结构化摘要。",
+          "limitSource": "supplier"
+        }
+      }
+    ]
+  },
+  "agents": [
+    {
+      "id": "assistant",
+      "name": "Zigent",
+      "enabled": true,
+      "envPrefix": "ASSISTANT",
+      "channel": "web",
+      "web": {
+        "listenHost": "127.0.0.1",
+        "listenPort": 8790,
+        "publicUrl": "https://localhost:8443/assistant/",
+        "storage": "data/assistant/web.sqlite"
+      },
+      "modelOrder": [
+        "deepseek-v4.1flash-official"
+      ],
+      "allowedTools": [
+        "subagents",
+        "conversation_history",
+        "ask_user_question",
+        "present_output",
+        "long_term_memory",
+        "web_search",
+        "load_skill",
+        "update_skill",
+        "proactive_tasks",
+        "view_session_image"
+      ],
+      "toolSettings": {
+        "web_search": {
+          "search_context_size": "medium"
+        }
+      },
+      "storage": {
+        "sqlite": "data/assistant/sessions.sqlite",
+        "longTermMemory": "data/assistant/memory"
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "zigent-file-runtime",
+  "private": true,
+  "type": "module",
+  "version": "2026.10.28",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "pptxgenjs": "4.0.1"
+  }
+}

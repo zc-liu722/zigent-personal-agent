@@ -1,0 +1,106 @@
+/* Preserve the daylight stationery; night uses warm charcoal and softer ink. */
+:root, :root[data-theme="light"] { color-scheme: light; --canvas: var(--paper); --text: var(--ink); }
+/* Conversation cards share the page fill in both themes. */
+:root :is(.interaction, .interaction.visual-operation, .interaction-link, .output-card-open) { background: var(--paper); }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #1d1c19;
+  --surface: #282722;
+  --ink: #e7e3db;
+  --muted: #aba69a;
+  --line: #403e37;
+  --accent: #df9778;
+  --soft: #34322c;
+  --sidebar: #181815;
+  --night-link: #dfb18e;
+  --night-hover: #37352e;
+}
+:root[data-theme="dark"] .writing-block { --writing-paper: #292720; --writing-sheen: #ffffff04; --writing-shadow: #00000024; }
+:root[data-theme="dark"] :is(input, textarea)::placeholder { color: #a49e91; opacity: 1; }
+:root[data-theme="dark"] :is(.password-field, .conversation-sidebar, .history-search, .topbar-actions, .composer, .sheet, .sheet input, .interaction, .interaction-link, .code-block, .code-heading, .memory-diff-body, .document-workspace) { border-color: var(--line); }
+:root[data-theme="dark"] :is(.composer:focus-within, .password-field:focus-within, .history-search:focus-within) { border-color: #918572; }
+:root[data-theme="dark"] :is(.task-plan-schedule, .document-workspace-title) { color: var(--ink); }
+:root[data-theme="dark"] :is(.history-search svg, .composer textarea::placeholder, .composer-hint, .message-action, .activity, .activity summary::after, .code-copy, .model-option-price, .interaction-description, .interaction-status, .interaction-meta, .interaction-copy, .interaction-details summary, .interaction.output-fallback, .task-plan-timezone, .task-plan-delivery, .task-plan-details summary, .task-plan-instruction, .output-card-meta, .output-card-preview, .output-description, .document-workspace-feedback, .memory-diff-line, .memory-diff-line.omit, .memory-change-details summary) { color: var(--muted); }
+:root[data-theme="dark"] .interaction.settled .interaction-status { color: var(--muted); }
+:root[data-theme="dark"] :is(.message-text a, .activity a, .document-file-card, .interaction-control, .document-workspace-conflict button) { color: var(--night-link); }
+:root[data-theme="dark"] :is(.icon-button:hover, #history button:hover, .profile:hover, .attach-button:hover, .logout:hover, .interaction-control:hover, .interaction-copy:hover, .output-card-open:hover, .output-close:hover) { background: var(--night-hover); }
+:root[data-theme="dark"] :is(#history button.active, .avatar, .dialog-heading .icon-button, .sheet-handle) { background: var(--soft); }
+:root[data-theme="dark"] :is(.attach-button, .model-picker, .message-text :not(pre) > code, .message-text th, .code-block, .memory-diff-body) { background: var(--surface); }
+:root[data-theme="dark"] .code-block :is(.hljs-comment, .hljs-quote) { color: #a5b6a3; }
+:root[data-theme="dark"] .code-block :is(.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-meta) { color: #e3a4ef; }
+:root[data-theme="dark"] .code-block :is(.hljs-string, .hljs-regexp, .hljs-addition) { color: #8de0a5; }
+:root[data-theme="dark"] .code-block :is(.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-variable) { color: #ffb581; }
+:root[data-theme="dark"] .code-block :is(.hljs-title, .hljs-section, .hljs-built_in, .hljs-type) { color: #8ec5ff; }
+:root[data-theme="dark"] .code-block :is(.hljs-attr, .hljs-attribute, .hljs-property, .hljs-name, .hljs-tag) { color: #ffaaa4; }
+:root[data-theme="dark"] .code-block .hljs-deletion { color: #ff9999; }
+:root[data-theme="dark"] :is(.interaction, .output-card-open, .interaction-link, .message-context-menu) { background: var(--surface); }
+:root[data-theme="dark"] .primary { background: var(--ink); color: var(--paper); }
+:root[data-theme="dark"] .primary:hover { background: #fff9ef; }
+:root[data-theme="dark"] :is(.sheet .primary, .interaction-control.primary-action) { border-color: transparent; background: #cf8a6a; color: #211b16; }
+:root[data-theme="dark"] :is(.sheet .primary:hover, .interaction-control.primary-action:hover) { background: #df9d7f; }
+:root[data-theme="dark"] .send { color: #211b16; }
+:root[data-theme="dark"] .send:disabled { background: #48453d; color: #bdb5a5; }
+:root[data-theme="dark"] :is(#login-error, #settings-error, #account-error, .logout, .document-workspace-feedback) { color: #efa28d; }
+:root[data-theme="dark"] .microphone-button.is-recording { color: #f6ac9f; background: #52312a; }
+:root[data-theme="dark"] .attachment button { border-color: var(--surface); }
+:root[data-theme="dark"] .task-check { border-color: #918572; }
+:root[data-theme="dark"] .task-check.checked { background: #aba18a; border-color: #aba18a; color: #211b16; }
+:root[data-theme="dark"] .message-text blockquote { color: var(--muted); border-color: #625d50; }
+:root[data-theme="dark"] .activity summary::before { border-color: #777062; }
+:root[data-theme="dark"] .activity.running summary::before { border-color: #76533f; border-top-color: var(--accent); }
+:root[data-theme="dark"] :is(.connection-status[data-kind="error"], .document-workspace-conflict) { background: #3b3023; color: #e1b887; border-color: #655039; }
+:root[data-theme="dark"] :is(.interaction-feedback, .interaction.failed .interaction-status, .interaction.expired .interaction-status, .document-workspace-conflict p) { color: #e1b887; }
+:root[data-theme="dark"] .model-sheet .interaction-control:hover { background: var(--night-hover); }
+:root[data-theme="dark"] .model-sheet .interaction-control[aria-pressed="true"] { background: transparent; }
+:root[data-theme="dark"] .model-sheet .model-option.selected { background: #463329; }
+:root[data-theme="dark"] .model-sheet .interaction { background: transparent; }
+:root[data-theme="dark"] .interaction.settled { background: transparent; }
+:root[data-theme="dark"] .user-question { background: transparent; }
+:root[data-theme="dark"] .output-card-open:hover { border-color: #82715d; }
+:root[data-theme="dark"] .output-toolbar .output-text-button { background: var(--surface); border-color: var(--line); color: var(--night-link); }
+:root[data-theme="dark"] .output-toolbar .output-text-button:hover { background: var(--night-hover); border-color: #82715d; }
+:root[data-theme="dark"] .output-chart-grid { stroke: var(--line); }
+:root[data-theme="dark"] .output-table th { background: var(--surface); }
+:root[data-theme="dark"] .output-step.completed .output-step-mark { background: #2b382c; border-color: #526b50; color: #b0c8a4; }
+:root[data-theme="dark"] .output-step.active .output-step-mark { border-color: var(--accent); color: var(--accent); }
+:root[data-theme="dark"] .memory-diff-line.add { color: #e9b696; background: #423028; }
+:root[data-theme="dark"] .memory-diff-line.remove { color: #bab3a4; background: #302e28; }
+:root[data-theme="dark"] .message-context-menu { border-color: var(--line); }
+:root[data-theme="dark"] .message-context-item + .message-context-item { border-color: var(--line); }
+:root[data-theme="dark"] :is(.message-context-item:hover:not(:disabled), .message-context-item:focus-visible, .message-context-item:active:not(:disabled)) { background: var(--night-hover); }
+:root[data-theme="dark"] .message.assistant > .message-text ::selection { background: #695640; color: #fff4e2; }
+:root[data-theme="dark"] .reply-selection-toolbar { background: #34322cef; border-color: #625c4f; color: var(--ink); }
+:root[data-theme="dark"] .reply-selection-toolbar button + button { border-color: #625c4f; }
+:root[data-theme="dark"] :is(.reply-selection-toolbar button:hover, .reply-selection-toolbar button:active) { background: #4a453c; }
+:root[data-theme="dark"] .reply-selection-handle::before, :root[data-theme="dark"] .reply-selection-handle::after { background: #d9b38a; }
+:root[data-theme="dark"] .reply-selection-highlights { opacity: .27; }
+:root[data-theme="dark"] .reply-selection-highlights > span { background: rgb(217 179 138); }
+:root[data-theme="dark"] :is(.sheet, .output-sheet, .message-context-dialog, .message-selection-dialog)::backdrop { background: #08070480; }
+/* Floating navigation buttons and the composer share one translucent surface. */
+:root { --glass-fill: #ffffff66; --glass-edge: #ffffff99; --glass-highlight: #ffffffd9; --glass-shadow: #24231b14; --glass-sheen: #ffffff40; }
+:root[data-theme="dark"] { --glass-fill: #28272280; --glass-edge: #aaa49655; --glass-highlight: #ffffff38; --glass-shadow: #00000030; --glass-sheen: #ffffff12; }
+:root :is(.nav-button, .topbar-actions, .composer) {
+  border: 1px solid var(--glass-edge);
+  background: var(--surface);
+  box-shadow: inset 0 1px 1px var(--glass-highlight), inset 0 -1px 1px var(--glass-sheen), 0 4px 18px var(--glass-shadow);
+}
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  :root :is(.nav-button, .topbar-actions, .composer) {
+    background: linear-gradient(160deg, var(--glass-sheen), transparent 55%), var(--glass-fill);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+  }
+}
+/* iOS 26 samples backgrounds on fixed bottom controls into Safari's toolbar.
+   Keep the fixed wrapper transparent and put the glass on an absolute child. */
+@media (max-width: 650px), (max-width: 1024px) and (pointer: coarse) {
+  :root .composer { position: relative; isolation: isolate; background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: inset 0 1px 1px var(--glass-highlight), inset 0 -1px 1px var(--glass-sheen), 0 1px 4px var(--glass-shadow); }
+  :root .composer::before { content: ''; position: absolute; z-index: -1; inset: 0; border-radius: inherit; background: var(--surface); pointer-events: none; }
+  @supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+    :root .composer::before { background: linear-gradient(160deg, var(--glass-sheen), transparent 55%), var(--glass-fill); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+  }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-reduced-motion: reduce), (prefers-contrast: more) {
+  :root :is(.nav-button, .topbar-actions, .composer) { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :root .composer::before { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}

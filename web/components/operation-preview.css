@@ -1,0 +1,39 @@
+@import './operation-mindmap.css';
+@import './operation-calendar.css';
+@import './operation-todo.css';
+@import './operation-content.css';
+
+/* One shared card for the object, status, and actions. */
+.interaction.visual-operation { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.visual-operation .interaction-heading { margin-bottom: 8px; }
+.visual-operation h3 { font-size: 13px; color: var(--ink); font-weight: 700; }
+.visual-operation .memory-diff { margin-top: 0; }
+.visual-operation .memory-diff-label { margin-left: 0; }
+.visual-operation .memory-diff-change { padding: 0; }
+.visual-operation .memory-diff-change + .memory-diff-change { padding-top: 10px; border-top: 1px solid var(--line); }
+.interaction.visual-operation .interaction-footer { order: 0; margin-top: 6px; }
+.visual-operation .interaction-control { border-radius: 8px; }
+.visual-operation.completed .interaction-status::before { content: '✓'; margin-right: 6px; color: var(--muted); }
+.operation-preview-details { margin-top: 2px; }
+.operation-preview-details > summary { min-height: 44px; padding: 10px 0; color: var(--muted); font: 12px/1.8 var(--ui-font); cursor: pointer; }
+.operation-preview-original { padding: 8px 0; border-top: 1px solid var(--line); }
+.operation-preview-original .operation-content { padding: 0; }
+.visual-operation :is(.mindmap-controls button,.mindmap-tabs button,.content-preview-navigation button) { min-height: 44px; }
+.visual-operation .mindmap-controls button { min-width: 44px; }
+.visual-operation :is(.mindmap-outline summary,.calendar-preview-details summary) { min-height: 44px; }
+:root[data-theme="dark"] .interaction.visual-operation { background: var(--surface); }
+
+/* Todoist and built-in schedule share the same conversation card. */
+:is(.operation-view-todo, .operation-view-calendar, .operation-view-mindmap, .operation-view-document) .interaction-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+:is(.operation-view-todo, .operation-view-calendar, .operation-view-mindmap, .operation-view-document) .interaction-heading h3 { font-weight: 700; }
+.operation-view-calendar .interaction-heading :is(h3, .interaction-control) { font-size: 14px; }
+:is(.operation-view-calendar, .operation-view-document) .interaction-heading .interaction-actions .interaction-control { min-height: 28px; padding: 2px 12px; }
+:is(.operation-view-todo, .operation-view-calendar, .operation-view-mindmap, .operation-view-document) .interaction-heading .interaction-actions { margin-left: auto; }
+:is(.operation-view-todo, .operation-view-calendar, .operation-view-mindmap, .operation-view-document) .interaction-heading .interaction-control { min-height: 36px; padding: 6px 12px; }
+.interaction.visual-operation:is(.operation-view-todo, .operation-view-calendar, .operation-view-document) .memory-diff { margin: 0; }
+.interaction.visual-operation:is(.operation-view-todo, .operation-view-calendar, .operation-view-document) .memory-diff-change { padding: 10px 0; }
+:is(.operation-view-todo, .operation-view-calendar).completed .interaction-heading .interaction-status { display: grid; place-items: center; box-sizing: border-box; width: 21px; height: 21px; margin-left: auto; border: 1.5px solid #61866a; border-radius: 50%; color: #61866a; font-size: 14px; line-height: 1; }
+:root[data-theme="dark"] :is(.operation-view-todo, .operation-view-calendar).completed .interaction-heading .interaction-status { border-color: #91b99a; color: #91b99a; }
+:is(.operation-view-todo, .operation-view-calendar).completed .interaction-heading .interaction-status::before { content: none; }
+
+.operation-view-document .content-preview-document > h4 { margin: 0; font: 500 15px/1.6 var(--ui-font); overflow-wrap: anywhere; }

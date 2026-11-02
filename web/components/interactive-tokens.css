@@ -1,0 +1,29 @@
+/* Shared by the conversation surface and the isolated generated canvas. */
+:root{
+  --ui-bg:light-dark(#faf9f5,#1d1c19);--ui-surface:light-dark(#fff,#282722);
+  --ui-text:light-dark(#24231f,#e7e3db);--ui-muted:light-dark(#73716b,#aba69a);
+  --ui-line:light-dark(#e7e5de,#403e37);--ui-accent:light-dark(#b66b4e,#df9778);
+  --ui-track:light-dark(#938f84,#78746a);
+  --ui-font:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --ui-body:14px;--ui-small:12px;--ui-heading:18px;--ui-radius:8px;--ui-control-height:44px;
+  --ui-space-1:4px;--ui-space-2:8px;--ui-space-3:12px;--ui-space-4:16px;--ui-space-5:24px;--ui-space-6:32px;--ui-space-7:48px;
+}
+/* Concrete paints also work in Canvas APIs and older browsers. */
+:root[data-theme="light"]{
+  --ui-bg:#faf9f5;--ui-surface:#fff;--ui-text:#24231f;--ui-muted:#73716b;
+  --ui-line:#e7e5de;--ui-accent:#b66b4e;--ui-track:#938f84;
+}
+:root[data-theme="dark"]{
+  --ui-bg:#1d1c19;--ui-surface:#282722;--ui-text:#e7e3db;--ui-muted:#aba69a;
+  --ui-line:#403e37;--ui-accent:#df9778;--ui-track:#78746a;
+}
+:root{--ui-border:var(--ui-line)}
+.ui-stack{display:grid;gap:var(--ui-space-5)}.ui-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--ui-space-2) var(--ui-space-4);min-width:0}
+.ui-control{display:grid;gap:var(--ui-space-2)}.ui-label{font:500 13px/1.6 var(--ui-font);color:var(--ui-text)}
+.ui-note{font:400 var(--ui-small)/1.7 var(--ui-font);color:var(--ui-muted)}.ui-value{font:450 48px/1.15 var(--ui-font);letter-spacing:-.045em;font-variant-numeric:tabular-nums;color:var(--ui-text)}
+.ui-range{appearance:none;-webkit-appearance:none;width:100%;min-height:var(--ui-control-height);margin:0;padding:0;background:transparent;border:0;cursor:pointer}
+.ui-range::-webkit-slider-runnable-track{height:2px;border-radius:2px;background:var(--ui-track)}
+.ui-range::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;width:14px;height:14px;margin-top:-6px;border-radius:50%;border:0;background:var(--ui-text)}
+.ui-range::-moz-range-track{height:2px;border-radius:2px;background:var(--ui-track)}.ui-range::-moz-range-thumb{width:14px;height:14px;border-radius:50%;border:0;background:var(--ui-text)}
+.ui-text-action{min-height:40px;padding:0;border:0;background:transparent;color:var(--ui-muted);font:400 var(--ui-small)/1.5 var(--ui-font);cursor:pointer}
+.ui-text-action:hover{color:var(--ui-text)}

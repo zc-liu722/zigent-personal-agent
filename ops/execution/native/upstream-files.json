@@ -1,0 +1,139 @@
+{
+  "terminal": {
+    "tag": "rust-v0.166.0",
+    "commit": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+    "files": [
+      {
+        "upstream": "codex-rs/utils/pty/src/child.rs",
+        "upstreamSha256": "2f4a8c11061a544527b15b6c9af9aa71f280502f7682cbed939f78b02c9725bb",
+        "local": "terminal/src/child.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/child_command.rs",
+        "upstreamSha256": "7d3268737fa2fd37459d070271761c2d5b00e9dcbf3e14b17fd6e79158fcb532",
+        "local": "terminal/src/child_command.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/child_reaper.rs",
+        "upstreamSha256": "60cd52bdec3b94d6874a21ca736df63a674324e7ddfc97c16a894a806357fc05",
+        "local": "terminal/src/child_reaper.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/lib.rs",
+        "upstreamSha256": "8b460c75ca7dbca3a90b509fa65b2fd9abc9ab2196cf2add32ed6e832ad6b44b",
+        "local": "terminal/src/lib.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/linux_fds.rs",
+        "upstreamSha256": "4d380e0befbec4f0199877a8a822ad6c9e7ad26ffa351e365d66e5c349de7bc0",
+        "local": "terminal/src/linux_fds.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/pipe.rs",
+        "upstreamSha256": "c0ff489e08af4108f989abdf7fdb2b4542909ad6b29c6df53100c4dd69c43c29",
+        "local": "terminal/src/pipe.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/posix_child.rs",
+        "upstreamSha256": "ea0ee0b17537542126b0860135de96871b3011ff051dd3fa51a8417f0bfacbc0",
+        "local": "terminal/src/posix_child.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/process.rs",
+        "upstreamSha256": "410b96e2269bf71a04ea392bddfc013b8e128653a52fc6738b83b95826723ab0",
+        "local": "terminal/src/process.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/process_group.rs",
+        "upstreamSha256": "49c1fda018f8741ed55ce91d0d9b94779950223ab5e65236aa5429dcaaa9c089",
+        "local": "terminal/src/process_group.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/pty.rs",
+        "upstreamSha256": "11f1d8f7d108f3f4ad798d213de8b73f04b6c97329f43f68a09ec06442a52b19",
+        "local": "terminal/src/pty.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/spawn_helper.rs",
+        "upstreamSha256": "4e6c76118340772e6f25677e3904b86f1d722ab290653a3211bb8f85ee16a128",
+        "local": "terminal/src/spawn_helper.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/spawn_helper_main.rs",
+        "upstreamSha256": "da33360f6ad1bf9b51dca9d45faddac1138b58169e2656aa908a793855e8f659",
+        "local": "terminal/src/spawn_helper_main.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/unix_io.rs",
+        "upstreamSha256": "8c5c543f48aca6f231e99ca69d660612c0174a495e0e7fcc11619eacbcdccef8",
+        "local": "terminal/src/unix_io.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/windows_input.rs",
+        "upstreamSha256": "bac4b55825fe7becafb532c00d98188cd253a0ce07525f6474f8c76ad3681bad",
+        "local": "terminal/src/windows_input.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/win/mod.rs",
+        "upstreamSha256": "4f355ebc286683984158ff5b3cc3994c55e8b4eaea39775da905d91fd1fbbb14",
+        "local": "terminal/src/win/mod.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/win/conpty.rs",
+        "upstreamSha256": "5dac77dffdb5568c009d8b52254680f29574d8b4b9d41022aa9bfbac992763a9",
+        "local": "terminal/src/win/conpty.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/win/job.rs",
+        "upstreamSha256": "31ad5b41da45bd449c74abb590837d93ffa59312ad15e7b7e2a506fd084babd9",
+        "local": "terminal/src/win/job.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/win/procthreadattr.rs",
+        "upstreamSha256": "f143dff9ff9ce080e617e6bae2e1864e7f59b6f83569eae18fd7f02e997a1956",
+        "local": "terminal/src/win/procthreadattr.rs"
+      },
+      {
+        "upstream": "codex-rs/utils/pty/src/win/psuedocon.rs",
+        "upstreamSha256": "32c19b244e451a03c0da2e57a7911c69361d033c91d256ad22e61b2711487090",
+        "local": "terminal/src/win/psuedocon.rs"
+      }
+    ]
+  },
+  "patch": {
+    "tag": "rust-v0.80.0",
+    "commit": "f0679a6ab2563135e01cc922698cb54921a1719f",
+    "files": [
+      {
+        "upstream": "codex-rs/apply-patch/src/standalone_executable.rs",
+        "upstreamSha256": "25128da94ce95673f066993e586b1354326a215f235536ed0eb66f35f6c550d0",
+        "local": "patch/src/standalone_executable.rs"
+      },
+      {
+        "upstream": "codex-rs/apply-patch/src/lib.rs",
+        "upstreamSha256": "b35046f0cfe1327a893f4d7ab2c43d5c3905a83de2be7e1448d5dabb6870abd7",
+        "local": "patch/src/lib.rs"
+      },
+      {
+        "upstream": "codex-rs/apply-patch/src/invocation.rs",
+        "upstreamSha256": "1386140e24bbf17996dab3a87f857bee0257c6896c8edf31f8360b34712edd68",
+        "local": "patch/src/invocation.rs"
+      },
+      {
+        "upstream": "codex-rs/apply-patch/src/main.rs",
+        "upstreamSha256": "31de3e573a13c50c81af81d262a11fdb758540408cbab3fafb5e638c66a50117",
+        "local": "patch/src/main.rs"
+      },
+      {
+        "upstream": "codex-rs/apply-patch/src/seek_sequence.rs",
+        "upstreamSha256": "2f51a6be92aa953761b3f982d5d11c0e75ce8b4a5771bcbfb227f420c271f43d",
+        "local": "patch/src/seek_sequence.rs"
+      },
+      {
+        "upstream": "codex-rs/apply-patch/src/parser.rs",
+        "upstreamSha256": "8bc5adbfa0b79a82433f261ee3acb347897e87b46e1c560f7ba67d5efac2b865",
+        "local": "patch/src/parser.rs"
+      }
+    ]
+  }
+}

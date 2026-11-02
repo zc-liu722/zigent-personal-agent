@@ -1,0 +1,42 @@
+{
+  "pythonWindows": {
+    "version": "3.13.17",
+    "url": "https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip",
+    "sha256": "9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38",
+    "size": 11441267
+  },
+  "fonts": [
+    {
+      "name": "NotoSansSC.ttf",
+      "url": "https://raw.githubusercontent.com/google/fonts/ddf386ba1b9fbc6b2c818f1ddcd9148f54ced94b/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf",
+      "alternateUrls": [
+        "https://api.github.com/repos/google/fonts/contents/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf?ref=ddf386ba1b9fbc6b2c818f1ddcd9148f54ced94b"
+      ],
+      "sha256": "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da",
+      "size": 17772300,
+      "license": "OFL-1.1",
+      "sourceCommit": "ddf386ba1b9fbc6b2c818f1ddcd9148f54ced94b"
+    }
+  ],
+  "pip": {
+    "version": "26.2.2",
+    "url": "https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl",
+    "sha256": "fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70",
+    "filename": "pip-26.2.2-py3-none-any.whl"
+  },
+  "version": 1,
+  "node": {
+    "version": "24.13.1",
+    "url": "https://nodejs.org/dist/v24.13.1/node-v24.13.1-win-x64.zip",
+    "sha256": "fba577c4bb87df04d54dd87bbdaa5a2272f1f99a2acbf9152e1a91b8b5f0b279"
+  },
+  "libreoffice": {
+    "version": "26.8.2",
+    "url": "https://download.documentfoundation.org/libreoffice/stable/26.8.2/win/x86_64/LibreOffice_26.8.2_Win_x86-64.msi",
+    "sha256": "ff4b911403b67ee9e6249f820f9782c44bb32c94fdaa45b0da53a8e419e5307a",
+    "size": 375934976,
+    "license": "MPL-2.0",
+    "metadata": "https://download.documentfoundation.org/libreoffice/stable/26.8.2/win/x86_64/LibreOffice_26.8.2_Win_x86-64.msi.metalink"
+  },
+  "checkedAt": "2026-11-01"
+}

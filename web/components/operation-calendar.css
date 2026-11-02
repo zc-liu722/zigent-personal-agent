@@ -1,0 +1,30 @@
+/* Event summary only; the conversation owns the card and confirmation controls. */
+.calendar-preview { --calendar-accent: #ad5739; --calendar-faint: #f6f3ec; min-width: 0; color: var(--ink); }
+.calendar-preview-event { display: flex; align-items: stretch; gap: 12px; }
+.calendar-preview-datebadge { flex: 0 0 48px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 7px 5px 6px; color: var(--calendar-accent); background: var(--calendar-faint); border-radius: 9px; }
+.calendar-preview-datebadge span { font: 10px/1.5 var(--ui-font); }
+.calendar-preview-datebadge strong { font: 400 27px/1.1 var(--reading-font); }
+.calendar-preview-copy { min-width: 0; flex: 1; padding-top: 1px; }
+.calendar-preview .calendar-preview-eventtitle { margin: 0 0 5px; color: var(--ink); font: 700 15px/1.6 var(--ui-font); overflow-wrap: anywhere; }
+.calendar-preview-time, .calendar-preview-zone, .calendar-preview-location { margin: 3px 0 0; color: var(--muted); font: 12px/1.65 var(--ui-font); overflow-wrap: anywhere; }
+.calendar-preview-time { color: var(--ink); font-variant-numeric: tabular-nums; }
+.calendar-preview-zone { font-size: 10px; }
+.calendar-preview-location { display: flex; gap: 6px; align-items: baseline; }
+.calendar-preview-location::before { content: ''; flex: 0 0 5px; width: 5px; height: 5px; border: 1px solid var(--muted); border-radius: 50%; }
+.calendar-preview-details { margin-top: 4px; }
+.calendar-preview-details summary { min-height: 40px; padding-top: 10px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.calendar-preview-description, .calendar-preview-recurrence { margin: 5px 0 9px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); font: 12px/1.7 var(--ui-font); }
+.calendar-preview-repeatlabel { color: var(--muted); font-size: 11px; }
+.calendar-preview-recurrence { font-size: 11px; }
+.calendar-preview .is-deleting .calendar-preview-eventtitle { text-decoration: line-through; }
+:root[data-theme="dark"] .calendar-preview { --calendar-accent: #df9778; --calendar-faint: #302e27; }
+
+.calendar-preview-link { display: inline-flex; align-items: center; min-height: 36px; margin-top: 8px; padding: 5px 12px; border-radius: 9px; background: var(--soft); color: var(--accent); text-decoration: none; font-size: 13px; }
+.calendar-preview-link:hover { background: var(--line); }
+.calendar-preview-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+.calendar-preview-location::before { content: none; }
+.calendar-preview .calendar-preview-meta { display: flex; align-items: center; gap: 6px; color: var(--muted); font: 12px/1.65 var(--ui-font); }
+.calendar-preview-meta svg { flex: 0 0 14px; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.calendar-preview .calendar-preview-link { min-height: 0; margin: 0; padding: 0; border-radius: 0; background: transparent; font: inherit; }
+.calendar-preview-link:hover { text-decoration: underline; }

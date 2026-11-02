@@ -1,0 +1,27 @@
+.content-preview { min-width: 0; overflow: hidden; border: 0; background: transparent; }
+.content-preview-heading { display: flex; align-items: center; gap: 8px; padding: 0; }
+.content-preview-identity { min-width: 0; }
+.content-preview-table .content-preview-identity { width: 100%; text-align: center; }
+.content-preview-format { display: block; color: var(--muted); font-size: 10px; letter-spacing: .08em; overflow-wrap: anywhere; }
+.content-preview-heading h4 { margin: 3px 0 0; font: 500 15px/1.5 var(--ui-font); overflow-wrap: anywhere; }
+.content-preview-navigation { display: flex; gap: 4px; padding: 0 12px 10px; }
+.content-preview-navigation button { min-height: 40px; border: 0; border-radius: 7px; padding: 6px 12px; background: transparent; color: var(--muted); font-size: 12px; }
+.content-preview-navigation button[aria-pressed="true"] { background: var(--soft); color: var(--ink); }
+.content-document { border-top: 1px solid var(--line); }
+.content-document-page { padding: 10px 0; font: 14px/1.8 var(--reading-font); overflow-wrap: anywhere; }
+.content-document-page p { margin: 0 0 5px; white-space: pre-wrap; }
+.content-document-page :is(h2,h3,h4,h5,h6) { margin: 14px 0 8px; font-family: var(--ui-font); font-size: 16px; font-weight: 550; }
+.content-document-page > :first-child { margin-top: 0; }
+.content-document-page .content-document-bullet { position: relative; padding-left: 16px; }
+.content-document-bullet::before { content: '·'; position: absolute; left: 2px; color: var(--accent); }
+.content-document-empty { margin: 20px; color: var(--muted); font-size: 13px; }
+.content-preview-expand { min-height: 44px; padding: 8px 16px; border: 0; background: transparent; color: var(--accent); font-size: 12px; }
+.content-table-viewport { max-height: 330px; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); }
+.content-table { border-collapse: separate; border-spacing: 0; width: 100%; font: 12px/1.6 var(--ui-font); font-variant-numeric: tabular-nums; }
+.content-table th, .content-table td { min-width: 88px; max-width: 260px; padding: 8px 12px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
+.content-table th { min-width: 34px; color: var(--muted); background: var(--paper); font-size: 10px; font-weight: 400; text-align: center; }
+.content-table thead th { position: sticky; top: 0; z-index: 1; }
+.content-table tbody th { position: sticky; left: 0; }
+.content-table .changed-cell { box-shadow: inset 2px 0 var(--accent); background: var(--soft); }
+.content-table .omitted-cell { background: var(--paper); }
+.content-preview-details > summary { min-height: 44px; padding: 10px 0; color: var(--muted); font-size: 12px; cursor: pointer; }

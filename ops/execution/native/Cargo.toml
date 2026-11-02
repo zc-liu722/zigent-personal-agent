@@ -1,0 +1,6 @@
+[workspace]
+members = ["terminal", "runner", "patch"]
+resolver = "2"
+[profile.release]
+strip = true
+lto = "thin"

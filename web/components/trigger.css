@@ -1,0 +1,128 @@
+/* Shared by conversation proposals and the task panel. */
+.trigger-diagram { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; padding: 16px 0; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--soft); }
+.trigger-diagram:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.trigger-diagram > svg { display: block; width: var(--diagram-width); height: var(--diagram-height); max-width: none; margin: 0 auto; overflow: visible; font-family: inherit; fill: none; stroke: none; }
+.trigger-node > rect, .trigger-node > polygon, .trigger-node > path, .trigger-node > circle { fill: var(--paper); stroke: var(--line); stroke-width: 1.5; }
+.trigger-node.event > rect { stroke: var(--muted); }
+.trigger-node.action > rect { fill: var(--accent); stroke: var(--accent); }
+.trigger-node.action .trigger-node-label { fill: var(--paper); }
+.trigger-node.stop > rect { stroke-dasharray: 4 3; }
+.trigger-node-label { fill: var(--ink); font-size: 13px; font-weight: 500; }
+.trigger-node-detail { fill: var(--muted); font-size: 11px; }
+.trigger-operator-symbol { fill: var(--accent); font-size: 12px; font-weight: 600; }
+.trigger-edge { stroke: var(--muted); stroke-width: 1.25; stroke-linejoin: round; }
+.trigger-arrow { stroke: var(--muted); }
+.trigger-edge.cancel { stroke: var(--accent); stroke-dasharray: 4 4; }
+.trigger-edge-label { fill: var(--muted); font-size: 10px; paint-order: stroke; stroke: var(--soft); stroke-width: 4px; stroke-linejoin: round; }
+.trigger-stop-label { fill: var(--muted); font-size: 10px; }
+.trigger-visual { min-width: 0; margin: 0 0 16px; padding: 22px 24px; border: 1px solid var(--line); border-radius: 14px; background: var(--soft); color: var(--ink); overflow: hidden; }
+.operation-task { min-width: 0; }
+.operation-task-title { margin: 0 0 4px; color: var(--ink); font: 500 15px/1.6 var(--ui-font); overflow-wrap: anywhere; }
+.operation-task .trigger-visual { margin-bottom: 8px; }
+.operation-task .trigger-visual-logic { margin-bottom: 0; }
+.operation-task .trigger-visual-logic > summary { min-height: 40px; padding: 10px 0; }
+.operation-task-instruction { margin: 14px 0 6px; }
+.operation-task-diff { margin-top: 12px; }
+.operation-task-delivery { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.operation-task .trigger-diagram { max-width: 100%; }
+.trigger-visual-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
+.trigger-visual-identity { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.trigger-visual-title { font: 400 25px/1.4 var(--reading-font); overflow-wrap: anywhere; }
+.trigger-visual-subtitle { font-size: 12px; line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; }
+.trigger-visual-kind { flex: none; color: var(--muted); font-size: 11px; line-height: 1.8; }
+.trigger-visual-facts { display: flex; flex-wrap: wrap; gap: 7px 16px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.6; }
+.trigger-visual-facts > span { overflow-wrap: anywhere; }
+.trigger-visual-timeline { position: relative; margin: 46px 0 20px; }
+.trigger-visual-track { position: relative; height: 5px; border-radius: 10px; background: var(--line); }
+.trigger-visual-marker { position: absolute; left: var(--position); top: -5px; width: 3px; height: 15px; border-radius: 3px; background: var(--accent); transform: translateX(-50%); }
+.trigger-visual-marker:not(.window)::after { content: ''; position: absolute; width: 9px; height: 9px; top: 3px; left: -3px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--soft); }
+.trigger-visual-marker.window { width: calc(100% - var(--position)); height: 5px; top: 0; transform: none; }
+.trigger-visual-time-label { position: absolute; left: var(--position); top: -29px; transform: translateX(-50%); color: var(--accent); font-size: 13px; font-variant-numeric: tabular-nums; }
+.trigger-visual-ticks { display: flex; justify-content: space-between; padding-top: 10px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.trigger-visual-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; margin-top: 22px; }
+.trigger-visual-week > span { text-align: center; border: 1px solid var(--line); border-radius: 7px; padding: 7px 0; font-size: 12px; color: var(--muted); }
+.trigger-visual-week > .selected { color: var(--accent); border-color: var(--accent); background: var(--paper); }
+.trigger-visual-geofence { display: block; width: 100%; height: auto; margin: 12px 0; fill: none; stroke: none; }
+.trigger-visual-grid { stroke: var(--line); stroke-width: 1; }
+.trigger-visual-boundary { fill: var(--accent); fill-opacity: .08; stroke: var(--accent); stroke-width: 1.8; stroke-dasharray: 5 5; }
+.trigger-visual-route { stroke: var(--accent); stroke-width: 2.4; fill: none; }
+.trigger-visual-radius { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 4; }
+.trigger-visual-origin { fill: var(--paper); stroke: var(--accent); stroke-width: 2; }
+.trigger-visual-center { fill: var(--accent); }
+.trigger-visual-sequence { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 26px 0 22px; }
+.trigger-visual-stage { position: relative; display: flex; flex-direction: column; align-items: center; gap: 9px; min-width: 0; text-align: center; font-size: 12px; }
+.trigger-visual-stage + .trigger-visual-stage::before { content: '→'; position: absolute; left: -15px; top: 8px; color: var(--muted); }
+.trigger-visual-stage > svg { width: 34px; height: 34px; margin-bottom: 5px; stroke: var(--accent); stroke-width: 1.4; fill: none; }
+.trigger-visual-stage > strong { font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; }
+.trigger-visual-stage > span { color: var(--muted); font-size: 11px; }
+.trigger-visual-logic { margin-bottom: 18px; }
+.trigger-visual-logic > summary { width: fit-content; padding: 2px 0 12px; cursor: pointer; color: var(--muted); font-size: 12px; }
+.trigger-visual-health_change .trigger-visual-timeline { margin-top: 24px; }
+.trigger-context-button { padding: 5px 7px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; line-height: 1.5; }
+.trigger-context-button:hover { color: var(--ink); background: var(--paper); }
+.trigger-context-toggle { flex: none; margin: -3px -7px 0 0; color: var(--accent); }
+.trigger-context-status { font-size: 12px; line-height: 1.6; color: var(--muted); }
+.trigger-context-map { position: relative; min-height: 100px; display: flex; align-items: center; justify-content: center; gap: 8px; margin: 18px -24px 16px; background: var(--soft); }
+.trigger-map-open { display: block; width: 100%; margin: 0; padding: 0; border: 0; background: transparent; }
+.trigger-map-svg { display: block; width: 100%; height: auto; overflow: hidden; fill: none; stroke: none; font-family: var(--ui-font); }
+.trigger-map-building { fill: #e5e1d7; stroke: var(--line); stroke-width: .7; }
+.trigger-map-green { fill: #e0e3d7; }
+.trigger-map-water { fill: #e0e7e5; }
+.trigger-map-major, .trigger-map-road, .trigger-map-path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.trigger-map-major { stroke: var(--paper); stroke-width: 13; }
+.trigger-map-road { stroke: var(--paper); stroke-width: 7; }
+.trigger-map-path { stroke: #dad7cd; stroke-width: 2; }
+.trigger-map-roadname { fill: var(--muted); paint-order: stroke; stroke: var(--soft); stroke-width: 5; stroke-linejoin: round; }
+.trigger-map-boundary { fill: var(--accent); fill-opacity: .08; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
+.trigger-map-radius { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.trigger-map-direction { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.trigger-map-pin { fill: var(--accent); }
+.trigger-map-pin-halo { fill: var(--paper); fill-opacity: .9; }
+.trigger-map-scale path { stroke: var(--muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.trigger-map-scale text { fill: var(--muted); paint-order: stroke; stroke: var(--soft); stroke-width: 4; }
+.trigger-map-radius-label { position: absolute; top: 10px; right: 12px; padding: 4px 7px; border-radius: 5px; background: var(--paper); color: var(--accent); pointer-events: none; font-size: 11px; }
+.trigger-map-attribution { position: absolute; bottom: 6px; right: 8px; background: var(--soft); padding: 2px 4px; color: var(--muted); text-decoration: none; font-size: 10px; line-height: 1.4; }
+.trigger-map-attribution a { color: inherit; text-decoration: none; }
+.trigger-map-dialog { width: min(960px, calc(var(--app-width, 100vw) - 24px)); max-width: none; max-height: calc(var(--app-height, 100dvh) - 24px); overflow: auto; margin: auto; padding: 0; border: 1px solid var(--line); border-radius: 16px; background: var(--paper); color: var(--ink); }
+.trigger-map-dialog::backdrop { background: #17161180; }
+.trigger-map-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px; }
+.trigger-map-dialog-heading strong { font: 400 22px/1.4 var(--reading-font); overflow-wrap: anywhere; }
+.trigger-map-expanded { position: relative; background: var(--soft); }
+.trigger-map-expanded .trigger-map-svg { touch-action: none; }
+.trigger-map-tools { display: flex; justify-content: center; gap: 12px; padding: 12px 16px; }
+.trigger-map-tools button { min-width: 44px; min-height: 44px; border: 1px solid var(--line); }
+.trigger-context-calendar { margin-top: 20px; }
+.trigger-context-calendar[hidden], .trigger-visual-timeline[hidden] { display: none; }
+.trigger-calendar-heading { font-size: 11px; color: var(--muted); margin-bottom: 16px; overflow-wrap: anywhere; }
+.trigger-calendar-chart { position: relative; }
+.trigger-calendar-ticks { display: flex; justify-content: space-between; border-top: 3px solid var(--line); padding: 8px 0 11px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.trigger-calendar-marker { position: absolute; z-index: 1; left: 50%; top: -4px; bottom: 0; border-left: 1px solid var(--accent); pointer-events: none; }
+.trigger-calendar-ticks > span { z-index: 2; background: var(--soft); padding: 0 3px; }
+.trigger-calendar-marker::before { content: ''; position: absolute; left: -4px; top: -1px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.trigger-calendar-lane { position: relative; height: 38px; }
+.trigger-calendar-event { position: absolute; z-index: 2; height: 30px; min-width: 2px; border: 0; border-radius: 5px; padding: 0 7px; background: var(--line); color: var(--ink); font: inherit; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.trigger-calendar-detail { margin-top: 8px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.trigger-calendar-detail:empty, .trigger-calendar-extra:empty { display: none; }
+.trigger-calendar-extra { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 8px; }
+.trigger-calendar-extra > button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trigger-calendar-overflow { display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; }
+:root[data-theme="dark"] .trigger-map-building { fill: #39362e; }
+:root[data-theme="dark"] .trigger-map-green { fill: #30392e; }
+:root[data-theme="dark"] .trigger-map-water { fill: #2b3638; }
+:root[data-theme="dark"] .trigger-map-major, :root[data-theme="dark"] .trigger-map-road { stroke: #4b473e; }
+:root[data-theme="dark"] .trigger-map-path { stroke: #403e36; }
+@media (pointer: coarse) {
+  .trigger-context-button { min-height: 40px; }
+  .trigger-calendar-event { height: 40px; }
+  .trigger-calendar-lane { height: 46px; }
+}
+@media (max-width: 500px) {
+  .trigger-visual { padding: 18px 16px; }
+  .trigger-visual-title { font-size: 22px; }
+  .trigger-visual-kind { font-size: 10px; }
+  .trigger-context-map { margin-inline: -16px; }
+  .trigger-visual-sequence { gap: 14px; }
+  .trigger-visual-stage + .trigger-visual-stage::before { left: -12px; }
+}
+.operation-task-schedule { margin: 0; color: var(--muted); font: 13px/1.6 var(--ui-font); overflow-wrap: anywhere; }
+.operation-task-details > summary { min-height: 44px; padding: 10px 0; color: var(--muted); font-size: 12px; cursor: pointer; }

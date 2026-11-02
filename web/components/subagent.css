@@ -1,0 +1,64 @@
+.subagent-team { margin: 12px 0 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); overflow: hidden; }
+.subagent-heading { display: flex; align-items: center; gap: 8px; padding: 11px 16px 6px; color: var(--ink); font-size: 13px; font-weight: 600; letter-spacing: .01em; }
+.subagent-count { display: grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: 11px; font-weight: 500; }
+/* Character grid: color is identity, face and motion are status. */
+.subagent-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 4px 8px 12px; }
+.subagent-cell { display: flex; flex-direction: column; align-items: center; gap: 7px; min-width: 0; padding: 10px 6px; border: 0; border-radius: 12px; background: transparent; font: inherit; cursor: pointer; transition: background .15s ease, transform .15s ease; }
+.subagent-cell:hover { background: var(--soft); }
+.subagent-cell:active { transform: scale(.95); }
+.subagent-cell:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+.subagent-avatar { display: block; width: 56px; height: 56px; }
+.subagent-avatar svg { display: block; width: 100%; height: 100%; stroke: none; }
+.mochi-body { transform-box: fill-box; transform-origin: center bottom; }
+.mochi-eyes-happy, .mochi-eyes-worried, .mochi-eyes-shut { display: none; }
+.subagent-team [data-status="completed"] .mochi-eyes-open,
+.subagent-team [data-status="failed"] .mochi-eyes-open,
+.subagent-team [data-status="cancelled"] .mochi-eyes-open { display: none; }
+.subagent-team [data-status="completed"] .mochi-eyes-happy,
+.subagent-team [data-status="failed"] .mochi-eyes-worried,
+.subagent-team [data-status="cancelled"] .mochi-eyes-shut { display: block; }
+.subagent-cell[data-status="running"] .mochi-body { animation: mochi-breathe 2.6s ease-in-out infinite; }
+.subagent-cell[data-status="running"] .mochi-eyes-open { transform-box: fill-box; transform-origin: center; animation: mochi-blink 5.2s ease-in-out infinite; }
+.subagent-cell[data-status="completed"] .mochi-body { animation: mochi-settle .55s ease-out; }
+.subagent-cell[data-status="failed"] .mochi-body { animation: mochi-shake .4s ease-in-out 2; }
+.subagent-team [data-status="cancelled"] .subagent-avatar { opacity: .55; }
+@keyframes mochi-breathe { 0%, 100% { transform: scale(1, 1); } 50% { transform: scale(1.035, .965); } }
+@keyframes mochi-blink { 0%, 95%, 100% { transform: scaleY(1); } 97% { transform: scaleY(.1); } }
+@keyframes mochi-settle { 0% { transform: scale(1.12, .88); } 45% { transform: scale(.94, 1.06); } 75% { transform: scale(1.025, .975); } 100% { transform: none; } }
+@keyframes mochi-shake { 0%, 100% { transform: translateX(0); } 30% { transform: translateX(-1.5px); } 65% { transform: translateX(1.5px); } }
+.subagent-name { max-width: 100%; color: var(--ink); font-size: 12px; font-weight: 500; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-cell-meta { max-width: 100%; color: var(--muted); font-size: 10.5px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-cell[data-status="failed"] .subagent-cell-meta { color: var(--accent); }
+/* Workspace: tapping a character switches into that child's view. */
+.subagent-detail { animation: subagent-detail-in .22s ease; }
+@keyframes subagent-detail-in { from { opacity: 0; transform: translateX(10px); } }
+.subagent-detail-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.subagent-back { display: grid; place-items: center; flex: none; width: 30px; height: 30px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); cursor: pointer; transition: background .15s ease, color .15s ease; }
+.subagent-back:hover { background: var(--soft); color: var(--ink); }
+.subagent-back svg { width: 16px; height: 16px; }
+.subagent-detail .subagent-avatar { flex: none; width: 32px; height: 32px; }
+.subagent-detail-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.subagent-detail-title { color: var(--ink); font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.subagent-profession { flex: none; padding: 1px 7px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+.subagent-detail-state { flex: none; margin-left: auto; color: var(--muted); font-size: 11px; }
+.subagent-detail[data-status="failed"] .subagent-detail-state { color: var(--accent); }
+.subagent-detail-body { min-width: 0; padding: 4px 16px 14px; }
+.subagent-detail-body .subagent-meta { margin: 8px 0 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.subagent-assignment { margin: 6px 0; }
+.subagent-assignment > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.subagent-assignment > p { margin: 6px 0 8px; padding-left: 10px; border-left: 2px solid var(--line); color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.7; }
+.subagent-detail-body > .activity-process { margin: 6px 0; }
+.subagent-result-label { margin: 12px 0 4px; color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: .06em; }
+.subagent-result { min-width: 0; color: var(--ink); font: 14px/1.8 var(--reading-font); overflow-wrap: anywhere; }
+.subagent-result > :first-child, .subagent-result > div > :first-child { margin-top: 0; }
+.subagent-result > :last-child, .subagent-result > div > :last-child { margin-bottom: 0; }
+.subagent-result pre, .subagent-result table { max-width: 100%; overflow-x: auto; }
+.subagent-detail-body .subagent-empty { margin: 8px 0 2px; color: var(--muted); font-size: 12px; }
+.subagent-detail-body .activity-failure { margin: 10px 0 2px; font-size: 12px; }
+/* Keep the same pastel character under both themes. */
+:root[data-theme="dark"] .subagent-avatar svg { opacity: .88; }
+:root[data-theme="dark"] .mochi-shadow { fill: #0003; }
+@media (prefers-reduced-motion: reduce) {
+  .subagent-cell .mochi-body, .subagent-cell .mochi-eyes-open, .subagent-detail { animation: none; }
+}
+@media (max-width: 480px) { .subagent-heading { padding-inline: 12px; } .subagent-detail-body { padding-inline: 12px; } }

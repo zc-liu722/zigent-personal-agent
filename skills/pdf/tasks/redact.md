@@ -1,0 +1,9 @@
+# Actual redaction
+
+Use `pdf.redact(source,destination,{"regions":[...]})` from a Python program, or implement the same workflow with PyMuPDF. A region has a one-based `page` and either `rect=[x0,y0,x1,y1]` in unrotated top-left PDF points or exact `text` to locate. Text regions can specify `expectedMatches` to detect unintended duplicates. Inspect selected pages first; scanned text needs a verified rectangle.
+
+The maintained PyMuPDF implementation applies redactions to remove text, intersecting vector graphics and overlapping image pixels. It then scrubs alternate private channels (metadata/XML, attachments, hidden text, links, annotations and form widgets/default values) and performs a full garbage-collected, nonincremental save. This sanitation intentionally removes those auxiliary features; retain the immutable original for provenance. Cropping, overlays and incremental saves are not accepted substitutes.
+
+The result is reopened to verify the redacted regions have no extractable text and embedded files are absent. Read exact `processedPages`, region count and checks. Review every redacted page image and check extraction/search for the sensitive items; verify surrounding content remains usable. Engine content removal plus region extraction is stronger evidence than black pixels alone, but is not a claim that unrelated sensitive content elsewhere was discovered. Select every required region. Do not quote private values in activity messages or the final reply.
+
+Generated code can `import pdf` and call `redact(source,destination,spec)` in the maintained execution image, or use PyMuPDF directly. Apply the same content-removal/save/reopen/visual checks. For image scans, verify the redacted image pixels and all alternate embedded data paths; never treat absent OCR text as proof that image content was removed.

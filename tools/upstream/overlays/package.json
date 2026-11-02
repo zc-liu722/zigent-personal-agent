@@ -1,0 +1,56 @@
+{
+  "name": "zigent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "dev:components": "tsx ops/component-studio/server.mjs",
+    "start": "tsx src/index.ts",
+    "start:location": "tsx src/location-receiver.ts",
+    "location:export": "tsx src/location-export.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "build:highlight": "esbuild node_modules/highlight.js/lib/common.js --bundle --minify --format=iife --global-name=ZigentHighlight --outfile=web/vendor/highlight/highlight.min.js",
+    "audit:export": "tsx src/audit/export.ts",
+    "xmind:auth": "tsx src/xmind-auth.ts",
+    "start:prod": "node dist/index.js",
+    "start:location:prod": "node dist/location-receiver.js",
+    "location:export:prod": "node dist/location-export.js",
+    "check": "tsc --noEmit",
+    "setup:password": "node tools/setup-password.mjs",
+    "build:web": "node tools/build-web.mjs",
+    "upstream:export": "python3 tools/upstream/export.py"
+  },
+  "dependencies": {
+    "@larksuite/cli": "1.0.83",
+    "@larksuiteoapi/node-sdk": "^1.54.0",
+    "@mapbox/vector-tile": "3.0.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@napi-rs/canvas": "1.0.13",
+    "@volcengine/tos-sdk": "2.9.1",
+    "dotenv": "^16.6.1",
+    "fflate": "0.8.3",
+    "https-proxy-agent": "5.0.1",
+    "lunar-typescript": "1.8.6",
+    "mammoth": "1.13.0",
+    "pbf": "5.1.2",
+    "pdfjs-dist": "6.4.299",
+    "playwright-core": "1.64.1",
+    "sharp": "0.35.5",
+    "undici": "^7.29.0",
+    "ws": "^8.22.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "@types/ws": "^8.18.1",
+    "esbuild": "0.28.1",
+    "highlight.js": "^11.11.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "description": "Self-hosted web agent runtime; private open-source preparation snapshot."
+}

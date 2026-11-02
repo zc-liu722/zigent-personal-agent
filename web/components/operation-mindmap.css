@@ -1,0 +1,44 @@
+/* A quiet drawing sheet: the topology carries the information. */
+.mindmap-preview { --map-sheet:#f7f5ed; --map-dot:#c9c3b547; --map-root:#685745; --map-root-ink:#fffaf1; --map-fill:#fffcf6; margin:10px 0 2px; overflow:hidden; border:1px solid var(--line); border-radius:14px; background:var(--map-sheet); color:var(--ink); }
+.mindmap-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:2px 10px; min-height:46px; padding:3px 8px 3px 14px; border-bottom:1px solid var(--line); background:var(--map-fill); }
+.mindmap-caption { color:var(--muted); font:500 11px/1.4 var(--ui-font); letter-spacing:.04em; }
+.mindmap-controls { display:flex; align-items:center; gap:0; margin-left:auto; }
+.mindmap-controls button,.mindmap-tabs button { display:grid; place-items:center; min-height:38px; min-width:36px; padding:4px 8px; border:0; border-radius:7px; background:transparent; color:var(--ink); font:400 14px/1 var(--ui-font); cursor:pointer; touch-action:manipulation; }
+.mindmap-controls button:hover,.mindmap-tabs button:hover { background:var(--soft); }
+.mindmap-controls button:disabled { opacity:.3; cursor:default; }
+.mindmap-controls button:focus-visible,.mindmap-tabs button:focus-visible,.mindmap-viewport:focus-visible,.mindmap-outline summary:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
+.mindmap-percent { width:36px; color:var(--muted); text-align:center; font:400 10px/1 var(--ui-font); font-variant-numeric:tabular-nums; }
+.mindmap-controls .mindmap-fit { min-width:42px; margin-left:4px; font-size:11px; }
+.mindmap-viewport { min-height:190px; max-height:min(440px,60svh); overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; }
+.mindmap-canvas { display:grid; align-items:center; min-height:190px; margin-inline:auto; }
+.mindmap-canvas svg { display:block; max-width:none; overflow:visible; font-family:var(--ui-font); }
+.mindmap-topic rect { fill:var(--map-fill); stroke:var(--branch-color); stroke-width:1.2; }
+.mindmap-topic text { stroke:none; fill:var(--ink); font-size:13px; font-weight:400; }
+.mindmap-root rect { fill:var(--map-root); stroke:var(--map-root); }
+.mindmap-root text { fill:var(--map-root-ink); font-size:14px; font-weight:500; }
+.mindmap-edge { stroke:var(--branch-color); stroke-width:1.8; opacity:.85; }
+.mindmap-color-0 { --branch-color:#ad765b; }
+.mindmap-color-1 { --branch-color:#7e927a; }
+.mindmap-color-2 { --branch-color:#8295a3; }
+.mindmap-color-3 { --branch-color:#ad9664; }
+.mindmap-color-4 { --branch-color:#99869a; }
+.mindmap-tabs { display:flex; align-items:center; gap:2px; }
+.mindmap-tabs button { min-width:44px; min-height:34px; font-size:11px; color:var(--muted); }
+.mindmap-tabs button[aria-pressed="true"] { background:var(--soft); color:var(--ink); }
+.mindmap-outline { border-top:1px solid var(--line); background:var(--map-fill); }
+.mindmap-outline summary { min-height:40px; padding:10px 14px; color:var(--muted); font:400 11px/1.7 var(--ui-font); cursor:pointer; }
+.mindmap-outline-body { padding:0 16px 14px; font:400 13px/1.7 var(--ui-font); overflow-wrap:anywhere; }
+.mindmap-outline-body strong { font-weight:500; }
+.mindmap-outline-list,.mindmap-outline-list ul { margin:5px 0 0; padding-left:20px; }
+.mindmap-outline-list li { margin:3px 0; white-space:pre-wrap; }
+.mindmap-sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+:root[data-theme="dark"] .mindmap-preview { --map-sheet:#25251f; --map-dot:#9e958534; --map-root:#b79675; --map-root-ink:#241f18; --map-fill:#2e2c26; }
+:root[data-theme="dark"] .mindmap-color-0 { --branch-color:#c7977c; }
+:root[data-theme="dark"] .mindmap-color-1 { --branch-color:#99ad90; }
+:root[data-theme="dark"] .mindmap-color-2 { --branch-color:#8fabbc; }
+:root[data-theme="dark"] .mindmap-color-3 { --branch-color:#c5ad7b; }
+:root[data-theme="dark"] .mindmap-color-4 { --branch-color:#b5a1b6; }
+@media (max-width:450px) { .mindmap-toolbar { padding-left:9px; gap:1px 3px; } .mindmap-caption { font-size:10px; } .mindmap-controls button { min-width:32px; } .mindmap-tabs button { padding-inline:7px; } }
+.mindmap-summary-title { margin: 0; font: 500 15px/1.6 var(--ui-font); overflow-wrap: anywhere; }
+.mindmap-preview-details > summary { min-height: 44px; padding: 10px 0; color: var(--muted); font-size: 12px; cursor: pointer; }
+.mindmap-preview-details .mindmap-preview { margin: 0; border: 0; border-radius: 0; }

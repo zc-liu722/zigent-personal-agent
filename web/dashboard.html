@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light">
+  <meta name="robots" content="noindex,nofollow"><title>Zigent · 服务监控</title>
+  <link rel="stylesheet" href="./dashboard.css"><script type="module" src="./dashboard.js"></script>
+</head>
+<body>
+  <main id="login" class="login" hidden>
+    <div class="login-brand"><span class="brand-mark" aria-hidden="true">z</span><span>ZIGENT<span class="brand-sub">SERVER CONSOLE</span></span></div>
+    <form id="login-form"><span class="eyebrow">CONTROL ROOM / 01</span><h1>服务监控</h1><label for="password">Dashboard 管理密码</label><input id="password" type="password" autocomplete="current-password" maxlength="256" required><button class="primary" type="submit">登录控制台 <span aria-hidden="true">↗</span></button><p id="login-error" role="alert"></p></form>
+    <span class="login-foot">ZIGENT / OBSERVABILITY</span>
+  </main>
+  <div id="app" class="shell" hidden>
+    <aside class="sidebar">
+      <a href="./" class="brand"><span class="brand-mark" aria-hidden="true">z</span><span>ZIGENT<span class="brand-sub">SERVER CONSOLE</span></span></a>
+      <span class="nav-label">工作台</span>
+      <nav aria-label="监控页面"><button type="button" data-view="overview" aria-current="page"><span>概览</span><span class="nav-index">01</span></button><button type="button" data-view="performance"><span>性能监控</span><span class="nav-index">02</span></button><button type="button" data-view="usage"><span>模型用量</span><span class="nav-index">03</span></button><button type="button" data-view="components"><span>交互组件</span><span class="nav-index">04</span></button></nav>
+      <div class="sidebar-foot"><div id="live-state" class="live-state"><i></i><span>正在连接</span></div><span id="release" class="release"></span><div class="account-actions"><button id="open-password" type="button">修改密码</button><button id="logout" type="button">退出</button></div></div>
+    </aside>
+    <main class="workspace">
+      <header class="page-header"><div><span class="eyebrow">OBSERVABILITY / <span id="page-index">01</span></span><h1 id="page-title">服务概览<span class="title-dot">.</span></h1></div><div class="header-actions"><time id="updated"></time><button id="refresh" class="icon-control" type="button" aria-label="刷新监控">↻</button><button id="export" class="control" type="button" disabled>导出 ↓</button></div></header>
+      <div id="monitor-filters" class="filters"><label>Agent<select id="agent"><option value="">全部 Agent</option></select></label><label id="model-filter" hidden>模型<select id="model"><option value="">全部模型</option></select></label><div id="resource-range" class="range-filter"><span>时间范围</span><div id="hours" class="segments" role="group" aria-label="监控时间范围"><button data-hours="1" type="button">1 小时</button><button data-hours="24" type="button" aria-pressed="true">24 小时</button><button data-hours="168" type="button">7 天</button><button data-hours="720" type="button">30 天</button></div></div><div class="refresh-control"><span id="refresh-label">30 秒自动刷新</span><button id="auto-refresh" class="switch" type="button" role="switch" aria-checked="true" aria-label="自动刷新"><i></i></button></div></div>
+      <div id="feedback" class="feedback" role="status" hidden><span id="status"></span><button id="retry" type="button" hidden>重试</button></div>
+      <section id="view-overview" aria-label="服务概览">
+        <div class="section-heading"><h2>服务器资源</h2><span id="host-meta"></span></div><div id="host-cards" class="stats host-stats"></div>
+        <div class="overview-grid"><section class="panel"><div class="section-heading"><h2>资源趋势</h2><div class="legend"><span><i class="cpu-key"></i>CPU</span><span><i class="memory-key"></i>内存</span><span><i class="disk-key"></i>磁盘</span></div></div><div id="host-chart" class="chart host-chart"></div></section><section class="panel activity-panel"><div class="section-heading"><h2>运行概况</h2><span id="window-label">近 24 小时</span></div><div id="activity-stats" class="activity-stats"></div></section></div>
+        <section class="panel agents-panel"><div class="section-heading"><h2>Agent 运行状态</h2><span id="agents-count"></span></div><div class="table-wrap"><table><thead><tr><th>Agent</th><th>运行状态</th><th>CPU / 核</th><th>进程内存</th><th>运行时长</th><th>最近采样</th></tr></thead><tbody id="agents"></tbody></table></div></section>
+        <div class="section-heading"><h2>性能概况</h2><span class="section-code">SYSTEM PERFORMANCE</span></div><div id="category-cards" class="category-grid"></div>
+      </section>
+      <section id="view-performance" aria-label="性能监控" hidden>
+        <div class="section-heading"><h2>关键性能</h2></div>
+        <div id="performance-cards" class="stats performance-stats"></div>
+        <div class="section-heading"><h2>性能趋势</h2><div id="trend-modes" class="segments" role="group" aria-label="性能趋势统计"><button type="button" data-mode="latency" aria-pressed="true">延时</button><button type="button" data-mode="count">样本量</button><button type="button" data-mode="errors">失败率</button></div></div><div id="performance-trends" class="trend-grid"></div>
+        <section class="panel"><div class="section-heading"><h2>指标统计</h2><select id="group" aria-label="指标类别"><option value="">全部类别</option><option>浏览器</option><option>网络</option><option>服务端</option><option>对话</option><option>模型</option><option>工具</option></select></div><div class="table-wrap"><table class="latency-table"><thead><tr><th>统计指标</th><th>样本</th><th>P50 ≈</th><th>P75 ≈</th><th>P95 ≈</th><th>P99 ≈</th><th>失败率</th><th>目标</th><th>达成率</th></tr></thead><tbody id="metrics"></tbody></table></div></section>
+      </section>
+      <section id="view-usage" aria-label="模型用量" hidden>
+        <div class="section-heading"><h2>模型用量</h2><div id="periods" class="segments" role="group" aria-label="用量统计时段"><button data-period="today" type="button">今天</button><button data-period="7d" type="button">近 7 天</button><button data-period="30d" type="button" aria-pressed="true">近 30 天</button><button data-period="all" type="button">全部</button></div></div>
+        <div id="usage-cards" class="stats"></div><div id="usage-completeness" class="data-state" role="status"></div>
+        <section class="panel"><div class="section-heading"><h2>用量趋势</h2><div id="chart-metrics" class="segments small" role="group" aria-label="用量趋势指标"><button data-metric="tokens" type="button" aria-pressed="true">Token</button><button data-metric="requests" type="button">调用</button><button data-metric="cost" type="button">USD</button></div></div><div id="usage-chart" class="chart"></div></section>
+        <section class="panel"><div class="section-heading"><h2>模型明细</h2><span id="model-count"></span></div><div class="table-wrap"><table class="usage-table"><thead><tr><th>模型 / 供应商</th><th>调用</th><th>输入 Token</th><th>输出 Token</th><th>缓存命中</th><th>缓存写入</th><th>费用 / USD</th><th>失败</th></tr></thead><tbody id="models"></tbody></table></div></section>
+        <div id="media-usage" class="media-usage"></div>
+      </section>
+      <section id="view-components" aria-label="交互组件预览台" hidden><div id="component-lab"></div></section>
+      <footer class="page-foot"><span id="performance-sampling"></span><span>Asia/Shanghai</span></footer>
+    </main>
+  </div>
+
+  <dialog id="password-dialog" class="dialog password-dialog" aria-labelledby="password-title"><form id="password-form"><div class="dialog-heading"><h2 id="password-title">修改管理密码</h2><button id="close-password" class="icon-control" type="button" aria-label="关闭修改密码">×</button></div><label for="current-password">当前密码</label><input id="current-password" type="password" autocomplete="current-password" maxlength="256" required><label for="new-password">新密码</label><input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required><p id="password-status" role="status"></p><button class="primary" type="submit">保存密码</button></form></dialog>
+</body>
+</html>

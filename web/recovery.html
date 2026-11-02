@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#faf9f5"><meta name="robots" content="noindex"><title>服务回退 · Aletheia</title><link rel="stylesheet" href="./recovery.css"><script src="./recovery.js" defer></script></head>
+<body class="recovery-standalone"><main class="recovery-shell">
+  <div class="dialog-heading"><h1>服务回退</h1><button id="recovery-refresh" class="icon-button" type="button" aria-label="刷新可回退版本"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg></button></div>
+  <form id="recovery-login" hidden><label for="recovery-password">访问密码</label><input id="recovery-password" type="password" autocomplete="current-password" required maxlength="256"><button id="recovery-login-submit" class="recovery-control" type="submit">登录</button></form>
+  <div id="recovery-content" hidden><div class="recovery-current"><span>当前服务版本</span><strong id="recovery-current"></strong><time id="recovery-current-time"></time></div><h2 class="recovery-section-label">可回退版本</h2><div id="recovery-versions"></div></div>
+  <section id="recovery-confirm" class="recovery-confirm" aria-label="确认服务回退" hidden><strong>确认回退全部服务</strong><span id="recovery-target"></span><div class="recovery-confirm-actions"><button id="recovery-cancel" class="recovery-control" type="button">取消</button><button id="recovery-submit" class="recovery-control confirm" type="button">确认回退全部服务</button></div></section>
+  <div role="status"><p id="recovery-status"></p><button id="recovery-retry" class="recovery-control" type="button" hidden>重新加载</button><a id="recovery-return" class="recovery-return" href="./" hidden>返回对话 →</a></div>
+</main></body></html>
