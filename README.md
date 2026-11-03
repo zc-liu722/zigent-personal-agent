@@ -1,6 +1,6 @@
 # Zigent
 
-**Your Personal Agent with Giant Context**
+**Your Personal Agent with Big Context**
 
 Zigent is a self-hosted personal agent architecture that you can continuously adapt with AI coding.
 
@@ -8,7 +8,7 @@ A personal agent has two goals: **be useful and proactive**. Generic proactivity
 
 Relevant proactivity starts with broad, real personal context: what your projects are working toward, your commitments today, how you slept, an important notification that just arrived, and the decisions you made earlier. Combined with the intelligence of a capable model, these signals can produce reminders, recommendations, and plans that are useful to you personally.
 
-**Giant Context** means more than a model's context window. It is the data and runtime engineering needed to collect authorized context from your life and work, persist it, retrieve it on demand, and dynamically organize a concise prompt during a conversation—ultimately turning context into reliable action.
+**Big Context** means more than a model's context window. It is the data and runtime engineering needed to collect authorized context from your life and work, persist it, retrieve it on demand, and dynamically organize a concise prompt during a conversation—ultimately turning context into reliable action.
 
 ## Why shouldn't a personal agent be a generic product?
 
