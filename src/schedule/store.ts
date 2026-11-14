@@ -42,12 +42,28 @@ export class ScheduleStore {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS schedule_owner (id INTEGER PRIMARY KEY CHECK(id=1), agent TEXT NOT NULL, owner TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS schedule_items (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, value TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS schedule_reminders (fingerprint TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS schedule_reminders (fingerprint TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS schedule_operations (id TEXT PRIMARY KEY, result TEXT NOT NULL);`);
     this.db.prepare("INSERT OR IGNORE INTO schedule_owner VALUES (1,?,?)").run(agentId, ownerId);
     const owner = this.db.prepare("SELECT agent,owner FROM schedule_owner WHERE id=1").get() as { agent: string; owner: string };
     if (owner.agent !== agentId || owner.owner !== ownerId) { closeSqlite(this.db); throw new Error("日程数据库属于其他账户。"); }
   }
   canRemind(): boolean { return this.reminderAvailable; }
+  operationResult(id: string): unknown | undefined {
+    const row = this.db.prepare("SELECT result FROM schedule_operations WHERE id=?").get(id) as { result: string } | undefined;
+    return row ? JSON.parse(row.result) : undefined;
+  }
+  /** An authenticated confirmation and its result commit in the same domain transaction. */
+  operation<T>(id: string | undefined, work: () => T): T {
+    if (!id) throw new Error("日程变更缺少操作标识。");
+    return sqliteTransaction(this.db, () => {
+      const existing = this.db.prepare("SELECT result FROM schedule_operations WHERE id=?").get(id) as { result: string } | undefined;
+      if (existing) return JSON.parse(existing.result) as T;
+      const result = work();
+      this.db.prepare("INSERT INTO schedule_operations VALUES (?,?)").run(id, JSON.stringify(result));
+      return result;
+    });
+  }
   reminder(fingerprint: string): ScheduleReminder | undefined {
     const row = this.db.prepare("SELECT value FROM schedule_reminders WHERE fingerprint=?").get(fingerprint) as { value: string } | undefined;
     return row ? JSON.parse(row.value) as ScheduleReminder : undefined;

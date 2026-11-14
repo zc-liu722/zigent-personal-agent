@@ -1,7 +1,9 @@
+import { installConversationReader } from "../conversation/reader.js";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { paletteAsset } from "../web/palette.js";
 
 export type AuditExportOptions = {
   database: string;
@@ -172,7 +174,7 @@ async function exportAssets(
   }
 }
 
-function renderHtml(report: Row): string {
+function renderHtml(report: Row, palette: string): string {
   const sessions = report.sessions as Row[];
   const messages = report.messages as Row[];
   const generations = report.imageGenerations as Row[];
@@ -188,7 +190,7 @@ function renderHtml(report: Row): string {
       const turnMessageImages = messageImages.filter((item) => item.session === sessionId && Number(item.turnId) === turnId);
       const turnAssets = assets.filter((item) => item.session === sessionId && Number(item.turnId) === turnId);
       return `<article><h3>Turn ${turnId}</h3>${turnMessages.map((message) => `
-        <div class="message ${escapeHtml(message.role)}"><strong>${escapeHtml(message.role)}${message.speaker ? ` · ${escapeHtml(message.speaker)}` : ""}${message.deletedAt ? ` · 已软删除 ${escapeHtml(message.deletedAt)}（编辑起点：${escapeHtml(message.rewindFromTurn)}）` : ""}</strong><p>${escapeHtml(message.content)}</p>
+        <div class="message ${escapeHtml(message.role)}"><strong>${escapeHtml(message.role)}${message.speaker ? ` · ${escapeHtml(message.speaker)}` : ""}${message.deletedAt ? ` · 已软删除 ${escapeHtml(message.deletedAt)}（编辑起点：${escapeHtml(message.rewindFromTurn)}）` : ""}</strong>${message.execution ? jsonBlock(message.execution) : ""}<p>${escapeHtml(message.content)}</p>
         ${message.questionAnswers ? `<details><summary>User question answers</summary>${jsonBlock(message.questionAnswers)}</details>` : ""}
         ${message.toolTrace ? `<details><summary>Tool trace</summary>${jsonBlock(message.toolTrace)}</details>` : ""}
         ${message.activityTrace ? `<details open><summary>User-visible thoughts and activity</summary>${jsonBlock(message.activityTrace)}</details>` : ""}</div>`).join("")}
@@ -201,7 +203,8 @@ function renderHtml(report: Row): string {
     return `<section><h2>Session ${escapeHtml(sessionId)}</h2><p>${escapeHtml(session.user)} · ${escapeHtml(session.conversation)} · ${escapeHtml(session.status)} · ${escapeHtml(session.createdAt)} — ${escapeHtml(session.lastActiveAt)}</p>${turnHtml}</section>`;
   }).join("");
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Zigent audit export</title><style>
-  body{font:15px/1.55 system-ui,sans-serif;max-width:1200px;margin:auto;padding:32px;background:#f5f5f2;color:#20201e}h1,h2,h3{line-height:1.2}section,article,.message,details{background:white;border:1px solid #ddd;border-radius:10px;padding:14px;margin:14px 0}.user{border-left:5px solid #4d78cc}.assistant{border-left:5px solid #6b9b65}pre{white-space:pre-wrap;word-break:break-word;background:#f4f4f4;padding:12px;border-radius:6px}.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.gallery img{width:100%;height:auto;border-radius:8px}figcaption{font-size:12px;word-break:break-all}</style></head><body>
+  ${palette}
+  body{font:15px/1.55 system-ui,sans-serif;max-width:1200px;margin:auto;padding:32px;background:var(--ui-bg);color:var(--ui-text)}h1,h2,h3{line-height:1.2}section,article,.message,details{background:var(--ui-surface);border:1px solid var(--ui-line);border-radius:10px;padding:14px;margin:14px 0}.user{border-left:5px solid var(--ui-series-3)}.assistant{border-left:5px solid var(--ui-series-2)}pre{white-space:pre-wrap;word-break:break-word;background:var(--palette-soft);padding:12px;border-radius:6px}.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.gallery img{width:100%;height:auto;border-radius:8px}figcaption{font-size:12px;word-break:break-all}</style></head><body>
   <h1>Zigent audit export</h1><p>Agent: ${escapeHtml(report.agent)} · Window: ${escapeHtml(report.from)} — ${escapeHtml(report.to)}</p>${sections}</body></html>`;
 }
 
@@ -213,6 +216,8 @@ export async function exportAudit(options: AuditExportOptions): Promise<void> {
   const exportedAt = Date.now();
   const cutoff = exportedAt - minutes * 60_000;
   const database = new DatabaseSync(options.database, { readOnly: true });
+  const reader = installConversationReader(database);
+  const messageSource = reader ? "conversation_history_messages" : "messages";
   database.exec("PRAGMA query_only = ON; BEGIN");
   try {
     const owner = tableColumns(database, "agent_metadata").size
@@ -235,7 +240,7 @@ export async function exportAudit(options: AuditExportOptions): Promise<void> {
     const senderSelect = messageColumns.has("sender_user_id") ? "sender_user_id" : "NULL AS sender_user_id";
     const rawMessages = database.prepare(`SELECT id, message_id, session_id, turn_id, role, content, model_id, model_name,
       model_brand, model_supplier, tool_trace_json, ${activitySelect}, ${inputRefsSelect}, ${senderSelect}, ${deletedSelect}, ${rewindSelect}, ${answersSelect}, created_at
-      FROM messages WHERE ${scope()} AND role IN ('user', 'assistant', 'compressor') ORDER BY turn_id, created_at`).all(scopeValue) as Row[];
+      FROM ${messageSource} WHERE ${scope()} AND role IN ('user', 'assistant', 'compressor') ORDER BY turn_id, created_at`).all(scopeValue) as Row[];
     const imageColumns = tableColumns(database, "image_generations");
     const messageImageColumns = tableColumns(database, "message_images");
     const hasGenerationLink = messageImageColumns.has("generation_id");
@@ -293,6 +298,7 @@ export async function exportAudit(options: AuditExportOptions): Promise<void> {
       speaker: row.sender_user_id ? `u-${pseudonym(row.sender_user_id, salt)}` : undefined,
       model: row.model_id, modelName: row.model_name, modelBrand: row.model_brand, modelSupplier: row.model_supplier,
       toolTrace: parseJson(row.tool_trace_json), activityTrace: parseJson(row.activity_trace_json),
+      execution: reader?.messageMetadata(String(row.id)),
       inputImageCount: assetRefs.filter((ref) => ref.kind === "input" && ref.sessionId === row.session_id && ref.turnId === Number(row.turn_id)).length,
       createdAt: new Date(Number(row.created_at)).toISOString()
     }));
@@ -321,7 +327,8 @@ export async function exportAudit(options: AuditExportOptions): Promise<void> {
       sessions, messages, messageImages, imageGenerations, assets
     };
     await writeFile(join(options.output, "audit.json"), JSON.stringify(report, null, 2), { encoding: "utf8", mode: 0o600 });
-    await writeFile(join(options.output, "index.html"), renderHtml(report), { encoding: "utf8", mode: 0o600 });
+    const palette = await readFile(new URL(`../../web/${paletteAsset}`, import.meta.url), "utf8");
+    await writeFile(join(options.output, "index.html"), renderHtml(report, palette), { encoding: "utf8", mode: 0o600 });
   } finally {
     database.close();
   }

@@ -103,7 +103,10 @@ export function createFileWorkbench({ base, api, toast, selectProject }) {
       projects.replaceChildren(...workspaces.map(workspace => {
         const node = button(workspace.name, () => void chooseWorkspace(workspace.id)); node.setAttribute('aria-current', String(workspace.id === selectedWorkspace)); return node;
       }));
-      projectSelect.replaceChildren(...workspaces.map(workspace => new Option(workspace.name, workspace.id)));
+      const all = button('全部', () => void chooseWorkspace(''));
+      all.setAttribute('aria-current', String(!selectedWorkspace));
+      projects.prepend(all);
+      projectSelect.replaceChildren(new Option('全部', ''), ...workspaces.map(workspace => new Option(workspace.name, workspace.id)));
       projectSelect.value = selectedWorkspace;
     }
     projectTitle.textContent = workspaces.find(workspace => workspace.id === selectedWorkspace)?.name || '文件';
@@ -128,7 +131,7 @@ export function createFileWorkbench({ base, api, toast, selectProject }) {
       if (generation !== requestGeneration || !dialog.open) return;
       snapshot = result;
       if (background && (!feedbackText.textContent || feedbackText.textContent === '存储空间偏低')) status();
-      if (!result.workspaces?.some(workspace => workspace.id === selectedWorkspace)) { selectedWorkspace = result.defaultWorkspaceId || result.workspaces?.[0]?.id || ''; directory = '.'; page = undefined; artifactPage = undefined; }
+      if (selectedWorkspace && !result.workspaces?.some(workspace => workspace.id === selectedWorkspace)) { selectedWorkspace = ''; directory = '.'; page = undefined; artifactPage = undefined; }
       renderProjects();
       const nextArtifactSignature=JSON.stringify([result.artifacts,result.originals]);
       const artifactsChanged=nextArtifactSignature!==artifactSignature;artifactSignature=nextArtifactSignature;
@@ -162,7 +165,7 @@ export function createFileWorkbench({ base, api, toast, selectProject }) {
     toolbar.append(crumbs, newFile); return toolbar;
   }
   async function loadFiles(path = '.', offset = 0, append = false) {
-    if (!selectedWorkspace) { empty('暂无项目'); return; }
+    if (!selectedWorkspace) { empty('请选择项目'); return; }
     const generation = ++fileGeneration, workspaceId = selectedWorkspace;
     const query = new URLSearchParams({ path, offset: String(offset) });
     panel.setAttribute('aria-busy', 'true');
@@ -236,10 +239,9 @@ export function createFileWorkbench({ base, api, toast, selectProject }) {
     if (!path) name.focus();
   }
   async function loadArtifacts(offset = 0, append = false) {
-    if (!selectedWorkspace) { empty('暂无项目'); return; }
     const generation=++fileGeneration, workspaceId=selectedWorkspace, currentTab=tab;
     const kind=currentTab==='originals'?'original':'artifact';
-    const query=new URLSearchParams({workspaceId,kind,offset:String(offset),limit:'100'});
+    const query=new URLSearchParams({...(workspaceId ? {workspaceId} : {}),kind,offset:String(offset),limit:'100'});
     panel.setAttribute('aria-busy','true');
     if (!append) panel.replaceChildren(element('p','fw-empty','正在加载…'));
     try {

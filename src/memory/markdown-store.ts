@@ -103,6 +103,10 @@ export class MarkdownMemoryStore {
   async readContext(userId: string) { return (await this.readViews()).context(userId); }
   async readSnapshot(userId: string) { return (await this.readViews()).editableSnapshot(userId); }
   async readArchive(userId: string, title: string) { return (await this.readViews()).archive(userId, title); }
+  async confirmationReceipt(id: string): Promise<string | undefined> {
+    const { state } = await this.readVerified();
+    return Object.hasOwn(state.receipts, id) ? state.receipts[id] : undefined;
+  }
   async read(): Promise<MarkdownMemoryRead> { return structuredClone(await this.readVerified()); }
 
   /** Internal immutable ownership; every public read copies only its result. */

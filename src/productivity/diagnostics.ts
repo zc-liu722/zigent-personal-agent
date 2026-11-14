@@ -5,7 +5,7 @@ import { networkFailure, productivityFetch, type NetworkFailure } from "./http.j
 
 type Finding = {
   route: "configured-proxy" | "direct";
-  target: "todoist-registration" | "google-authorization" | "google-token" | "google-calendar-api" | "google-drive-api" | "authorization-bridge" | "bridge-signature" | "web-oauth-callback";
+  target: "todoist-registration" | "google-authorization" | "google-token" | "google-calendar-api" | "google-drive-api" | "gmail-api" | "authorization-bridge" | "bridge-signature" | "web-oauth-callback";
   ready: boolean;
   status?: number;
   failure?: NetworkFailure | "http";
@@ -17,11 +17,12 @@ export async function diagnoseProductivityAuthorization(config: PersonalIntegrat
   const routes = [...(config.proxyUrl ? [{ route: "configured-proxy" as const, proxyUrl: config.proxyUrl }] : []), { route: "direct" as const }];
   return (await Promise.all(routes.map(async route => {
     const request = requestFactory("proxyUrl" in route ? route.proxyUrl : undefined);
-    const probes: Array<{ target: Finding["target"]; url: string; expected: number; headers?: Record<string,string> }> = options.integration?.startsWith("google_") ? [
+    const probes: Array<{ target: Finding["target"]; url: string; expected: number; headers?: Record<string,string> }> = (options.integration?.startsWith("google_") || options.integration === "gmail") ? [
       { target: "google-authorization", url: "https://accounts.google.com/.well-known/openid-configuration", expected: 200 },
       { target: "google-token", url: "https://oauth2.googleapis.com/token", expected: 404 },
       options.integration === "google_calendar"
         ? { target: "google-calendar-api", url: "https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest", expected: 200 }
+        : options.integration === "gmail" ? { target: "gmail-api", url: "https://gmail.googleapis.com/$discovery/rest?version=v1", expected: 200 }
         : { target: "google-drive-api", url: "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest", expected: 200 }
     ] : [{ target: "todoist-registration", url: "https://api.todoist.com/oauth/register", expected: 405 }];
     if (options.webCallbackUrl) probes.push({ target:"web-oauth-callback",url:options.webCallbackUrl,expected:400 });

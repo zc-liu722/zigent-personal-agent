@@ -20,7 +20,11 @@ function attachLegacySpeech(server: Server, options: WebSpeechOptions): { close(
   const sessions = new Map<WebSocket, { device: string; close(): void }>();
   const reject = (socket: Duplex, status: number) => { socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); };
   const upgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
-    if (request.headers["sec-websocket-protocol"]?.split(",").some(value => ["zigent-speech-v2", "zigent-browser-v1"].includes(value.trim()))) return;
+    // Official LiveKit signaling has no Zigent subprotocol. Its dedicated
+    // handler owns authentication; legacy speech must not reject its upgrade.
+    const rtcPrefix = (options.path ?? SPEECH_PATH).replace(/api\/speech$/, "api/meeting/rtc/");
+    if (new URL(request.url ?? "/", "http://localhost").pathname.startsWith(rtcPrefix)) return;
+    if (request.headers["sec-websocket-protocol"]?.split(",").some(value => ["zigent-speech-v2", "zigent-browser-v1", "zigent-meeting-v1"].includes(value.trim()))) return;
     if (request.url !== (options.path ?? SPEECH_PATH) || request.method !== "GET") { reject(socket, 404); return; }
     if (request.headers.origin !== options.origin || !options.authenticate(request)) { reject(socket, 403); return; }
     if (!options.config) { reject(socket, 503); return; }

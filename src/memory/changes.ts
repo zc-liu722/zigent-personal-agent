@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { editMarkdown, MarkdownConflictError, type MarkdownEdit } from "../text/markdown-edits.js";
 
 export type ArchiveMemory = { title: string; content: string };
 /** Markdown bodies are authoritative; scopes remain separate on disk and in prompts. */
@@ -46,40 +47,27 @@ export function previewMemoryChanges(snapshot: MemorySnapshot, request: MemoryCh
     const first = edits[0]!, archive = first.target === "archiveMemory";
     const existing = archive ? snapshot.archiveMemory?.find(item => item.title === first.title)?.content
       : first.target === "behaviorRules" ? snapshot.behaviorRules : snapshot.longTermMemory;
+    const patches: MarkdownEdit[] = edits.map(edit => {
+      if (edit.operation === "replace") {
+        if (!edit.oldText || edit.newText === undefined || edit.content !== undefined)
+          throw new Error("Replace requires nonempty oldText and newText");
+        return { operation: "replace", oldText: edit.oldText, newText: edit.newText };
+      }
+      if (edit.operation === "delete") {
+        if (edit.oldText === undefined || edit.newText !== undefined || edit.content !== undefined)
+          throw new MemoryConflictError("Deleting an archive requires its complete exact oldText");
+        return { operation: "delete", oldText: edit.oldText };
+      }
+      if (edit.content === undefined || edit.oldText !== undefined || edit.newText !== undefined)
+        throw new Error("Create or append requires content only");
+      return { operation: edit.operation, content: edit.content };
+    });
     let after: string | undefined;
-    if (edits.some(edit => edit.operation === "create" || edit.operation === "delete")) {
-      if (edits.length !== 1 || !archive) throw new Error("File create/delete must be a single archive operation; use replace/append for long-term Markdown");
-      if (first.operation === "create") {
-        if (existing !== undefined || first.content === undefined || first.oldText !== undefined || first.newText !== undefined)
-          throw new Error("Create requires a new archive title and content only");
-        after = first.content;
-      } else {
-        if (existing === undefined || first.oldText !== existing || first.newText !== undefined || first.content !== undefined)
-          throw new MemoryConflictError("Deleting an archive requires its complete exact oldText from read_archive");
-      }
-    } else {
-      if (existing === undefined) throw new MemoryConflictError("Archive file is missing; read current files again");
-      const ranges: { start: number; end: number; text: string }[] = [];
-      let append = "";
-      for (const edit of edits) {
-        if (edit.operation === "append") {
-          if (!edit.content?.trim() || edit.oldText !== undefined || edit.newText !== undefined) throw new Error("Append requires nonempty content only; include desired newlines");
-          append += edit.content;
-        } else {
-          if (!edit.oldText || edit.newText === undefined || edit.content !== undefined) throw new Error("Replace requires nonempty oldText and newText; newText may be empty for deletion");
-          const start = existing.indexOf(edit.oldText);
-          if (start < 0 || existing.indexOf(edit.oldText, start + 1) >= 0)
-            throw new MemoryConflictError("oldText must match exactly once. Read the Markdown again and include enough surrounding context; never guess a line number or ID.");
-          const end = start + edit.oldText.length;
-          if (ranges.some(range => start < range.end && end > range.start)) throw new MemoryConflictError("Replacements overlap; combine them into one exact original passage");
-          ranges.push({ start, end, text: edit.newText });
-        }
-      }
-      after = existing;
-      for (const range of ranges.sort((a, b) => b.start - a.start)) after = after.slice(0, range.start) + range.text + after.slice(range.end);
-      after += append;
+    try { after = editMarkdown(existing, patches, archive); }
+    catch (error) {
+      if (error instanceof MarkdownConflictError) throw new MemoryConflictError(error.message);
+      throw error;
     }
-    if (after === existing) throw new Error("No Markdown changes for this file");
     if (after !== undefined) validateMarkdown(after, !archive);
     if (archive) {
       next.archiveMemory = next.archiveMemory!.filter(item => item.title !== first.title);

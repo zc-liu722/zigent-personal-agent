@@ -52,7 +52,7 @@ export function createSchedule({ root, api, day = '' }) {
       cell.setAttribute('aria-label', `${dateLabel(key)}${hasEvent ? '，有日程' : ''}`); cell.setAttribute('aria-pressed', String(key === selectedDay)); grid.append(cell);
     }
     calendar.append(grid);
-    if (selectedDay) calendar.append(button('查看全部日程', () => { selectedDay = ''; render(); }, 'schedule-show-all'));
+    if (selectedDay) calendar.append(button('今天及以后', () => { selectedDay = ''; calendarDay = dayKey(new Date()); render(); }, 'schedule-show-all'));
     container.append(calendar);
   }
   function eventCovers(item, key) {
@@ -93,11 +93,12 @@ export function createSchedule({ root, api, day = '' }) {
     const list = node('div', 'schedule-list');
     const visible = items.filter(item => item.kind === filter).sort((a, b) => (a.due || a.start || '9999').localeCompare(b.due || b.start || '9999'));
     if (filter === 'event') {
-      const events = selectedDay ? visible.filter(item => eventCovers(item, selectedDay)) : visible;
+      const today = dayKey(new Date());
+      const events = visible.filter(item => selectedDay ? eventCovers(item, selectedDay) : localDay(item.start) >= today || eventCovers(item, today));
       if (selectedDay) list.append(node('h3', 'schedule-group-title', dateLabel(selectedDay)));
       if (!events.length) list.append(node('p', 'schedule-empty', selectedDay ? '这天暂无日程' : '暂无日程'));
       let previous;
-      for (const item of events) { const key = localDay(item.start); if (!selectedDay && key !== previous) { list.append(node('h3', 'schedule-group-title', key ? dateLabel(key) : '未设日期')); previous = key; } list.append(renderEvent(item)); }
+      for (const item of events) { const start = localDay(item.start), key = !selectedDay && start < today ? today : start; if (!selectedDay && key !== previous) { list.append(node('h3', 'schedule-group-title', key ? dateLabel(key) : '未设日期')); previous = key; } list.append(renderEvent(item)); }
     } else {
       const today = dayKey(new Date()), groups = new Map([['已逾期', []], ['今天', []], ['接下来', []], ['未设日期', []], ['已完成', []]]);
       for (const item of visible) { const due = localDay(item.due), group = item.completed ? '已完成' : !due ? '未设日期' : due < today ? '已逾期' : due === today ? '今天' : '接下来'; groups.get(group).push(item); }

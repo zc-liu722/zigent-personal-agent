@@ -168,7 +168,7 @@ def main():
                 raise ValueError("Destination is not a regular file: " + path)
             expected = prior["files"].get(path)
             actual = digest(dest.read_bytes())
-            if expected is None and path in blobs and actual == digest(blobs[path][0]):
+            if path in blobs and actual == digest(blobs[path][0]):
                 continue
             if actual != expected:
                 raise ValueError("Destination has independent changes; review before overwriting: " + path)

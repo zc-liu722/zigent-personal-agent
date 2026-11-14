@@ -1,3 +1,4 @@
+import { isSkillTool } from "./skills.js";
 import type { ChangeDocument, ChangePreview, TaskChangeState } from "../channels/change-preview.js";
 import { taskTriggerDiagram, reusableTriggerDiagram } from "../tasks/trigger-diagram.js";
 import { parseReusableTriggerSpec } from "../tasks/reusable.js";
@@ -38,7 +39,7 @@ export function operationPreview(tool: string, input: Fields, snapshots: unknown
     const map = xmindPreview(input, snapshots, title);
     if (map) return { changes: [map] };
   }
-  if (tool === "update_skill" && ["create", "replace", "delete"].includes(action)) {
+  if (isSkillTool(tool) && ["create", "replace", "delete"].includes(action)) {
     const field = input.target === "rules" ? "rules" : "body";
     const before = pick(current, action === "delete" ? ["name", "description"]
       : action === "replace" ? ["name", ...(input.description === undefined ? [] : ["description"]), field] : ["name", "description", "body", "rules"]);
@@ -138,7 +139,7 @@ export function operationPreview(tool: string, input: Fields, snapshots: unknown
     }
     return { changes, ...(taskTriggers ? { taskTriggers } : {}) };
   }
-  if (tool === "update_skill" && typeof current.body === "string") {
+  if (isSkillTool(tool) && typeof current.body === "string") {
     const sections = skillSectionsSchema.parse(input.action === "replace_sections" ? input.sections : [{ heading: input.heading, content: input.content }]);
     const heading = sections.map(section => section.heading).join("、"), body = current.body;
     const content = replaceMarkdownSections(body, sections);
@@ -151,12 +152,13 @@ export function operationPreview(tool: string, input: Fields, snapshots: unknown
       while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) start++;
       while (end < oldLines.length - start && end < newLines.length - start && oldLines.at(-end - 1) === newLines.at(-end - 1)) end++;
       changes = [{ title: heading, before: oldLines.slice(start, oldLines.length - end).join("\n"), after: newLines.slice(start, newLines.length - end).join("\n"),
-        note: "未变更的正文已省略，完整内容可查看项目规则。" }];
+        note: "未变更的正文已省略，完整内容可查看技能文档。" }];
     }
     return { changes,
-      changeDocuments: [{ id: "skill-state", title: input.name === "health" ? "项目规则（本次提议）" : "技能内容（本次提议）", filename: input.name === "health"
-        ? input.target === "rules" ? "health-rules.md" : "private-state.md" : `${input.name}-${input.target ?? "body"}.md`, content }] };
+      changeDocuments: [{ id: "skill-state", title: `${input.name} · ${input.target === "rules" ? "规则" : "正文"}（本次提议）`,
+        filename: `${input.name}-${input.target ?? "body"}.md`, content }] };
   }
+  if (tool === "gmail") return { changes: [{ title, after: description }] };
   if (tool === "google_drive") {
     if (action === "update_text_file") {
       const content = String(input.content ?? ""), filename = String(current.name ?? "");

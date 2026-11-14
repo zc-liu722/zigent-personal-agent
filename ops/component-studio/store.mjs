@@ -9,7 +9,8 @@ const hash = value => value === null ? null : createHash('sha256').update(value)
 const same = (a, b) => hash(a) === hash(b);
 const revisionOf = changes => hash(JSON.stringify(changes.map(({ path, before, after }) => [path, before, after])));
 const editable = path => /^(?:components\/[a-zA-Z0-9_-]+\.(?:js|css)|(?:style|theme)\.css|dom\.js)$/.test(path);
-const support = ['component-preview.html', 'component-preview.js', 'component-preview.css', 'markdown.js', 'lazy-assets.js', 'components/paper-grain.svg'];
+const support = ['component-preview.html', 'component-preview.js', 'component-preview.css', 'markdown.js', 'mermaid.js', 'lazy-assets.js', 'components/paper-grain.svg',
+  'plugins/palette/colors.css', 'plugins/palette/read-colors.js'];
 const error = (message, status = 409) => Object.assign(new Error(message), { status });
 async function writeJson(path, value) {
   const temporary = `${path}.${randomUUID()}.tmp`;

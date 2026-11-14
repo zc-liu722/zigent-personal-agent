@@ -1,7 +1,14 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { closeSqlite, prepareSql } from "../sqlite.js";
 import type { ToolExecutionContext } from "../tools/tool-contracts.js";
+import type { Provider } from "../config.js";
+import type { GeneratedReply } from "./executor.js";
+import type { ModelConversationMessage } from "../models/types.js";
+import type { TokenUsage } from "../memory/types.js";
 import type { AgentRunSnapshot, SubagentActivityItem } from "./transcript.js";
+
+export type SavedChildRecord = { name?: string; profession?: string; task?: string; text?: string; error?: string;
+  activity?: AgentRunSnapshot; usage?: TokenUsage; trace?: ModelConversationMessage[]; history?: ModelConversationMessage[]; historyIncludesAttempt?: boolean; result?: GeneratedReply };
 
 /** Private audit records in the existing Agent-owned database; never a new chat or delivery. */
 export class SubagentStore {
@@ -36,6 +43,20 @@ export class SubagentStore {
       $session: scope.sessionId, $turn: scope.turnId, $title: run.title, $model: run.model,
       $state: run.state, $started: run.startedAt, $updated: Date.now(), $record: JSON.stringify(record)
     });
+  }
+  /** Exact owner/turn boundary; a team ID supplied by a model can never select another team. */
+  restoreTeam(scope: ToolExecutionContext, teamId?: string) {
+    const team = teamId ?? (prepareSql(this.db, `SELECT team_id FROM subagent_runs
+      WHERE user_id=? AND session_id=? AND turn_id=? ORDER BY started_at DESC,rowid DESC LIMIT 1`)
+      .get(scope.userId, scope.sessionId, scope.turnId) as { team_id: string } | undefined)?.team_id;
+    if (!team) return undefined;
+    const rows = prepareSql(this.db, `SELECT * FROM subagent_runs
+      WHERE team_id=? AND user_id=? AND session_id=? AND turn_id=? ORDER BY generation,id`)
+      .all(team, scope.userId, scope.sessionId, scope.turnId) as Array<{
+        id: string; generation: number; title: string; model: Provider; state: string; started_at: number; record_json: string;
+      }>;
+    return { id: team, runs: rows.map(row => ({ ...row, record: JSON.parse(row.record_json, (_key, value) =>
+      value?.type === "Buffer" && Array.isArray(value.data) ? Buffer.from(value.data) : value) as SavedChildRecord })) };
   }
   /** Restore legacy child reports only through IDs already present in this owner's session message. */
   restoreActivity(snapshot: AgentRunSnapshot, userId: string, sessionId: string): AgentRunSnapshot {

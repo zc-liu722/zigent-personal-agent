@@ -30,12 +30,14 @@ export function createToolExecutor(options: {
       || !productivityRead.actions.includes(String((input as Record<string, unknown>).action))))
       throw new Error("Background productivity tools are read-only; confirmation and writes require a user turn");
     if (context.backgroundTaskKind === "proactive" && name === "health_data"
-      && (!input || typeof input !== "object" || !["status", "query", "diary", "view_photos"].includes(String((input as Record<string, unknown>).action))))
+      && (!input || typeof input !== "object" || !["status", "query", "sleep", "diary", "view_photos"].includes(String((input as Record<string, unknown>).action))))
       throw new Error("Proactive health tasks may only read health data; user reports require a user turn");
     if (context.taskRunId && name === "user_location"
       && (!input || typeof input !== "object" || (input as Record<string, unknown>).action !== "get")) {
       throw new Error("Background tasks may only read location; binding and deletion require a user turn");
     }
+    if ((context.taskRunId || context.backgroundTaskKind) && name === "skills" && !["list", "load", "read_resource", "updates"].includes(String(object(input).action)))
+      throw new Error("Background skill access is read-only; persistent changes require a user turn");
     if (hostedCatalog.has(name)) {
       throw new Error(`Hosted tool ${name} is executed by the model provider, not the local registry`);
     }
@@ -51,6 +53,9 @@ export function createToolExecutor(options: {
       if (typeof value === "string" && value !== value.trim()) throw new Error("Use exact action and operation names without surrounding whitespace");
     }
     if (["notion", "xmind", "feishu_cli"].includes(name) && object(input).action === "confirm") throw new Error("Legacy model confirmation is disabled; only the authenticated confirmation component may execute changes");
+    if (name === "skills"
+      && operationTitle(name, input) && !isConfirmedOperation(context, name, input))
+      throw new Error("此操作入口已迁移，请使用当前工具定义。");
     if (operationTitle(name, input) && !isConfirmedOperation(context, name, input)
       && !(name === "codex" && ["dispatch", "message"].includes(String(object(input).action))
         && context.backgroundTaskKind === "proactive" && context.taskRunId && context.taskLeaseToken && verifyProactiveRun?.(context))) {
@@ -67,6 +72,8 @@ export function createToolExecutor(options: {
       const authorization = results.find(result => ["authorization_pending", "authorization_required", "not_configured"].includes(String(object(result).status)));
       if (authorization) return authorization;
       const draft = buildOperationDraft(name, value, operationSnapshots(reads, results, value));
+      draft.pluginVersions = context.pluginVersions;
+      draft.operationRecovery = catalog.get(name)?.operationRecovery;
       if (name === "codex") draft.delegationEvidence = context.delegationRequest;
       const offered = await context.proposeOperation(draft);
       return { status: "pending_confirmation", ...offered, message: "Exact changes are displayed in the confirmation component. NO change has run. Only a real user button click executes it. Do not ask for verbal confirmation, retry in this turn or claim success." };

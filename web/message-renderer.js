@@ -5,9 +5,11 @@ import { createSubagentRenderer, subagentTimeline, createActivityRenderer, activ
 import { createImageViewer } from './image-viewer.js';
 import { createImageDownloads } from './image-downloads.js';
 import { createImageGeneration } from './components/image-generation.js';
+import { createSleepTimeline } from './components/sleep-timeline.js';
+import { assetVersion } from './lazy-assets.js';
 
 /** Owns keyed DOM views, stream render scheduling and output disposal. */
-export function createMessageRenderer({ conversation: appState, assetUrl, loadActivity, branchReply, captureReadingPosition, copyText, isForking, inline, markdown, openConversationDocument, openCurrentBrowser, readingMetrics, readingScroller, readingTopEdge, rememberReadingPosition, renderInteraction, renderSend, restoreReadingPosition, scrollReadingToBottom, scheduleInteractionExpiry, userMessageText, toast, subagentRunningText, pendingArticles = () => [] }) {
+export function createMessageRenderer({ conversation: appState, assetUrl, loadActivity, branchReply, captureReadingPosition, copyText, isForking, inline, markdown, openConversationDocument, openCurrentBrowser, readingMetrics, readingScroller, readingTopEdge, rememberReadingPosition, renderInteraction, renderAnnotations, renderSend, restoreReadingPosition, scrollReadingToBottom, scheduleInteractionExpiry, userMessageText, toast, subagentRunningText, pendingArticles = () => [] }) {
   const activityViews = new WeakMap(), messageViews = new WeakMap();
   const generationGames = new Set();
   const imageDownloads = createImageDownloads({ assetUrl });
@@ -51,9 +53,20 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
     };
     return button;
   }
+  function renderInlineImage(block) {
+    const figure=el('figure','conversation-image'), link=el('a','conversation-image-link'), img=el('img');
+    link.href=assetUrl(block.assetId);link.target='_blank';link.rel='noopener';link.setAttribute('aria-label',`放大查看：${block.alt}`);
+    img.src=assetUrl(block.assetId,true);img.alt=block.alt;img.width=block.width;img.height=block.height;img.loading='lazy';img.decoding='async';
+    img.onerror=()=>{if(img.src!==new URL(assetUrl(block.assetId),location.href).href){img.src=assetUrl(block.assetId);return;}img.hidden=true;link.textContent='打开图片';};
+    link.append(img);link.onclick=event=>{if(event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)return;event.preventDefault();imageViewer.open(block.assetId,img,link);};
+    const footer=el('figcaption','conversation-image-caption'), actions=el('span','conversation-image-actions');
+    if(block.caption)footer.append(el('span','',block.caption));
+    if(block.sourceUrl) {try {const url=new URL(block.sourceUrl);if(['https:','http:'].includes(url.protocol)&&!url.username&&!url.password){const source=el('a','',block.sourceKind==='screenshot'?'截图来源':'来源');source.href=url.href;source.target='_blank';source.rel='noopener noreferrer';actions.append(source);}}catch{}}
+    actions.append(imageAlbumButton(block.assetId,'保存图片'));footer.append(actions);figure.append(link,footer);return figure;
+  }
   let activityCacheBytes = 0;
   let messageRenderFrame;
-  let messageRenderTimer;
+  let messageRenderFramesRemaining = 0;
   let dirtyMessageIds = new Set(), allMessagesDirty = false;
   const messageWindow = createMessageWindow({ readingScroller, capturePosition: captureReadingPosition,
     restorePosition: restoreReadingPosition, render: dirty => renderMessages(false, dirty),
@@ -87,20 +100,24 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
     }).finally(() => { if (activityRequests.get(key) === request) activityRequests.delete(key); });
     activityRequests.set(key, request); return request.promise;
   }
-  function scheduleMessages(id, immediate = false) {
+  function scheduleMessages(id, streaming = false) {
     if (id) dirtyMessageIds.add(id); else allMessagesDirty = true;
-    if (immediate && messageRenderTimer !== undefined) { clearTimeout(messageRenderTimer); messageRenderTimer = undefined; }
-    const requestRender = () => {
-      messageRenderTimer = undefined;
-      messageRenderFrame = requestAnimationFrame(() => {
-        messageRenderFrame = undefined;
-        const dirty = allMessagesDirty ? undefined : new Set(dirtyMessageIds);
-        renderMessages(false, dirty);
-      });
-    };
-    if (messageRenderTimer === undefined && messageRenderFrame === undefined) {
-      if (immediate) requestRender(); else messageRenderTimer = setTimeout(requestRender, 50);
+    if (messageRenderFrame !== undefined) {
+      if (!streaming) messageRenderFramesRemaining = 1;
+      return;
     }
+    // Publish live text once per three paint opportunities, as in DeepSeek Harness.
+    messageRenderFramesRemaining = streaming ? 3 : 1;
+    const advance = () => {
+      if (--messageRenderFramesRemaining > 0) {
+        messageRenderFrame = requestAnimationFrame(advance);
+        return;
+      }
+      messageRenderFrame = undefined;
+      const dirty = allMessagesDirty ? undefined : new Set(dirtyMessageIds);
+      renderMessages(false, dirty);
+    };
+    messageRenderFrame = requestAnimationFrame(advance);
   }
   // Prefer complete unique anchors; recover only unique paragraph-final sentences.
   // Placement metadata never becomes message copy or HTML.
@@ -148,11 +165,11 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
     const output = item.output;
     if (!output?.blocks?.length) return [{ key: item.id, output }];
     const split = output.blocks.some(block => block.after) || output.blocks.length > 1 && output.blocks.some(block => outputAnchor(textNodes, block.title, true));
-    return (split ? output.blocks.map((block, index) => ({ key: `${item.id}:block:${index}`, index,
+    return (split ? output.blocks.map((block, index) => ({ key: `${item.id}:block:${index}`, index, isImage:block.type==='image',
       output: { ...output, title: block.title || output.title, blocks: [block] }, after: block.after || output.after, title: block.title || output.title }))
       : [{ key: item.id, output, after: output.after, title: output.title }])
       .map(part => ({ ...part, anchor: (part.after ? outputAnchor(textNodes, part.after, false, completed) : outputAnchor(textNodes, part.title, true))
-        || ((!part.after || completed) ? checkpoint : undefined) }));
+        || ((!part.after || completed || part.isImage) ? checkpoint : undefined) }));
   }
   function disposeMessageOutputs(article) {
     userTextResize?.unobserve(messageViews.get(article)?.userText?.content || article);
@@ -235,7 +252,7 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
   // Each ordinary text item keeps its place among the process events. This same
   // durable sequence is used for live SSE, refresh and restored session history.
   function responsePart(text, writingKey, running, previous, message) {
-    const writingRunning = running && /^\s{0,3}[`~]{3,}\s*(writing|email|letter|reply)\b/im.test(text);
+    const writingRunning = running && /^\s{0,3}[`~]{3,}\s*(writing|email|letter|reply|mermaid)\b/im.test(text);
     if (previous?.text === text && previous.writingKey === writingKey && previous.writingRunning === writingRunning) return { ...previous, running };
     const suffix = previous && text.startsWith(previous.text) ? text.slice(previous.text.length) : undefined;
     // A plain paragraph can grow in place. Formatting delimiters, new blocks,
@@ -281,26 +298,35 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
     view.imageGenerations = games;
     return cards;
   }
-  function responseTimeline(view, message, restoreScroll, questions, imageGenerations) {
+  function responseTimeline(view, message, questions, imageGenerations) {
+    const run = message.snapshot;
+    if (!run) return;
     const writingKey = JSON.stringify(message.writingEdits);
-    const { items, children: subagents } = subagentTimeline(message.snapshot?.items, message.snapshot?.status);
-    const hasResponses = items.some(item => item.type === 'response');
-    const hasCommentary = items.some(item => item.type === 'commentary');
-    if (!hasResponses && !hasCommentary && !questions?.length && !subagents.length) return;
+    const { items, children: subagents } = subagentTimeline(run.items, run.status);
+    const hasResponses = items.some(item => item.type === 'response' && item.text.trim());
     view.responseParts ||= new Map(); view.processParts ||= new Map(); view.questionParts ||= new Map();
     const nodes = [], usedResponses = new Set(), usedProcesses = new Set(), usedQuestions = new Set();
     const operationResults = Object.fromEntries(items.filter(item => item.type === 'tool' && item.operationKey).map(item => [item.operationKey, item.status]));
+    const outputKeys = new Set(messageInteractions(message)
+      .filter(item => item.kind === 'output' && !item.programAttachment && item.output?.blocks?.length)
+      .map(item => `output:${item.output.id}`));
+    const last = items.at(-1);
     let process = [];
-    const flush = (terminal = false) => {
-      if (!process.length && !(terminal && message.snapshot.status === 'running' && items.at(-1)?.status !== 'running')) return;
+    const flush = boundary => {
+      const terminal = !boundary;
+      const status = terminal ? run.status
+        : run.status === 'running' && process.some(item => item.status === 'running') ? 'running' : 'completed';
+      if (!process.length && !(terminal && (status === 'failed' || status === 'cancelled'
+        || status === 'running' && last?.type !== 'response' && last?.status !== 'running'))) return;
       const key = process[0]?.id || `waiting:${items.at(-1)?.id}`;
       usedProcesses.add(key);
-      const snapshot = { ...message.snapshot, items: process, operationResults,
-        status: terminal ? message.snapshot.status : 'completed', failureMessage: terminal ? message.snapshot.failureMessage : undefined };
+      const startedAt = process[0] === items[0] ? run.startedAt ?? process[0]?.startedAt : process[0]?.startedAt;
+      const endedAt = terminal ? run.endedAt : boundary.startedAt;
+      const snapshot = { status, startedAt, endedAt, items: process, operationResults, failureMessage: terminal ? run.failureMessage : undefined };
       // The game replaces its loading summary. Full process history returns
       // when the tool finishes, without a generation label or spinner above it.
       if (!process.some(item => imageGenerations.has(item.id))) {
-        const details = activity(snapshot, `${message.id}:${key}`, view.processParts.get(key), restoreScroll, message);
+        const details = activity(snapshot, `${message.id}:${key}`, view.processParts.get(key), message);
         view.processParts.set(key, details); nodes.push(details);
       }
       for (const item of process) if (imageGenerations.has(item.id)) nodes.push(imageGenerations.get(item.id));
@@ -309,26 +335,29 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
     for (const [itemIndex, item] of items.entries()) {
       if (item.type === 'subagent') {
         if (item.id === subagents[0].id) {
-          flush(); view.subagents = renderSubagents(subagents, message, view.subagents); nodes.push(view.subagents.node);
+          flush(item); view.subagents = renderSubagents(subagents, message, view.subagents); nodes.push(view.subagents.node);
         }
         continue;
       }
       const forms = (questions || []).filter(question => question.activityId === item.id);
       if (forms.length) {
-        flush(); usedQuestions.add(item.id);
+        flush(item); usedQuestions.add(item.id);
         let checkpoint = view.questionParts.get(item.id);
         if (!checkpoint) { checkpoint = el('div', 'activity activity-question'); view.questionParts.set(item.id, checkpoint); }
         syncChildren(checkpoint, forms.map(form => form.node)); nodes.push(checkpoint); continue;
       }
       if (item.type !== 'response' && item.type !== 'commentary') {
         process.push(item);
-        // Keep the visual's preparation separate from the thinking that follows it.
-        if (item.type === 'tool' && item.name === 'present_output' && item !== items.at(-1)) flush();
+        // Keep visual output boundaries, without splitting on image preparation.
+        if (item.type === 'tool' && (item.name === 'present_output'
+          || item.name === 'image_assets' && item.status === 'completed' && outputKeys.has(item.operationKey))
+          && items[itemIndex + 1]) flush(items[itemIndex + 1]);
         continue;
       }
-      flush(); usedResponses.add(item.id);
+      if (!item.text.trim()) continue;
+      flush(item); usedResponses.add(item.id);
       let part = view.responseParts.get(item.id);
-      const running = message.snapshot.status === 'running';
+      const running = run.status === 'running';
       part = responsePart(item.text, writingKey, running, part, message);
       if (item.type === 'response' && !running && supersededResponse(item, items, itemIndex)) {
         const details = part.repeatedDetails || el('details', 'response-superseded');
@@ -339,10 +368,10 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
       view.responseParts.set(item.id, part);
       nodes.push(...part.displayNodes);
     }
-    flush(true);
+    flush();
     // Legacy snapshots have one unsplit answer; preserve it instead of dropping it.
     if (!hasResponses && message.text) {
-      view.legacyTextPart = responsePart(message.text, writingKey, message.snapshot.status === 'running', view.legacyTextPart, message);
+      view.legacyTextPart = responsePart(message.text, writingKey, run.status === 'running', view.legacyTextPart, message);
       nodes.push(...view.legacyTextPart.nodes);
     }
     for (const key of view.questionParts.keys()) if (!usedQuestions.has(key)) view.questionParts.delete(key);
@@ -408,25 +437,27 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
       if (!article.classList.contains('virtual-message')) article.hidden = !article.children.length;
     }
   }
-  function renderMessages(forceScroll = false, dirtyIds) {
+  function renderMessages(forceScroll = false, dirtyIds, anchorId) {
     const started = performance.now();
-    try { return renderMessageViews(forceScroll, dirtyIds); }
+    try { return renderMessageViews(forceScroll, dirtyIds, anchorId); }
     finally { window.ZigentTelemetry?.record('web.render', performance.now() - started); }
   }
-  function renderMessageViews(forceScroll = false, dirtyIds) {
-    if (messageRenderFrame !== undefined) { cancelAnimationFrame(messageRenderFrame); messageRenderFrame = undefined; }
-    if (messageRenderTimer !== undefined) { clearTimeout(messageRenderTimer); messageRenderTimer = undefined; }
+  function renderMessageViews(forceScroll = false, dirtyIds, anchorId) {
+    if (messageRenderFrame !== undefined) {
+      cancelAnimationFrame(messageRenderFrame); messageRenderFrame = undefined;
+      // A viewport render can arrive before the scheduled stream batch.
+      if (dirtyIds) dirtyIds = allMessagesDirty ? undefined : new Set([...dirtyIds, ...dirtyMessageIds]);
+    }
     dirtyMessageIds.clear(); allMessagesDirty = false;
     const reading = readingMetrics(), position = captureReadingPosition();
     const nearBottom = reading.nearBottom;
     const existing = new Map([...$('messages').children].map(node => [node.dataset.id, node]));
     const articles = [], restoreScroll = [], outputMounts = [];
     const pending = pendingArticles();
-    const greeting = appState.current ? appState.conversationGreeting : appState.homeGreeting;
-    $('welcome-greeting').textContent = greeting;
-    $('welcome').hidden = appState.messagesLoading || appState.messages.length > 0 || pending.length > 0 || !greeting;
-    $('new-mobile').hidden = !appState.messagesLoading && appState.messages.length === 0 && pending.length === 0;
+    const loadingOrFailed = appState.messagesLoading || appState.messagesError;
+    $('new-mobile').hidden = !loadingOrFailed && appState.messages.length === 0 && pending.length === 0;
     $('messages-loading').hidden = !appState.messagesLoading;
+    $('messages-retry').hidden = !appState.messagesError;
     $('messages').setAttribute('aria-busy', String(appState.messagesLoading));
     $('older').hidden = !appState.hasOlder;
     const visible = [...appState.messages];
@@ -439,13 +470,18 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
       visible.push({ id: 'waiting', role: 'assistant', snapshot: { status: 'running', items: [] } });
     const questionPositions = questionPlacements(visible);
     const browserEntries = browserEntryMessages(visible);
-    messageWindow.prepare(visible, existing, appState.selectionVersion, forceScroll || nearBottom);
+    messageWindow.prepare(visible, existing, appState.selectionVersion, forceScroll || nearBottom, anchorId);
     let mountedReply;
     for (const [index, message] of visible.entries()) {
       if (message.role === 'user' || message.role === 'assistant') mountedReply = undefined;
-      const remainingInteractions = messageInteractions(message).filter(item => !questionPositions.moved.get(message.id)?.has(item.id)
-        && (item.kind !== 'browser' || item.actions?.some(action => action.value?.pendingId)));
-      if (message.role === 'notice' && !remainingInteractions.length && !message.text && !message.assets?.length && !message.action && !browserEntries.has(message.id)) continue;
+      // Transcription notices retain their files for model access, not chat attachments.
+      // Filter saved notices too; explicitly uploaded or returned files stay visible.
+      const displayAssets = (message.assets || []).filter(id => message.role !== 'notice' || !message.files?.[id]?.name.endsWith('.转录.txt'));
+      const remainingInteractions = [...messageInteractions(message).filter(item => !questionPositions.moved.get(message.id)?.has(item.id)
+        && (item.kind !== 'browser' || item.actions?.some(action => action.value?.pendingId))),
+        ...(message.attachments || []).map(item => ({ id: `attachment:${item.id}`, kind: 'output', title: item.output.title,
+          output: item.output, program: item.program, data: item.data, programAttachment: true }))];
+      if (message.role === 'notice' && !remainingInteractions.length && !message.text && !displayAssets.length && !message.action && !browserEntries.has(message.id)) continue;
       let article = existing.get(message.id);
       if (!article) {
         article = el('article', `message ${message.role}`); article.dataset.id = message.id;
@@ -473,20 +509,13 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
         return { activityId, node: interaction.node };
       });
       const imageGenerations = pendingImageGenerations(view, message);
-      const timelineNodes = responseTimeline(view, message, restoreScroll, inlineQuestions, imageGenerations);
-      if (message.snapshot && !timelineNodes) {
-        if (imageGenerations.size) children.push(...imageGenerations.values());
-        else {
-          view.activity = activity(message.snapshot, message.id, view.activity, restoreScroll, message);
-          children.push(view.activity);
-        }
-      }
+      const timelineNodes = responseTimeline(view, message, inlineQuestions, imageGenerations);
       // Snapshot-only deltas must not recreate answers, attachments or action buttons.
       const repeatedNotice = message.role === 'notice' && message.text && messageInteractions(message)
         .some(item => item.description === message.text || item.statusMessage === message.text);
       const displayText = repeatedNotice ? '' : message.text;
-      const bodyKey = JSON.stringify([message.role, displayText, message.assets, message.files, message.assets?.map(id => appState.assetDimensions[id]), message.writingEdits,
-        /^\s{0,3}[`~]{3,}\s*(writing|email|letter|reply)\b/im.test(displayText) && message.snapshot?.status === 'running']);
+      const bodyKey = JSON.stringify([message.role, displayText, displayAssets, message.files, displayAssets.map(id => appState.assetDimensions[id]), message.writingEdits,
+        /^\s{0,3}[`~]{3,}\s*(writing|email|letter|reply|mermaid)\b/im.test(displayText) && message.snapshot?.status === 'running']);
       if (view.bodyKey !== bodyKey) {
         if (view.userText) { userTextResize?.unobserve(view.userText.content); view.userText = undefined; }
         view.bodyKey = bodyKey;
@@ -502,12 +531,12 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
           }
           body.push(text);
         }
-        if (message.assets?.length) {
+        if (displayAssets.length) {
           // Streamed captions keep the existing image and its prepared share file.
-          const mediaKey = JSON.stringify([message.role, message.assets, message.files, message.assets.map(id => appState.assetDimensions[id])]);
+          const mediaKey = JSON.stringify([message.role, displayAssets, message.files, displayAssets.map(id => appState.assetDimensions[id])]);
           if (view.mediaKey !== mediaKey) {
             const media = el('div', 'message-assets');
-            for (const [index, id] of message.assets.entries()) {
+            for (const [index, id] of displayAssets.entries()) {
               const link = el('a', 'message-asset-preview'); link.href = assetUrl(id); link.target = '_blank'; link.rel = 'noopener';
               const document = message.files?.[id];
               if (document) {
@@ -521,7 +550,7 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
               }
               const img = el('img'); img.decoding = 'async';
               // Only the final attachment at the reading end can be the initial visible image.
-              const prioritize = (forceScroll || nearBottom) && message === visible.at(-1) && index === message.assets.length - 1;
+              const prioritize = (forceScroll || nearBottom) && message === visible.at(-1) && index === displayAssets.length - 1;
               img.loading = prioritize ? 'eager' : 'lazy';
               if (prioritize) img.fetchPriority = 'high';
               img.src = assetUrl(id, true); img.alt = message.role === 'user' ? '发送的图片' : '生成的图片';
@@ -542,7 +571,7 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
               };
               if (message.role === 'assistant') {
                 const frame = el('div', 'message-generated-asset');
-                const label = message.assets.length === 1 ? '保存到相册' : `保存图片 ${index + 1} 到相册`;
+                const label = displayAssets.length === 1 ? '保存到相册' : `保存图片 ${index + 1} 到相册`;
                 frame.append(link, imageAlbumButton(id, label)); media.append(frame);
               } else media.append(link);
             }
@@ -560,8 +589,9 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
       const seenInteractions = new Set();
       for (const item of remainingInteractions) {
         if (seenInteractions.has(item.id)) continue; seenInteractions.add(item.id);
-        const checkpoint = item.kind === 'output' ? outputCheckpoint(message, view, item) : undefined;
-        for (const part of item.kind === 'output' ? outputParts(item, textNodes, checkpoint.anchor, message.snapshot?.status !== 'running') : [{ key: item.id }]) {
+        const checkpoint = item.kind === 'output' && !item.programAttachment ? outputCheckpoint(message, view, item) : {};
+        for (const part of item.programAttachment ? [{ key: item.id, output: item.output }]
+          : item.kind === 'output' ? outputParts(item, textNodes, checkpoint.anchor, message.snapshot?.status !== 'running') : [{ key: item.id }]) {
           interactionIds.add(part.key);
           const previous = view.interactions.get(part.key);
           let interaction;
@@ -571,11 +601,20 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
               const blockIndex = index => part.index === undefined ? index : part.index;
               const outputView = window.ZigentOutputComponents.render(part.output, previous?.outputView, {
                 openDocument: (index, trigger) => openConversationDocument(item, message, `block:${blockIndex(index)}`, trigger),
-                interactiveUrl: index => new URL(`api/interactive-output?${new URLSearchParams({ ...scope, index: blockIndex(index) })}`, location.href).href,
-                resize: resizeConversationOutput
+                interactiveUrl: index => {
+                  const query = new URLSearchParams({ ...scope, index: blockIndex(index) });
+                  const palette = assetVersion('plugins/palette/colors.css');
+                  if (palette) query.set('palette', palette);
+                  return new URL(`api/interactive-output?${query}`, location.href).href;
+                },
+                resize: resizeConversationOutput,
+                programKey: item.data,
+                renderProgram: item.programAttachment && item.program === 'sleep-timeline'
+                  ? (block, index) => index === 0 ? createSleepTimeline(item.data, block, { key: JSON.stringify(scope) }) : undefined : undefined,
+                renderImage: renderInlineImage
               });
               interaction = { node: outputView.node, outputView };
-              if (part.anchor || !part.after || message.snapshot?.status !== 'running') outputMounts.push(outputView);
+              if (part.anchor || !part.isImage && (!part.after || message.snapshot?.status !== 'running')) outputMounts.push(outputView);
             } else {
               interaction = previous?.fallback ? previous : { node: el('section', 'interaction output-fallback'), fallback: true };
               updateText(interaction.node, part.output?.title || '可视化结果暂时无法显示，请刷新页面重试。');
@@ -583,9 +622,9 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
           } else interaction = renderInteraction(item, message, previous?.outputView || previous?.fallback ? undefined : previous);
           if (previous?.outputView && previous.outputView !== interaction.outputView) previous.outputView.dispose?.();
           view.interactions.set(part.key, interaction);
-          if (item.kind === 'output' && message.role === 'assistant') {
+          if (item.kind === 'output' && message.role === 'assistant' && !item.programAttachment) {
             // Wait for a streamed anchor instead of mounting at the bottom and moving a live iframe.
-            if (part.anchor || !part.after || message.snapshot?.status !== 'running') placedOutputs.push({ ...part, node: interaction.node, process: checkpoint.process });
+            if (part.anchor || !part.isImage && (!part.after || message.snapshot?.status !== 'running')) placedOutputs.push({ ...part, node: interaction.node, process: checkpoint.process });
           } else if (!interaction.node.classList.contains('compact-memory') || !interaction.node.parentNode?.classList.contains('message-tools')) trailingInteractions.push(interaction.node);
         }
       }
@@ -601,7 +640,7 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
           content.splice(processIndex, 1); content.splice(outputIndex, 0, part.process);
         }
         syncChildren(answer, content);
-        if (!children.includes(answer)) children.splice(message.snapshot && !timelineNodes ? 1 : 0, 0, answer);
+        if (!children.includes(answer)) children.unshift(answer);
       }
       children.push(...trailingInteractions);
       for (const [id, interaction] of view.interactions) if (!interactionIds.has(id)) { interaction.outputView?.dispose?.(); view.interactions.delete(id); }
@@ -624,6 +663,8 @@ export function createMessageRenderer({ conversation: appState, assetUrl, loadAc
         children.push(view.tools); if (view.feedback.textContent) children.push(view.feedback);
       }
       if (browserEntries.has(message.id)) { view.browserEntry = messageBrowserEntry(view.browserEntry); children.push(view.browserEntry.node); }
+      const annotationLayer = renderAnnotations?.(message, article, children.includes(view.answer) ? view.answer : undefined);
+      if (annotationLayer) children.push(annotationLayer);
       syncChildren(article, children); articles.push(article);
     }
     for (const article of existing.values()) disposeMessageOutputs(article);

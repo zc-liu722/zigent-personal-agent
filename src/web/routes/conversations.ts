@@ -4,7 +4,7 @@ import type { AgentRuntime } from "../../runtime.js";
 import type { ConversationCoordinator } from "../conversation-coordinator.js";
 import type { WebStore } from "../store.js";
 
-import { conditionalJson, data, json, type WebRoute } from "../http.js";
+import { conditionalCompressedJson, data, json, type WebRoute } from "../http.js";
 
 export function createConversationsRoutes({ store, runtime, owner, coordinator }: {
   store: WebStore;
@@ -13,21 +13,21 @@ export function createConversationsRoutes({ store, runtime, owner, coordinator }
   coordinator: ConversationCoordinator;
 }) {
   const branchRequests = new Map<string, { key: string; result: Promise<{ id: string }> }>();
-  async function createConversation(): Promise<string> {
+  async function createConversation(model?: string): Promise<string> {
     const id = `web:${randomUUID()}`;
-    store.draftConversation(id);
+    store.draftConversation(id, model);
     return store.publicId(id);
   }
   const handle: WebRoute = async ({ req, res, url, route, credential }) => {
     if (route === "api/conversations" && req.method === "GET") {
-      if (!url.search) { conditionalJson(req, res, store.conversations()); return true; }
+      if (!url.search) { await conditionalCompressedJson(req, res, store.conversations()); return true; }
       const input = z.object({ page: z.literal("1").optional(), q: z.string().trim().max(500).default(""),
         cursor: z.string().regex(/^\d{1,16}:\d{1,16}$/).optional(),
         limit: z.coerce.number().int().min(1).max(200).default(200) }).strict().safeParse(Object.fromEntries(url.searchParams));
       if (!input.success) { json(res, 400, { error: "搜索或分页无效。" }); return true; }
       const parts = input.data.cursor?.split(":").map(Number);
       if (parts?.some(value => !Number.isSafeInteger(value) || value < 0)) { json(res, 400, { error: "分页无效。" }); return true; }
-      conditionalJson(req, res, store.conversationPage(input.data.q, parts ? { updatedAt: parts[0]!, rowid: parts[1]! } : undefined, input.data.limit));
+      await conditionalCompressedJson(req, res, store.conversationPage(input.data.q, parts ? { updatedAt: parts[0]!, rowid: parts[1]! } : undefined, input.data.limit));
       return true;
     }
     if (route === "api/conversations" && req.method === "DELETE") {
@@ -49,7 +49,7 @@ export function createConversationsRoutes({ store, runtime, owner, coordinator }
     }
     if (route === "api/conversations" && req.method === "POST") {
       const id = await createConversation();
-      json(res, 201, { id, greeting: store.conversationGreeting(store.resolveConversation(id)!) }); return true;
+      json(res, 201, { id }); return true;
     }
     if (route === "api/conversations/retain" && req.method === "POST") {
       const input = z.object({ conversationId: z.string().regex(/^[a-f0-9]{64}$/), title: z.string().max(60) }).strict().parse(await data(req));

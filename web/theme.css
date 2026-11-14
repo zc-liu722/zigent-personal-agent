@@ -1,106 +1,152 @@
-/* Preserve the daylight stationery; night uses warm charcoal and softer ink. */
+/* Daylight uses subtly tinted white. Night keeps a pure-black page; cards use a faint accent tint. */
 :root, :root[data-theme="light"] { color-scheme: light; --canvas: var(--paper); --text: var(--ink); }
-/* Conversation cards share the page fill in both themes. */
-:root :is(.interaction, .interaction.visual-operation, .interaction-link, .output-card-open) { background: var(--paper); }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --paper: #1d1c19;
-  --surface: #282722;
-  --ink: #e7e3db;
-  --muted: #aba69a;
-  --line: #403e37;
-  --accent: #df9778;
-  --soft: #34322c;
-  --sidebar: #181815;
-  --night-link: #dfb18e;
-  --night-hover: #37352e;
+  --night-link: var(--palette-link);
+  --night-hover: var(--palette-hover);
+  --canvas: var(--surface);
 }
-:root[data-theme="dark"] .writing-block { --writing-paper: #292720; --writing-sheen: #ffffff04; --writing-shadow: #00000024; }
-:root[data-theme="dark"] :is(input, textarea)::placeholder { color: #a49e91; opacity: 1; }
-:root[data-theme="dark"] :is(.password-field, .conversation-sidebar, .history-search, .topbar-actions, .composer, .sheet, .sheet input, .interaction, .interaction-link, .code-block, .code-heading, .memory-diff-body, .document-workspace) { border-color: var(--line); }
-:root[data-theme="dark"] :is(.composer:focus-within, .password-field:focus-within, .history-search:focus-within) { border-color: #918572; }
+:root :is(.message.user .message-text, .message-context-preview) { background-color: var(--soft); color: var(--ink); }
+/* Dialogs that paint with the page fill pick up the tinted surface. */
+:root[data-theme="dark"] :is(.sheet, .message-selection-dialog, .trigger-map-dialog) { background-color: var(--surface); }
+:root :is(.message.user .message-text, .message-context-preview) :is(a, svg, .content-icon, .user-message-toggle) { color: inherit; }
+:root[data-theme="dark"] :is(.message.user .message-text, .message-context-preview) code { background-color: transparent; color: inherit; }
+:root :is(.message.user .message-text, .message.user .user-message-toggle):focus-visible { outline-color: var(--ink); }
+:root[data-theme="dark"] :is(.usage-sheet, .automation-sheet, .model-sheet) .dialog-heading { background-color: var(--surface); }
+:root[data-theme="dark"] :is(input, textarea)::placeholder { color: var(--palette-night-placeholder-text); opacity: 1; }
+:root[data-theme="dark"] :is(.password-field, .conversation-sidebar, .history-search, .sheet, .sheet input, .interaction, .interaction-link, .code-block, .code-heading, .memory-diff-body, .document-workspace) { border-color: var(--line); }
+:root[data-theme="dark"] :is(.password-field:focus-within, .history-search:focus-within) { border-color: var(--palette-focus); }
 :root[data-theme="dark"] :is(.task-plan-schedule, .document-workspace-title) { color: var(--ink); }
-:root[data-theme="dark"] :is(.history-search svg, .composer textarea::placeholder, .composer-hint, .message-action, .activity, .activity summary::after, .code-copy, .model-option-price, .interaction-description, .interaction-status, .interaction-meta, .interaction-copy, .interaction-details summary, .interaction.output-fallback, .task-plan-timezone, .task-plan-delivery, .task-plan-details summary, .task-plan-instruction, .output-card-meta, .output-card-preview, .output-description, .document-workspace-feedback, .memory-diff-line, .memory-diff-line.omit, .memory-change-details summary) { color: var(--muted); }
+:root[data-theme="dark"] :is(.history-search svg, .composer textarea::placeholder, .message-action:where(:not(.reply-selection-toolbar *)), .activity, .activity summary::after, .code-copy, .model-option-price, .interaction-description, .interaction-status, .interaction-meta, .interaction-copy, .interaction-details summary, .interaction.output-fallback, .task-plan-timezone, .task-plan-delivery, .task-plan-details summary, .task-plan-instruction, .output-card-meta, .output-card-preview, .output-description, .document-workspace-feedback, .memory-diff-line, .memory-diff-line.omit, .memory-change-details summary) { color: var(--muted); }
 :root[data-theme="dark"] .interaction.settled .interaction-status { color: var(--muted); }
-:root[data-theme="dark"] :is(.message-text a, .activity a, .document-file-card, .interaction-control, .document-workspace-conflict button) { color: var(--night-link); }
-:root[data-theme="dark"] :is(.icon-button:hover, #history button:hover, .profile:hover, .attach-button:hover, .logout:hover, .interaction-control:hover, .interaction-copy:hover, .output-card-open:hover, .output-close:hover) { background: var(--night-hover); }
-:root[data-theme="dark"] :is(#history button.active, .avatar, .dialog-heading .icon-button, .sheet-handle) { background: var(--soft); }
+:root[data-theme="dark"] :is(.message-text a, .activity a, .document-file-card, .interaction-control:where(:not(.primary-action)), .document-workspace-conflict button) { color: var(--night-link); }
+:root[data-theme="dark"] :is(.icon-button:hover:where(:not(.nav-button, .topbar-actions *)), #history button:hover:where(:not(.active)), .profile:hover, .attach-button:hover, .logout:hover, .interaction-control:hover:where(:not(.primary-action)), .interaction-copy:hover, .output-card-open:hover, .output-close:hover) { background: var(--night-hover); }
+:root[data-theme="dark"] :is(.avatar, .dialog-heading .icon-button, .sheet-handle) { background: var(--soft); }
 :root[data-theme="dark"] :is(.attach-button, .model-picker, .message-text :not(pre) > code, .message-text th, .code-block, .memory-diff-body) { background: var(--surface); }
-:root[data-theme="dark"] .code-block :is(.hljs-comment, .hljs-quote) { color: #a5b6a3; }
-:root[data-theme="dark"] .code-block :is(.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-meta) { color: #e3a4ef; }
-:root[data-theme="dark"] .code-block :is(.hljs-string, .hljs-regexp, .hljs-addition) { color: #8de0a5; }
-:root[data-theme="dark"] .code-block :is(.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-variable) { color: #ffb581; }
-:root[data-theme="dark"] .code-block :is(.hljs-title, .hljs-section, .hljs-built_in, .hljs-type) { color: #8ec5ff; }
-:root[data-theme="dark"] .code-block :is(.hljs-attr, .hljs-attribute, .hljs-property, .hljs-name, .hljs-tag) { color: #ffaaa4; }
-:root[data-theme="dark"] .code-block .hljs-deletion { color: #ff9999; }
-:root[data-theme="dark"] :is(.interaction, .output-card-open, .interaction-link, .message-context-menu) { background: var(--surface); }
-:root[data-theme="dark"] .primary { background: var(--ink); color: var(--paper); }
-:root[data-theme="dark"] .primary:hover { background: #fff9ef; }
-:root[data-theme="dark"] :is(.sheet .primary, .interaction-control.primary-action) { border-color: transparent; background: #cf8a6a; color: #211b16; }
-:root[data-theme="dark"] :is(.sheet .primary:hover, .interaction-control.primary-action:hover) { background: #df9d7f; }
-:root[data-theme="dark"] .send { color: #211b16; }
-:root[data-theme="dark"] .send:disabled { background: #48453d; color: #bdb5a5; }
-:root[data-theme="dark"] :is(#login-error, #settings-error, #account-error, .logout, .document-workspace-feedback) { color: #efa28d; }
-:root[data-theme="dark"] .microphone-button.is-recording { color: #f6ac9f; background: #52312a; }
+:root[data-theme="dark"] .code-block :is(.hljs-comment, .hljs-quote) { color: var(--palette-syntax-comment); }
+:root[data-theme="dark"] .code-block :is(.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-meta) { color: var(--palette-syntax-keyword); }
+:root[data-theme="dark"] .code-block :is(.hljs-string, .hljs-regexp, .hljs-addition) { color: var(--palette-syntax-string); }
+:root[data-theme="dark"] .code-block :is(.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-variable) { color: var(--palette-syntax-number); }
+:root[data-theme="dark"] .code-block :is(.hljs-title, .hljs-section, .hljs-built_in, .hljs-type) { color: var(--palette-syntax-title); }
+:root[data-theme="dark"] .code-block :is(.hljs-attr, .hljs-attribute, .hljs-property, .hljs-name, .hljs-tag) { color: var(--palette-syntax-attribute); }
+:root[data-theme="dark"] .code-block .hljs-deletion { color: var(--palette-syntax-deletion); }
+:root[data-theme="dark"] .message-context-menu { background: var(--surface); }
+:root[data-theme="dark"] .send:disabled { background: var(--palette-night-send-fill); color: var(--palette-night-send-text); }
+:root[data-theme="dark"] :is(#login-error, #settings-error, #account-error, .logout, .document-workspace-feedback) { color: var(--palette-danger); }
+:root[data-theme="dark"] .microphone-button.is-recording { color: var(--palette-night-microphone-button-text); background: var(--palette-danger-surface); }
 :root[data-theme="dark"] .attachment button { border-color: var(--surface); }
-:root[data-theme="dark"] .task-check { border-color: #918572; }
-:root[data-theme="dark"] .task-check.checked { background: #aba18a; border-color: #aba18a; color: #211b16; }
-:root[data-theme="dark"] .message-text blockquote { color: var(--muted); border-color: #625d50; }
-:root[data-theme="dark"] .activity summary::before { border-color: #777062; }
-:root[data-theme="dark"] .activity.running summary::before { border-color: #76533f; border-top-color: var(--accent); }
-:root[data-theme="dark"] :is(.connection-status[data-kind="error"], .document-workspace-conflict) { background: #3b3023; color: #e1b887; border-color: #655039; }
-:root[data-theme="dark"] :is(.interaction-feedback, .interaction.failed .interaction-status, .interaction.expired .interaction-status, .document-workspace-conflict p) { color: #e1b887; }
+:root[data-theme="dark"] .task-check { border-color: var(--palette-focus); }
+:root[data-theme="dark"] .task-check.checked { background: var(--palette-night-task-check-fill); border-color: var(--palette-night-task-check-fill); color: var(--paper); }
+:root[data-theme="dark"] .activity summary::before { border-color: var(--palette-night-activity-border); }
+:root[data-theme="dark"] .activity.running summary::before { border-color: var(--palette-night-activity-border-2); border-top-color: var(--accent); }
+:root[data-theme="dark"] :is(.connection-status[data-kind="error"], .document-workspace-conflict) { background: var(--palette-warning-surface); color: var(--palette-warning); border-color: var(--palette-night-connection-status-border); }
+:root[data-theme="dark"] :is(.interaction-feedback, .interaction.failed .interaction-status, .interaction.expired .interaction-status, .document-workspace-conflict p) { color: var(--palette-warning); }
 :root[data-theme="dark"] .model-sheet .interaction-control:hover { background: var(--night-hover); }
 :root[data-theme="dark"] .model-sheet .interaction-control[aria-pressed="true"] { background: transparent; }
-:root[data-theme="dark"] .model-sheet .model-option.selected { background: #463329; }
-:root[data-theme="dark"] .model-sheet .interaction { background: transparent; }
-:root[data-theme="dark"] .interaction.settled { background: transparent; }
-:root[data-theme="dark"] .user-question { background: transparent; }
-:root[data-theme="dark"] .output-card-open:hover { border-color: #82715d; }
+:root[data-theme="dark"] .model-sheet .model-option.selected { background: var(--palette-night-model-sheet-fill); }
+:root[data-theme] .deployment-progress .interaction-control { background: transparent; color: inherit; }
+:root[data-theme="dark"] .output-card-open:hover { border-color: var(--palette-night-output-card-open-border); }
 :root[data-theme="dark"] .output-toolbar .output-text-button { background: var(--surface); border-color: var(--line); color: var(--night-link); }
-:root[data-theme="dark"] .output-toolbar .output-text-button:hover { background: var(--night-hover); border-color: #82715d; }
+:root[data-theme="dark"] .output-toolbar .output-text-button:hover { background: var(--night-hover); border-color: var(--palette-night-output-card-open-border); }
 :root[data-theme="dark"] .output-chart-grid { stroke: var(--line); }
 :root[data-theme="dark"] .output-table th { background: var(--surface); }
-:root[data-theme="dark"] .output-step.completed .output-step-mark { background: #2b382c; border-color: #526b50; color: #b0c8a4; }
+:root[data-theme="dark"] .output-step.completed .output-step-mark { background: var(--palette-night-output-step-fill); border-color: var(--palette-night-output-step-border); color: var(--palette-night-output-step-text); }
 :root[data-theme="dark"] .output-step.active .output-step-mark { border-color: var(--accent); color: var(--accent); }
-:root[data-theme="dark"] .memory-diff-line.add { color: #e9b696; background: #423028; }
-:root[data-theme="dark"] .memory-diff-line.remove { color: #bab3a4; background: #302e28; }
+:root[data-theme="dark"] .memory-diff-line.add { color: var(--palette-night-memory-diff-line-text); background: var(--palette-night-memory-diff-line-fill); }
+:root[data-theme="dark"] .memory-diff-line.remove { color: var(--palette-night-memory-diff-line-text-2); background: var(--palette-night-memory-diff-line-fill-2); }
 :root[data-theme="dark"] .message-context-menu { border-color: var(--line); }
 :root[data-theme="dark"] .message-context-item + .message-context-item { border-color: var(--line); }
 :root[data-theme="dark"] :is(.message-context-item:hover:not(:disabled), .message-context-item:focus-visible, .message-context-item:active:not(:disabled)) { background: var(--night-hover); }
-:root[data-theme="dark"] .message.assistant > .message-text ::selection { background: #695640; color: #fff4e2; }
-:root[data-theme="dark"] .reply-selection-toolbar { background: #34322cef; border-color: #625c4f; color: var(--ink); }
-:root[data-theme="dark"] .reply-selection-toolbar button + button { border-color: #625c4f; }
-:root[data-theme="dark"] :is(.reply-selection-toolbar button:hover, .reply-selection-toolbar button:active) { background: #4a453c; }
-:root[data-theme="dark"] .reply-selection-handle::before, :root[data-theme="dark"] .reply-selection-handle::after { background: #d9b38a; }
-:root[data-theme="dark"] .reply-selection-highlights { opacity: .27; }
-:root[data-theme="dark"] .reply-selection-highlights > span { background: rgb(217 179 138); }
-:root[data-theme="dark"] :is(.sheet, .output-sheet, .message-context-dialog, .message-selection-dialog)::backdrop { background: #08070480; }
-/* Floating navigation buttons and the composer share one translucent surface. */
-:root { --glass-fill: #ffffff66; --glass-edge: #ffffff99; --glass-highlight: #ffffffd9; --glass-shadow: #24231b14; --glass-sheen: #ffffff40; }
-:root[data-theme="dark"] { --glass-fill: #28272280; --glass-edge: #aaa49655; --glass-highlight: #ffffff38; --glass-shadow: #00000030; --glass-sheen: #ffffff12; }
-:root :is(.nav-button, .topbar-actions, .composer) {
-  border: 1px solid var(--glass-edge);
-  background: var(--surface);
-  box-shadow: inset 0 1px 1px var(--glass-highlight), inset 0 -1px 1px var(--glass-sheen), 0 4px 18px var(--glass-shadow);
-}
-@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
-  :root :is(.nav-button, .topbar-actions, .composer) {
-    background: linear-gradient(160deg, var(--glass-sheen), transparent 55%), var(--glass-fill);
+:root[data-theme="dark"] :is(.sheet, .output-sheet, .message-context-dialog, .message-selection-dialog)::backdrop { background: var(--palette-night-sheet-fill-3); }
+/* Keep the frost inside the floating controls. */
+:root :is(.nav-button, .topbar-actions, .composer) { background: var(--paper); }
+:root :is(.nav-button, .topbar-actions) { box-shadow: inset 0 0 0 1px var(--line); }
+:root .composer { border: 1px solid var(--accent); }
+:root .composer::before { background: var(--paper); }
+@supports (color: color-mix(in srgb, black, white)) and ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  :root :is(.nav-button, .topbar-actions, .composer),
+  :root .composer::before {
+    background-color: var(--palette-glass);
     -webkit-backdrop-filter: blur(12px);
     backdrop-filter: blur(12px);
   }
+  :root[data-theme] .nav-button:hover { background: color-mix(in srgb, var(--paper) 60%, transparent); }
+  :root[data-theme] .topbar-actions .icon-button:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); }
 }
 /* iOS 26 samples backgrounds on fixed bottom controls into Safari's toolbar.
    Keep the fixed wrapper transparent and put the glass on an absolute child. */
 @media (max-width: 650px), (max-width: 1024px) and (pointer: coarse) {
-  :root .composer { position: relative; isolation: isolate; background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: inset 0 1px 1px var(--glass-highlight), inset 0 -1px 1px var(--glass-sheen), 0 1px 4px var(--glass-shadow); }
-  :root .composer::before { content: ''; position: absolute; z-index: -1; inset: 0; border-radius: inherit; background: var(--surface); pointer-events: none; }
-  @supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
-    :root .composer::before { background: linear-gradient(160deg, var(--glass-sheen), transparent 55%), var(--glass-fill); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
-  }
+  :root .composer { position: relative; isolation: isolate; background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :root .composer::before { content: ''; position: absolute; z-index: -1; inset: 0; border-radius: inherit; pointer-events: none; }
 }
 @media (prefers-reduced-transparency: reduce), (prefers-reduced-motion: reduce), (prefers-contrast: more) {
-  :root :is(.nav-button, .topbar-actions, .composer) { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
-  :root .composer::before { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :root :is(.nav-button, .topbar-actions, .composer) { background: var(--paper); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :root[data-theme] .nav-button:hover { background: var(--paper); }
+  :root .composer::before { background: var(--paper); -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
+
+/* Theme choices are native radio buttons with a visible swatch and selected state. */
+.theme-current-swatch { flex: none; width: 14px; height: 14px; border: 1px solid var(--line); border-radius: 50%; background: var(--accent); }
+.theme-palette-picker { min-inline-size: 0; margin: 0; padding: 0 4px 8px; border: 0; }
+.theme-palette-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.theme-palette-options label { position: relative; display: grid; place-items: center; min-width: 0; min-height: 48px; margin: 0; padding: 5px 1px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 12px; text-align: center; }
+.theme-palette-options input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.theme-palette-options span { display: grid; justify-items: center; gap: 4px; line-height: 1.25; }
+.theme-palette-options span::before { content: ''; width: 13px; height: 13px; border: 1px solid var(--line); border-radius: 50%; background: var(--theme-swatch); }
+.theme-palette-options input[value="brown"] + span { --theme-swatch: var(--palette-brown-accent); }
+.theme-palette-options input[value="ins-blue"] + span { --theme-swatch: var(--palette-ins-blue-accent); }
+.theme-palette-options input[value="light-pink"] + span { --theme-swatch: var(--palette-light-pink-accent); }
+.theme-palette-options input[value="lipstick-red"] + span { --theme-swatch: var(--palette-lipstick-red-accent); }
+.theme-palette-options label:has(input:checked) { border-color: var(--accent); background: var(--soft); font-weight: 600; }
+.theme-palette-options label:has(input:checked)::after { content: ''; position: absolute; inset: 7px 6px auto auto; width: 4px; height: 7px; border: solid var(--accent); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); pointer-events: none; }
+.theme-palette-options label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+#theme-dialog { max-height: calc(var(--app-height, 100dvh) - 16px); }
+.theme-color-roles { margin: 8px 4px 0; border-top: 1px solid var(--line); }
+.theme-color-roles summary { min-height: 44px; padding: 12px 0; font-size: 13px; font-weight: 600; line-height: 20px; cursor: pointer; }
+.theme-color-roles dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 10px; margin: 0 0 12px; font-size: 12px; line-height: 1.5; }
+.theme-color-roles dt { display: flex; align-items: center; gap: 6px; }
+.theme-color-roles dt::before { content: ''; flex: none; width: 10px; height: 10px; border: 1px solid var(--line); border-radius: 50%; background: var(--role-swatch); }
+.theme-color-roles dd { margin: 0; color: var(--muted); }
+.theme-role-page { --role-swatch: var(--paper); }
+.theme-role-surface { --role-swatch: var(--surface); }
+.theme-role-ink { --role-swatch: var(--ink); }
+.theme-role-muted { --role-swatch: var(--muted); }
+.theme-role-soft { --role-swatch: var(--soft); }
+.theme-role-accent { --role-swatch: var(--accent); }
+.theme-role-support { --role-swatch: var(--ui-support); }
+.theme-role-detail { --role-swatch: var(--ui-detail); }
+
+:root :is(.primary, .sheet .primary, .interaction-control.primary-action, .send:not(:disabled)) {
+  background: var(--accent);
+  color: var(--palette-on-accent);
+}
+:root :is(.primary, .sheet .primary, .interaction-control.primary-action, .send):hover:not(:disabled) {
+  background: var(--palette-action-hover);
+}
+.theme-wallpaper-picker { display: grid; gap: 8px; margin: 8px 4px 0; padding-top: 14px; border-top: 1px solid var(--line); }
+.theme-wallpaper-picker h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.theme-wallpaper-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.theme-wallpaper-actions button { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: transparent; font-size: 13px; }
+.theme-wallpaper-actions button:hover:not(:disabled) { background-color: var(--soft); }
+.theme-wallpaper-actions svg { width: 18px; height: 18px; color: var(--accent); }
+#theme-wallpaper-clear { color: var(--muted); }
+#theme-wallpaper-status { margin: 0; color: var(--muted); font-size: 12px; }
+#theme-wallpaper-status:empty { display: none; }
+
+/* Use the large viewport in the browser so toolbar movement doesn't resize
+   the photo. For the installed app, use the fixed viewport box: WebKit can
+   count the separate status bar in 100lvh (bug 316008). */
+.theme-wallpaper {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: var(--wallpaper-image) center / cover no-repeat;
+}
+@media (display-mode: browser) {
+  .theme-wallpaper { min-height: 100vh; min-height: 100lvh; }
+}
+:root[data-wallpaper] body:has(#app:not([hidden])) > .theme-wallpaper { display: block; }
+:root[data-wallpaper] :is(body:has(#app:not([hidden])), .app-shell) { background: transparent; }

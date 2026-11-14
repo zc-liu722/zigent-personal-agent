@@ -1,4 +1,4 @@
-import type { ToolActivityPresentation } from './activity-presentation.js';
+import { activitySubject, type ToolActivityPresentation } from './activity-presentation.js';
 import { patchFileDiff, resultFileDiff } from '../file-diff.js';
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -8,6 +8,12 @@ const basename = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) ??
 /** Only filenames and explicit operation labels enter the file activity contract. */
 export function fileActivity(kind: 'read' | 'edit', paths: string[], verb = kind === 'read' ? '阅读' : '编辑'): Partial<ToolActivityPresentation> {
   const files = [...new Set(paths.filter(path => path.trim()).map(path => path.slice(0, 1024)))];
+  const skills = files.map(path => /(?:^|[\\/])([a-z][a-z0-9_-]{0,63})[\\/]SKILL\.md$/i.exec(path)?.[1]);
+  if (kind === 'read' && files.length && skills.every((name): name is string => Boolean(name))) {
+    const names = [...new Set(skills)];
+    return { fileOperation: kind, title: `查看技能 ${names.join('、')}`,
+      details: names.slice(0, 40).map(name => ({ label: '技能', value: name })) };
+  }
   return { fileOperation: kind, title: files.length ? `${verb} ${basename(files[0]!)}${files.length > 1 ? ` 等 ${files.length} 个文件` : ''}` : `${verb}文件`,
     details: files.slice(0, 40).map(path => ({ label: verb, value: path })) };
 }
@@ -28,14 +34,25 @@ export function documentFileActivity(input: unknown, result?: unknown): Partial<
   const output = object(result), resolved = object(output.source), metadata = object(output.metadata);
   const path = text(source.path) || text(resolved.name) || text(metadata.name);
   const paths = [path, text(destination.path)].filter(Boolean);
-  if (action === 'search' && !paths.length && !source.id) return {};
+  if (action === 'search') {
+    const query = activitySubject(value.query);
+    const file = paths.length ? fileActivity('read', paths, '检索') : {};
+    const title = file.title ?? '检索文档';
+    return { ...file, title: query ? `${title} · ${query}` : title, actionKind: 'search' };
+  }
   const diff = ['create_text', 'edit_text'].includes(action) ? resultFileDiff(output.source) : undefined;
-  return { ...fileActivity(['create_text', 'edit_text', 'move_file'].includes(action) ? 'edit' : 'read', paths,
-    ({ create_text: '创建', edit_text: '编辑', move_file: '移动', search: '检索', view: '查看' } as Record<string, string>)[action] ?? '阅读'), ...(diff ? { diff } : {}) };
+  const heading = paths.length ? fileActivity(['create_text', 'edit_text', 'move_file'].includes(action) ? 'edit' : 'read', paths,
+    ({ create_text: '创建', edit_text: '编辑', move_file: '移动', view: '查看' } as Record<string, string>)[action] ?? '阅读') : {};
+  return { ...heading, ...(action === 'view' ? { actionKind: 'image' } : action === 'read' ? { actionKind: 'read' } : {}), ...(diff ? { diff } : {}) };
 }
 
 /** Conservative shell recognition for display only; unknown programs keep the terminal view. */
 export function commandFileActivity(command: string): Partial<ToolActivityPresentation> {
+  // Recognize only literal reads below the documented skill root. Do not
+  // expand arbitrary environment variables or inspect instruction contents.
+  const skillReads = command.trim().split(/\s*(?:;|&&|\r?\n)\s*/);
+  const skillPaths = skillReads.map(line => /^Get-Content\s+(?:(?:-LiteralPath|-Path)\s+)?"(\$env:ZIGENT_SKILLS[\\/][a-z][a-z0-9_-]{0,63}[\\/]SKILL\.md)"(?:\s+-Raw)?\s*$/i.exec(line)?.[1]);
+  if (skillPaths.length && skillPaths.every((path): path is string => Boolean(path))) return fileActivity('read', skillPaths);
   // Never infer operations across interpolation, redirection, substitutions or scripts.
   if (/[$`<>{}()#]/.test(command)) return {};
   const tokens: string[] = [];
@@ -57,7 +74,7 @@ export function commandFileActivity(command: string): Partial<ToolActivityPresen
   if (quote) return {};
   flush();
   const files: string[] = [];
-  let segment: string[] = [], operation: 'read' | 'edit' | undefined, piped = false;
+  let segment: string[] = [], operation: 'read' | 'edit' | undefined, piped = false, onlySearches = true;
   function consume(): boolean {
     if (!segment.length) return true;
     const [program, ...args] = segment, name = program!.toLowerCase();
@@ -65,6 +82,7 @@ export function commandFileActivity(command: string): Partial<ToolActivityPresen
     const readers = ['cat', 'type', 'get-content', 'gc', 'head', 'tail', 'sed', 'rg', 'grep'];
     const writers = ['set-content', 'add-content', 'out-file'];
     if (!readers.includes(name) && !writers.includes(name)) return false;
+    onlySearches &&= ['rg', 'grep'].includes(name) && !args.includes('--files');
     const editing = writers.includes(name);
     if (operation && operation !== (editing ? 'edit' : 'read')) return false;
     operation = editing ? 'edit' : 'read';
@@ -108,5 +126,7 @@ export function commandFileActivity(command: string): Partial<ToolActivityPresen
     } else if (token === '&' || token === '||') return {};
     else segment.push(token);
   }
-  return operation ? fileActivity(operation, files) : {};
+  if (!operation) return {};
+  if (onlySearches) return { ...fileActivity('read', files, '搜索'), actionKind: 'search' };
+  return fileActivity(operation, files);
 }

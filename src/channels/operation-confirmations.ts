@@ -4,14 +4,16 @@ import type { CodexDevice } from "../codex/types.js";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { AgentToolSet, ToolExecutionContext } from "../tools/registry.js";
-import { executeConfirmedOperation, operationDigest } from "../tools/confirmed-operation.js";
+import { canonicalSkillTool, isSkillTool } from "../tools/skills.js";
+import { executeConfirmedOperation, operationDigest, withConfirmationRead } from "../tools/confirmed-operation.js";
 import { buildOperationDraft, object, operationSnapshots, type OperationDraft } from "../tools/operation-policy.js";
 import { skillSectionsSchema } from "../skills/service.js";
 import type { ChangeDocument, ChangePreview } from "./change-preview.js";
 import { ProductivityRequestError } from "../productivity/http.js";
 import { ProductivityAuthorizationRequiredError } from "../productivity/credentials.js";
+import { CalendarMutationError } from "../productivity/calendar-mutation.js";
 
-export type OperationScope = Pick<ToolExecutionContext, "agentId" | "userId" | "principalId" | "conversationId" | "conversationKind" | "sessionId" | "turnId" | "delegationRequest" | "model" | "reasoningEfforts">;
+export type OperationScope = Pick<ToolExecutionContext, "agentId" | "userId" | "principalId" | "conversationId" | "conversationKind" | "sessionId" | "turnId" | "delegationRequest" | "model" | "reasoningEfforts" | "pluginVersions">;
 export type OperationNotice = { id: string; actionId?: string; conversationId: string; sessionId?: string; messageId?: string; title: string; description: string;
   status: "pending" | "completed" | "cancelled" | "expired" | "failed"; statusMessage: string; expiresAt: number; retryable: boolean;
   changes?: ChangePreview[]; changeDocuments?: ChangeDocument[]; codexForm?: CodexForm; view?: "todo" | "calendar" | "task" };
@@ -20,10 +22,12 @@ type Saved = { draft: OperationDraft; scope: OperationScope; expiresAt: number; 
   failure?: OperationFailure;
   batch?: Array<{ draft: OperationDraft; completed?: boolean }> };
 type Row = { id: string; payload: string };
-type OperationFailure = { phase: "before_write" | "write"; reason: "authorization" | "connect" | "timeout" | "dns" | "tls" | "network" | "http" | "unknown"; httpStatus?: number; at: number };
+type OperationFailure = { phase: "before_write" | "write"; reason: "authorization" | "connect" | "timeout" | "dns" | "tls" | "network" | "http" | "unknown"; httpStatus?: number; at: number;
+  outcome?: "not_applied" | "conflict" | "uncertain" };
 
 /** Persist and log fixed categories only; never log upstream messages, inputs, or credentials. */
 function operationFailure(error: unknown, writeStarted: boolean): OperationFailure {
+  if (error instanceof CalendarMutationError) return { ...operationFailure(error.cause, writeStarted), outcome: error.outcome };
   const phase = writeStarted ? "write" : "before_write";
   if (error instanceof ProductivityAuthorizationRequiredError) return { phase, reason: "authorization", at: Date.now() };
   if (error instanceof ProductivityRequestError) return { phase, reason: error.failure,
@@ -81,7 +85,8 @@ export class OperationConfirmations {
   private offers: Promise<void> = Promise.resolve();
   constructor(path: string, private readonly tools: AgentToolSet,
     private readonly deliver: (notice: OperationNotice) => Promise<{ messageId: string }>,
-    private readonly restoreContext: (scope: OperationScope) => Partial<ToolExecutionContext> = () => ({})) {
+    private readonly restoreContext: (scope: OperationScope) => Partial<ToolExecutionContext> = () => ({}),
+    private readonly reconcile?: (draft: OperationDraft, operationId: string, scope: OperationScope) => "completed" | "not_applied" | "unknown") {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS operation_confirmations(id TEXT PRIMARY KEY, operation_key TEXT UNIQUE NOT NULL, payload TEXT NOT NULL)`);
@@ -96,8 +101,30 @@ export class OperationConfirmations {
     // An interrupted external write is never automatically replayed.
     for (const row of prepareSql(this.db, "SELECT id,payload FROM operation_confirmations WHERE json_extract(payload,'$.status')='executing'").all() as Row[]) {
       const saved = JSON.parse(row.payload) as Saved;
+      const drafts = saved.batch?.map(item => item.draft) ?? [saved.draft];
+      const states = drafts.map(draft => this.recoveryStatus(draft, saved.batch ? `${row.id}:${operationDigest(draft)}` : row.id, saved.scope));
+      if (states.every(state => state !== "unknown")) {
+        if (saved.batch) saved.batch.forEach((item, index) => { if (states[index] === "completed") item.completed = true; });
+        const completed = states.every(state => state === "completed");
+        saved.status = completed ? "completed" : "pending"; saved.retryable = !completed;
+        saved.statusMessage = completed ? "已核对，变更已完成。" : "正在继续已确认的变更…";
+        this.save(row.id, saved);
+        if (completed) queueMicrotask(() => { void this.publish(row.id, saved).catch(() => {}); });
+        else queueMicrotask(() => { void this.act(saved.scope.userId, saved.scope.conversationId!, this.actionId(row.id, saved), true).catch(() => {}); });
+        continue;
+      }
       this.save(row.id, { ...saved, status: "failed", retryable: false, statusMessage: "服务重启，执行结果尚未确认。请先查看目标状态，再提出需要的变更。" });
     }
+  }
+  private recoveryStatus(draft: OperationDraft, id: string, scope: OperationScope) {
+    if (draft.operationRecovery !== "schedule-v1" && !isSkillTool(draft.tool)) return "unknown";
+    try { return this.reconcile?.(draft, id, scope) ?? "unknown"; }
+    catch { return "unknown"; }
+  }
+  private readOperation(tools: AgentToolSet, read: OperationDraft["reads"][number], context: ToolExecutionContext) {
+    return isSkillTool(read.tool)
+      ? withConfirmationRead(context, scoped => tools.execute(canonicalSkillTool(read.tool), read.input, scoped))
+      : tools.execute(read.tool, read.input, context);
   }
   private save(id: string, saved: Saved): void { prepareSql(this.db, "UPDATE operation_confirmations SET payload=? WHERE id=?").run(JSON.stringify(saved), id); }
   private load(id: string): Saved | undefined {
@@ -152,7 +179,7 @@ export class OperationConfirmations {
     context.signal?.throwIfAborted();
     if (!context.conversationId || context.conversationKind !== "p2p" || context.taskRunId || context.backgroundTaskKind) throw new Error("变更确认只能在本人私聊中发起。");
     const scope: OperationScope = { agentId: context.agentId, userId: context.userId, principalId: context.principalId,
-      conversationId: context.conversationId, conversationKind: context.conversationKind, sessionId: context.sessionId, turnId: context.turnId, delegationRequest: draft.delegationEvidence ?? context.delegationRequest, model: context.model, reasoningEfforts: context.reasoningEfforts };
+      conversationId: context.conversationId, conversationKind: context.conversationKind, sessionId: context.sessionId, turnId: context.turnId, delegationRequest: draft.delegationEvidence ?? context.delegationRequest, model: context.model, reasoningEfforts: context.reasoningEfforts, pluginVersions: draft.pluginVersions ?? context.pluginVersions };
     const key = operationDigest([scope, draft]);
     const prior = prepareSql(this.db, "SELECT id,payload FROM operation_confirmations WHERE operation_key=?").get(key) as Row | undefined;
     if (!prior && batchTarget(draft) && scope.sessionId && scope.turnId !== undefined) {
@@ -263,11 +290,15 @@ ${parsed.prompt}`].filter(Boolean).join("\n\n") };
       this.save(id, saved); await this.publish(id, saved);
       return { ok: true, message: "会话已更新，请确认派发。" };
     }
-    const work = saved.batch ? this.applyBatch(id, saved) : this.apply(id, saved);
+    const work = (async () => {
+      const lease = saved.scope.pluginVersions ? await this.tools.leaseVersions?.(saved.scope.pluginVersions) : undefined;
+      try { return await (saved.batch ? this.applyBatch(id, saved, lease?.tools ?? this.tools) : this.apply(id, saved, lease?.tools ?? this.tools)); }
+      finally { lease?.release(); }
+    })();
     this.inFlight.set(id, work);
     try { return await work; } finally { this.inFlight.delete(id); }
   }
-  private async applyBatch(id: string, saved: Saved): Promise<{ ok: boolean; message: string }> {
+  private async applyBatch(id: string, saved: Saved, tools: AgentToolSet): Promise<{ ok: boolean; message: string }> {
     const batch = saved.batch!;
     const completed = () => batch.filter(item => item.completed).length;
     let writeStarted = false;
@@ -277,10 +308,11 @@ ${parsed.prompt}`].filter(Boolean).join("\n\n") };
       // Verify the whole group before the first write, not after partially applying a stale proposal.
       const current = async (draft: OperationDraft) => {
         const results: unknown[] = [];
-        for (const read of draft.reads) results.push(await this.tools.execute(read.tool, read.input, context));
+        for (const read of draft.reads) results.push(await this.readOperation(tools, read, context));
         return operationDigest(operationSnapshots(draft.reads, results, draft.input)) === draft.baseline;
       };
-      for (const { draft } of batch) {
+      for (const { draft, completed: alreadyCompleted } of batch) {
+        if (alreadyCompleted) continue;
         if (!await current(draft)) {
           const latest = this.load(id);
           if (!latest || operationDigest(latest) !== operationDigest(saved)) return { ok: false, message: "确认内容已更新，请查看最新内容后再确认。" };
@@ -303,8 +335,8 @@ ${parsed.prompt}`].filter(Boolean).join("\n\n") };
         // Earlier writes and network delays must not hide concurrent edits to later targets.
         if (!await current(draft)) throw new Error("Batch target changed before its write");
         writeStarted = true;
-        const output = object(await executeConfirmedOperation(context, draft.tool, draft.input,
-          approved => this.tools.execute(draft.tool, draft.input, approved), draft.baseline));
+        const output = object(await executeConfirmedOperation(context, canonicalSkillTool(draft.tool), draft.input,
+          approved => tools.execute(canonicalSkillTool(draft.tool), draft.input, approved), draft.baseline, `${id}:${operationDigest(draft)}`));
         if (unsuccessful(output)) {
           if (["authorization_pending", "authorization_required", "not_configured"].includes(String(output.status)))
             throw new ProductivityAuthorizationRequiredError("Account");
@@ -329,17 +361,21 @@ ${parsed.prompt}`].filter(Boolean).join("\n\n") };
       saved.statusMessage = writeStarted ? `已完成 ${completed()}/${batch.length} 项；后续执行已停止，请先核对目标状态再提出剩余变更。`
         : "执行前核对未完成，整批未提交；可以重试核对。";
       if (saved.failure) saved.statusMessage = `${failureText(saved.failure)} ${saved.statusMessage}`;
+      if (error instanceof CalendarMutationError) saved.statusMessage = `已完成 ${completed()}/${batch.length} 项；`
+        + (error.outcome === "conflict" ? "日程已变化，后续未执行。请查看最新日程。"
+          : error.outcome === "not_applied" ? "当前变更未提交，后续已停止。" : "当前结果暂未核实，后续已停止。请稍后查看日历。");
     }
     this.save(id, saved);
     await this.publish(id, saved).catch(() => undefined);
     return { ok: saved.status === "completed", message: saved.statusMessage };
   }
-  private async apply(id: string, saved: Saved): Promise<{ ok: boolean; message: string }> {
+  private async apply(id: string, saved: Saved, tools: AgentToolSet): Promise<{ ok: boolean; message: string }> {
     let writeStarted = false;
     try {
       const context = { ...this.restoreContext(saved.scope), ...saved.scope };
+      if (saved.draft.operationRecovery === "managed-skill-v1" && !tools.allows("markdown")) throw new Error("Markdown access is no longer available");
       const results: unknown[] = [];
-      for (const read of saved.draft.reads) results.push(await this.tools.execute(read.tool, read.input, context));
+      for (const read of saved.draft.reads) results.push(await this.readOperation(tools, read, context));
       const latest = this.load(id);
       if (!latest || latest.status !== saved.status || this.actionId(id, latest) !== this.actionId(id, saved))
         return { ok: false, message: "确认内容已更新，请查看最新内容后再确认。" };
@@ -353,8 +389,8 @@ ${parsed.prompt}`].filter(Boolean).join("\n\n") };
         saved.status = "executing"; saved.retryable = false; saved.statusMessage = "正在执行已确认的变更…";
         await this.publish(id, saved);
         writeStarted = true;
-        const result = await executeConfirmedOperation(context, saved.draft.tool, saved.draft.input,
-          approved => this.tools.execute(saved.draft.tool, saved.draft.input, approved), saved.draft.baseline);
+        const result = await executeConfirmedOperation(context, canonicalSkillTool(saved.draft.tool), saved.draft.input,
+          approved => tools.execute(canonicalSkillTool(saved.draft.tool), saved.draft.input, approved), saved.draft.baseline, id);
         const output = object(result);
         if (unsuccessful(output)) {
           saved.status = "failed"; saved.statusMessage = output.status === "authorization_pending" || output.status === "authorization_required" || output.status === "not_configured"
@@ -380,6 +416,23 @@ ${parsed.prompt}`].filter(Boolean).join("\n\n") };
         saved.failure = operationFailure(error, writeStarted);
         saved.statusMessage = failureText(saved.failure);
         console.error("OPERATION_FAILURE", JSON.stringify({ agent: saved.scope.agentId, tool: saved.draft.tool, ...saved.failure }));
+      }
+      if (writeStarted && isSkillTool(saved.draft.tool)) {
+        const receipt = this.recoveryStatus(saved.draft, id, saved.scope);
+        if (receipt === "completed") {
+          saved.status = "completed";
+          saved.statusMessage = `${saved.draft.title}已完成。`;
+        } else if (receipt === "not_applied") {
+          saved.retryable = true;
+          saved.statusMessage = "变更未保存，可以重试核对。";
+        }
+      }
+      if (error instanceof CalendarMutationError) {
+        saved.retryable = error.outcome === "not_applied";
+        saved.status = error.outcome === "conflict" ? "expired" : "failed";
+        saved.statusMessage = error.outcome === "conflict" ? "日程已变化，请查看最新日程后重新确认。"
+          : error.outcome === "not_applied" ? `变更未提交${saved.failure?.httpStatus ? `（HTTP ${saved.failure.httpStatus}）` : ""}，可以重试核对。`
+          : "已尝试核对日历，结果暂未确认。请稍后查看日历。";
       }
     }
     this.save(id, saved);

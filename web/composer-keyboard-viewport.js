@@ -4,8 +4,7 @@
  * https://github.com/emilkowalski/vaul/blob/3e97aac6a38e4481bade71d7233ed6002e80f9b0/src/index.tsx#L476-L534
  */
 
-// Track keyboard lifetime for the floating composer. The transcript keeps
-// native document scrolling throughout keyboard opening and dismissal.
+// Track keyboard lifetime for the floating composer and native reading scrollport.
 export function createComposerKeyboardViewport(composer) {
   let keyboardIsOpen = false;
   function reset() { keyboardIsOpen = false; return false; }
@@ -47,13 +46,17 @@ export function createComposerKeyboardMotion(composer, onChange) {
   function move(next, smooth) {
     if (Object.keys(current).every(key => Math.abs(next[key] - current[key]) < .5)) return;
     const changingClearance = Math.abs(next.inset - current.inset) >= .5;
+    const changingLift = Math.abs(next.lift - current.lift) >= .5;
+    const changingTop = Math.abs(next.top - current.top) >= .5;
+    next = { lift: changingLift ? next.lift : current.lift,
+      inset: changingClearance ? next.inset : current.inset, top: changingTop ? next.top : current.top };
     const animate = smooth && !reducedMotion.matches && composer.animate;
     const from = animate
       ? view.getComputedStyle(composer).transform : undefined;
     // Shrink the document's real keyboard clearance alongside the dock. Native
     // scroll-range clamping brings a bottom reader down with it; history readers
     // keep their scroll position. Never transform the transcript or its fixed bars.
-    const fromPadding = animate && changingClearance && timeline?.animate && doc.getElementById('welcome')?.hidden
+    const fromPadding = animate && changingClearance && !root.hasAttribute('data-keyboard-reading') && timeline?.animate
       ? view.getComputedStyle(timeline).paddingBottom : undefined;
     cancelAnimation();
     current = next;
@@ -67,12 +70,14 @@ export function createComposerKeyboardMotion(composer, onChange) {
     }
     // Install the padding animation before removing its underlying clearance,
     // so a style/layout flush cannot clamp the document to the final range early.
-    composer.style.setProperty('--composer-keyboard-lift', `${next.lift}px`);
-    root.style.setProperty('--chat-keyboard-inset', `${next.inset}px`);
+    if (changingLift) composer.style.setProperty('--composer-keyboard-lift', `${next.lift}px`);
+    if (changingClearance) root.style.setProperty('--chat-keyboard-inset', `${next.inset}px`);
     // Navigation uses the projected closing state, not the last keyboard pan
     // WebKit reported. A late offset must not drop the top controls into the page.
-    root.style.setProperty('--chat-chrome-top', `${next.top}px`);
-    onChange();
+    if (changingTop) root.style.setProperty('--chat-chrome-top', `${next.top}px`);
+    // Panning moves fixed controls, not transcript layout. Replaying the reading
+    // resize/settling path on every scroll can restore an obsolete scroll anchor.
+    if (changingClearance) onChange();
   }
   function reset() {
     if (!Object.values(current).some(Boolean) && !dismissing && !animation) return;

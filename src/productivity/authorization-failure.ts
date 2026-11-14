@@ -1,5 +1,7 @@
 import { ProductivityRequestError, networkFailure, type NetworkFailure, type OAuthResponseError } from "./http.js";
 import { ProductivityAuthorizationRequiredError } from "./credentials.js";
+import { FEISHU_SCOPE_FAILURE } from "./feishu-user-authorization.js";
+import { FeishuAuthorizationError } from "./feishu-authorization-protocol.js";
 
 export type AuthorizationStage = "prepare" | "client_registration" | "bridge_registration" | "user_authorization" | "token_exchange" | "verify" | "save";
 export type AuthorizationFailure = {
@@ -11,6 +13,7 @@ export type AuthorizationFailure = {
 
 /** Fixed categories only: raw provider errors, URLs, OAuth state and tokens must never leave the coordinator. */
 export function authorizationFailure(stage: AuthorizationStage, error: unknown): AuthorizationFailure {
+  if (error instanceof FeishuAuthorizationError) return error.failure;
   if (error instanceof ProductivityRequestError) return { stage, reason: error.failure,
     ...(error.status ? { status: error.status } : {}), ...(error.oauthError ? { oauthError: error.oauthError } : {}) };
   const message = error instanceof Error ? error.message : "";
@@ -19,9 +22,10 @@ export function authorizationFailure(stage: AuthorizationStage, error: unknown):
     if (status) return { stage, reason: "http", status: Number(status) };
   }
   if (message === "Account authorization is already running" || (error as NodeJS.ErrnoException)?.code === "EEXIST") return { stage, reason: "busy" };
-  if (/expired|timed out/i.test(message) || error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) return { stage, reason: "expired" };
+  if (error instanceof Error && error.name === "AbortError") return { stage, reason: "cancelled" };
+  if (/expired|timed out|已过期/i.test(message) || error instanceof Error && error.name === "TimeoutError") return { stage, reason: "expired" };
   if (/authorization was cancelled/i.test(message)) return { stage, reason: "cancelled" };
-  if (message === "Required account permissions were not granted") return { stage, reason: "permissions" };
+  if (message === "Required account permissions were not granted" || message === FEISHU_SCOPE_FAILURE) return { stage, reason: "permissions" };
   const status = message.match(/^XMind authorization bridge (?:rejected the request|failed) \((\d{3})\)$/)?.[1];
   if (status) return { stage, reason: "http", status: Number(status) };
   if (error instanceof TypeError && message === "fetch failed") return { stage, reason: networkFailure(error) };

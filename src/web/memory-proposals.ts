@@ -18,7 +18,7 @@ export class WebMemoryProposals {
   private available(): boolean {
     return this.runtime.config.channel === "web"
       && this.runtime.config.web?.ownerUserId === this.store.owner && Boolean(this.runtime.config.web.ownerPrincipalId)
-      && Boolean(this.runtime.longTermMemory) && this.runtime.tools.allows("long_term_memory");
+      && Boolean(this.runtime.longTermMemory) && this.runtime.tools.allows("markdown");
   }
   private actions(id: string, retry = false): WebInteraction["actions"] {
     return [true, false].map(confirm => ({ id: confirm ? "confirm" : "cancel", kind: "submit",
@@ -61,10 +61,14 @@ export class WebMemoryProposals {
   async offer(request: MemoryChangeRequest, conversationId: string, turnKey: string): Promise<{ proposalId: string }> {
     if (!this.available() || !this.store.conversationInfo(conversationId)) throw new Error("Memory confirmation is unavailable");
     const userId = this.store.owner, principalId = this.runtime.config.web!.ownerPrincipalId!;
-    const snapshot = await this.runtime.longTermMemory!.editableSnapshot(userId);
-    const { preview, next } = previewMemoryChanges(snapshot, request);
     const key = createHash("sha256").update(JSON.stringify([userId, principalId, conversationId, turnKey, request])).digest("hex");
-    const prior = prepareSql(this.store.db, "SELECT * FROM memory_proposals WHERE proposal_key=?").get(key) as ProposalRow | undefined;
+    const lookup = () => prepareSql(this.store.db, "SELECT * FROM memory_proposals WHERE proposal_key=?").get(key) as ProposalRow | undefined;
+    const existing = lookup();
+    if (existing && this.store.message(existing.message_id)) return { proposalId: existing.id };
+    const snapshot = await this.runtime.longTermMemory!.editableSnapshot(userId);
+    const prior = lookup();
+    if (prior && this.store.message(prior.message_id)) return { proposalId: prior.id };
+    const { preview, next } = previewMemoryChanges(snapshot, request);
     const id = prior?.id ?? randomUUID(), messageId = prior?.message_id ?? randomUUID();
     const saved: SavedProposal = prior ? JSON.parse(prior.payload) : { request, userId, principalId, expiresAt: Date.now() + 24 * 60 * 60_000 };
     if (!prior) prepareSql(this.store.db, "INSERT INTO memory_proposals(id,proposal_key,conversation_id,message_id,payload) VALUES(?,?,?,?,?)")
@@ -175,16 +179,23 @@ export class WebMemoryProposals {
       const latest = this.store.message(messageId)!;
       this.store.save({ ...latest, interactions: latest.interactions?.map(item => item.id === interactionId ? { ...item, ...patch } : item) });
     };
-    if (interaction.status === "expired" || saved.expiresAt <= Date.now()) {
-      settle({ status: "expired", statusMessage: "提议已过期，请让我重新读取记忆并提出变更。", actions: [] });
-      return { code: 409, error: "记忆提议已过期。" };
-    }
     if (this.inFlight.has(proposalId)) return { code: 409, error: "正在保存，请稍候。" };
-    if (!confirm) { settle({ status: "cancelled", statusMessage: "已取消，记忆未更改。", actions: [] }); return { code: 200 }; }
     this.inFlight.add(proposalId);
     try {
       if (!this.available()) throw new Error("Memory access is unavailable");
-      await this.runtime.longTermMemory!.applyConfirmedChange(saved.userId, proposalId, saved.request);
+      const repository = this.runtime.longTermMemory!;
+      const alreadySaved = await repository.hasConfirmedChange(saved.userId, proposalId, saved.request);
+      if (!alreadySaved) {
+        if (interaction.status === "expired" || saved.expiresAt <= Date.now()) {
+          settle({ status: "expired", statusMessage: "提议已过期，请让我重新读取记忆并提出变更。", actions: [] });
+          return { code: 409, error: "记忆提议已过期。" };
+        }
+        if (!confirm) {
+          settle({ status: "cancelled", statusMessage: "已取消，记忆未更改。", actions: [] });
+          return { code: 200 };
+        }
+        await repository.applyConfirmedChange(saved.userId, proposalId, saved.request);
+      }
       settle({ status: "completed", statusMessage: "已按你确认的内容保存记忆。", actions: [] });
       return { code: 200 };
     } catch (error) {

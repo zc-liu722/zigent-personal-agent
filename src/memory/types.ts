@@ -144,6 +144,8 @@ export type ModelUsageIdentity = {
 
 /** Named fields shared by the completed-reply write path across memory layers. */
 export type AssistantReplyInput = {
+  codexThread?: import("../models/types.js").CodexChatThread;
+  acpSession?: import("../models/types.js").AcpChatSession;
   sessionId: string;
   turnId: number;
   content: string;
@@ -246,19 +248,6 @@ export type PreparedTurn = {
   currentMessage: ChatMessage;
   context: ModelMemoryContext;
 };
-
-export type CompressionResult = {
-  modelIdentity?: ModelUsageIdentity;
-  summary: SessionSummary;
-  usage: TokenUsage;
-  model?: string;
-};
-
-export interface ConversationCompressor {
-  shouldCompress(session: Session, currentTurnId: number, provider?: Provider, overhead?: number, signal?: AbortSignal): boolean | Promise<boolean>;
-  compress(session: Session, currentTurnId: number, provider?: Provider, signal?: AbortSignal,
-    reasoningEfforts?: Readonly<Record<string, import("../config.js").ReasoningEffort>>): Promise<CompressionResult>;
-}
 
 export interface LongTermMemoryProvider {
   get(userId: string): Promise<LongTermMemory>;

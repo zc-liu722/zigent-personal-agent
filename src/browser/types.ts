@@ -20,9 +20,10 @@ export type BrowserView = BrowserSession & { network: BrowserNetwork; proxyAvail
   pendingSubmission?: { id: string; label: string };
   dialog?: { type: string; message: string }; files: { id: string; name: string; direction: "upload" | "download" }[] };
 export type BrowserElement = { ref: string; role: string; name: string; value?: string; type?: string; options?: string[];
+  imageUrl?: string; imageWidth?: number; imageHeight?: number;
   disabled?: boolean; bounds?: { x: number; y: number; width: number; height: number } };
 export const browserInputSchema = z.object({
-  action: z.enum(["open", "set_network", "status", "observe", "screenshot", "navigate", "new_tab", "switch_tab", "close_tab", "click", "fill", "select", "press", "scroll", "upload", "wait", "dialog", "handoff"]),
+  action: z.enum(["open", "set_network", "status", "observe", "screenshot", "capture_image", "navigate", "new_tab", "switch_tab", "close_tab", "click", "fill", "select", "press", "scroll", "upload", "wait", "dialog", "handoff"]),
   network: z.enum(["direct", "proxy"]).optional(), visual: z.boolean().optional(),
   url: z.string().max(4096).optional(), title: z.string().trim().min(1).max(40).optional(),
   tab: z.string().uuid().optional(), observation: z.string().uuid().optional(), ref: z.string().regex(/^e\d+$/).optional(),

@@ -1,4 +1,4 @@
-import { scheduleReminderDue } from "../schedule/reminders.js";
+import type { ScheduleCapability } from "../plugins/schedule/entry.js";
 import type { AgentRuntime } from "../runtime.js";
 import type { AgentInteractionController } from "../agent/interaction-controller.js";
 import type { ConversationCoordinator } from "./conversation-coordinator.js";
@@ -20,7 +20,7 @@ export function connectScheduleReminders(runtime: AgentRuntime, store: WebStore,
       signal.throwIfAborted();
       // Preparing memory can take time; do not spend a model call on an obsolete event.
       const current = runtime.schedule!.get(item.id);
-      if (current.revision !== item.revision || !scheduleReminderDue(current)) throw new Error("Schedule reminder is stale");
+      if (current.revision !== item.revision || !runtime.plugins.service<ScheduleCapability>("schedule").isDue(current)) throw new Error("Schedule reminder is stale");
       const reply = await runtime.agent.run([
         "这是已保存日程的自动提醒，不是用户的新请求。保持你的日常语气，用中文生成一句自然、简短的提醒，最多两句、80字。",
         "只输出给用户的提醒正文，不要标题、列表、Markdown、链接或解释。可以简短提及日程名称，不要复述具体日期、时间、地点或说明；这些由同一条消息附带的日程卡片展示。",

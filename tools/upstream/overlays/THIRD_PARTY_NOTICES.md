@@ -5,6 +5,7 @@ Zigent includes third-party code and assets with their own license terms. The pr
 | Component | Retained records |
 | --- | --- |
 | Independent native execution and patch code derived from OpenAI Codex | [Apache-2.0 LICENSE](ops/execution/native/LICENSE), [NOTICE](ops/execution/native/NOTICE), [UPSTREAM](ops/execution/native/UPSTREAM.md), [patch origin](ops/execution/native/patch/UPSTREAM.md), [file origins](ops/execution/native/upstream-files.json) |
+| Context checkpoint framing from DeepSeek Harness | MIT notice and pinned upstream reference in [context-summary.ts](src/models/context-summary.ts) |
 | WezTerm portions of Windows terminal implementation | [MIT notice](ops/execution/native/terminal/src/win/LICENSE.wezterm) |
 | KaTeX and bundled fonts | [LICENSE](web/vendor/katex/LICENSE), [source notes](web/vendor/katex/README.md) |
 | highlight.js | [LICENSE](web/vendor/highlight/LICENSE) |

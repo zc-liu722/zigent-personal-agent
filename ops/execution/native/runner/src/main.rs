@@ -25,7 +25,7 @@ struct Start {
     cwd: PathBuf,
     tty: bool,
     #[serde(rename = "timeoutMs")]
-    timeout_ms: u64,
+    timeout_ms: Option<u64>,
     #[serde(default)]
     env: HashMap<String, String>,
 }
@@ -38,7 +38,7 @@ async fn forward(mut receiver: mpsc::Receiver<Vec<u8>>) {
 
 async fn start(value: Value, id: Value, active: Arc<Mutex<Option<Arc<ProcessHandle>>>>) -> Result<tokio::task::JoinHandle<()>> {
     let request: Start = serde_json::from_value(value)?;
-    if request.command.is_empty() || !(1000..=86_400_000).contains(&request.timeout_ms) {
+    if request.command.is_empty() || request.timeout_ms.is_some_and(|timeout| !(1000..=86_400_000).contains(&timeout)) {
         bail!("Invalid command or timeout");
     }
     #[cfg(windows)]
@@ -58,7 +58,12 @@ async fn start(value: Value, id: Value, active: Arc<Mutex<Option<Arc<ProcessHand
         let err = tokio::spawn(forward(stderr_rx));
         let (code, timed_out) = tokio::select! {
             result = &mut exit_rx => (result.unwrap_or(-1), false),
-            _ = tokio::time::sleep(Duration::from_millis(request.timeout_ms)) => {
+            _ = async {
+                match request.timeout_ms {
+                    Some(timeout) => tokio::time::sleep(Duration::from_millis(timeout)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
                 session.request_terminate();
                 (exit_rx.await.unwrap_or(-1), true)
             }

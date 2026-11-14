@@ -1,10 +1,11 @@
 import type { NotificationConfig } from "../notifications/config.js";
-import type { GoogleCalendarConfig, GoogleDriveConfig, TodoistConfig } from "../productivity/config.js";
+import type { GoogleCalendarConfig, GoogleDriveConfig, GmailConfig, TodoistConfig } from "../productivity/config.js";
 import type { McpOAuthAccount } from "../mcp/account.js";
+import type { PaletteId } from "../web/palette.js";
 
 /** Canonical deployable-model identity, including model family, official version, and supplier. */
 export type Provider = string;
-export type ModelProtocol = "anthropic-messages" | "openai-responses" | "codex-app-server" | "claude-code";
+export type ModelProtocol = "anthropic-messages" | "openai-responses" | "codex-app-server" | "claude-code" | "cursor-acp" | "antigravity-acp";
 export type HostedToolName = "web_search";
 export type ModelCapabilities = {
   imageInput: boolean;
@@ -42,6 +43,7 @@ export type AgentToolSettings = {
   notion?: { account: McpOAuthAccount; serverUrl: string; proxyUrl?: string; callbackUrl?: string };
   google_calendar?: GoogleCalendarConfig;
   google_drive?: GoogleDriveConfig;
+  gmail?: GmailConfig;
   todoist?: TodoistConfig;
 };
 
@@ -57,7 +59,7 @@ export function modelCostMultiplier(cost: ModelCostPolicy | undefined): number {
 
 export type ModelSupplier = {
   id: string;
-  transport: "http" | "codex-app-server" | "claude-code";
+  transport: "http" | "codex-app-server" | "claude-code" | "cursor-acp" | "antigravity-acp";
   apiKey?: string;
   endpoints: Partial<Record<ModelProtocol | "openai-images" | "native-videos" | "web-search", string>>;
   network: "direct" | "proxy";
@@ -66,6 +68,8 @@ export type ModelSupplier = {
   command?: string;
   args?: readonly string[];
   codexHome?: string;
+  antigravityDataDir?: string;
+  antigravityProxyUrl?: string;
 };
 
 export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
@@ -94,6 +98,8 @@ export type ModelDeployment = {
   command?: string;
   args?: readonly string[];
   codexHome?: string;
+  antigravityDataDir?: string;
+  antigravityProxyUrl?: string;
   maxTokens?: number;
   context?: ModelContextConfig;
   reasoningEffort?: ReasoningEffort;
@@ -129,7 +135,7 @@ export type ModelContextConfig = {
 
 export type HealthAccessConfig = {
   storagePath: string;
-  allowedAgentId: "deepmind";
+  allowedAgentId: string;
   ownerUserId: string;
   ownerPrincipalId?: string;
   initialSkillPath?: string;
@@ -139,6 +145,7 @@ export type HealthAccessConfig = {
 export type HealthReceiverConfig = {
   storagePath: string; listenHost: "127.0.0.1"; listenPort: number;
   ingestToken: string; maxBodyBytes: number;
+  additionalAccounts?: Array<{ agentId: string; storagePath: string; ingestToken: string }>;
 };
 
 export type LocationAccessConfig = {
@@ -148,6 +155,7 @@ export type LocationAccessConfig = {
 };
 
 export type LocationReceiverConfig = LocationAccessConfig & {
+  projectMcp?: { credentialFile: string; agents: Array<{ id: string; port: number }> };
   webProxyPort?: number;
   webProxyRoutes?: Array<{ basePath: string; port: number }>;
   listenHost: "127.0.0.1";
@@ -158,19 +166,23 @@ export type LocationReceiverConfig = LocationAccessConfig & {
 };
 
 export type WebChannelConfig = {
+  themePalette?: PaletteId;
   listenHost: string; listenPort: number; publicUrl: string; storage: string;
   passwordHash?: string; ownerUserId?: string; ownerPrincipalId?: string;
+  meeting?: { model: "doubao-seeduplex3.0-official"; apiKey: string; rtc?: { enabled:boolean;url:string;serverUrl:string;apiKey:string;secret:string } };
   speech?: { model: "doubao-seedasr2.0-official"; apiKey: string };
   transcription?: { model: "doubao-seedasr2.0-official"; apiKey: string;
     tos: { accessKeyId: string; accessKeySecret: string; endpoint: string; region: string; bucket: string } };
 };
 
 export type AgentConfig = {
-  fileWorkbench?: { enabled?: boolean; stateDirectory: string; executionEndpoint?: string; executionPreviousEndpoint?:string; executionToken?: string; executionTokenFile?: string };
+  projectMcpCredentialFile?: string;
+  fileWorkbench?: { enabled?: boolean; stateDirectory: string; nativeStateDirectory?: string; executionEndpoint?: string; executionPreviousEndpoint?:string; gitTransport?: 'ssh' | 'https'; gitProxyUrl?: string; executionToken?: string; executionTokenFile?: string };
   channel?: "web";
   web?: WebChannelConfig;
   id: string;
   name: string;
+  modelCatalogBinding?: import("../models/catalog.js").ModelCatalogBinding;
   /** Ordered canonical deployment identities. */
   modelOrder?: Provider[];
   suppliers?: Record<string, ModelSupplier>;
@@ -181,6 +193,7 @@ export type AgentConfig = {
   toolSettings?: AgentToolSettings;
   notifications?: NotificationConfig;
   zenmuxProxyUrl?: string;
+  modelProxyFallbackUrls?: readonly string[];
   imageGeneration?: {
     transport?: "http" | "codex-app-server";
     driver?: ModelDeployment;
@@ -250,6 +263,7 @@ export type AgentConfig = {
   modelNetworkRetryAttempts?: number;
   modelRetryDelayMs?: number;
   imageGenerationTimeoutMs?: number;
+  imageGenerationRetryAttempts?: number;
   videoGenerationTimeoutMs?: number;
   memoryStoragePath: string;
   longTermMemoryPath: string;

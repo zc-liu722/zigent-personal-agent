@@ -13,13 +13,15 @@ import type { UserQuestionNotice } from "../channels/user-questions.js";
 import type { OperationNotice } from "../channels/operation-confirmations.js";
 import type { AuthorizationFailure } from "../productivity/authorization-failure.js";
 import type { FileDeliveryNotice } from "../file-workbench/delivery.js";
-import { conversationOutputSchema } from "../channels/output.js";
+import { conversationOutputSchema, type ConversationOutput } from "../channels/output.js";
+import type { ConversationImages } from "./conversation-images.js";
+import { validateAttachments, type MessageAttachment } from "../channels/attachments.js";
 
 export class WebCommunicationAdapter implements CommunicationAdapter {
   private readonly selectedConversations = new Map<string, string>();
   private readonly replyTargets = new Map<string, string>();
-  private readonly activeReplies = new Map<string, { id: string; current: () => WebMessage; save: () => void; update: (interactions:WebInteraction[])=>void }>();
-  constructor(readonly store: WebStore) {}
+  private readonly activeReplies = new Map<string, { id: string; current: () => WebMessage; save: () => void; update: (interactions:WebInteraction[])=>void; saveImage: (output: ConversationOutput) => void }>();
+  constructor(readonly store: WebStore, private readonly conversationImages?: ConversationImages) {}
   close(): void {
     for (const reply of this.activeReplies.values()) reply.save();
     this.activeReplies.clear();
@@ -30,6 +32,16 @@ export class WebCommunicationAdapter implements CommunicationAdapter {
   }
   resolveConversation(chatId: string): string { return this.selectedConversations.get(chatId) ?? (this.store.hasConversation(chatId) ? chatId : this.store.conversationForChat(chatId)); }
   private conversation(chatId: string): string { return this.resolveConversation(chatId); }
+  hasActiveReply(replyId: string): boolean {
+    return [...this.activeReplies.values()].some(reply => reply.id === replyId);
+  }
+  retryImageDelivery(replyId: string, output: ConversationOutput): void {
+    const active = [...this.activeReplies.values()].find(reply => reply.id === replyId);
+    if (active) { active.saveImage(output); return; }
+    const message = this.store.message(replyId);
+    if (!message || message.role !== "assistant" || message.snapshot?.status === "cancelled") return;
+    this.store.save({ ...message, interactions: outputInteractions(message, output) });
+  }
   /** One durable message save for the entire validated batch, including its operation state. */
   async deliverFiles({delivery,outputs}: FileDeliveryNotice): Promise<void> {
     const active = [...this.activeReplies.values()].find(item=>item.id===delivery.replyId);
@@ -122,48 +134,23 @@ export class WebCommunicationAdapter implements CommunicationAdapter {
     const request = replyTo ? this.store.message(replyTo) : undefined;
     // The visible user message is timestamped at dispatch; the queue retains acceptance time.
     const queued = replyTo ? this.store.queuedMessage(replyTo) : undefined;
+    const previous = queued?.resume ? this.store.messages(conversationId, Number.MAX_SAFE_INTEGER, 100)
+      .find(entry => entry.role === "assistant" && entry.replyTo === replyTo && entry.snapshot?.status === "running") : undefined;
+    if (previous) message = previous;
     const acceptedAt = queued?.conversationId === conversationId ? queued.createdAt
       : request?.role === "user" && request.conversationId === conversationId ? request.createdAt : undefined;
     const elapsedBeforeRun = acceptedAt === undefined ? undefined : Math.max(0, message.createdAt - acceptedAt);
     const runStarted = performance.now();
-    let timer: NodeJS.Timeout | undefined;
     let checkpointTimer: NodeJS.Timeout | undefined;
     let terminal = false;
     let operationSource = true;
     let structure: string | undefined;
     let pendingSnapshot: AgentActivityUpdate["snapshot"] | undefined;
     let pendingOperations: WebMessageOperation[] = [];
-    const appendPositions = new Map<string, number>();
-    const visibleTextItems = new Set<string>();
-    let firstVisiblePublished = false;
-    const containsFirstVisibleText = (operations: readonly WebMessageOperation[]) => {
-      let visible = false;
-      for (const operation of operations) {
-        if (operation.type === "add_item" || operation.type === "replace_item") {
-          const item = operation.item;
-          if (item.type === "response" || item.type === "commentary") {
-            visibleTextItems.add(item.id);
-            visible ||= Boolean(item.text.trim());
-          } else visibleTextItems.delete(item.id);
-        } else if (operation.type === "remove_item") visibleTextItems.delete(operation.id);
-        else if (operation.type === "append_text" && visibleTextItems.has(operation.id)) visible ||= Boolean(operation.text.trim());
-        else if (operation.type === "append_answer" || operation.type === "set_answer") visible ||= Boolean(operation.text.trim());
-      }
-      return visible;
-    };
-    const enqueue = (operations: readonly WebMessageOperation[]) => {
-      for (const operation of operations) {
-        const key = operation.type === "append_text" ? operation.id : operation.type === "append_answer" ? "answer" : undefined;
-        if (key === undefined) { appendPositions.clear(); pendingOperations.push(operation); continue; }
-        const index = appendPositions.get(`${operation.type}:${key}`), previous = index === undefined ? undefined : pendingOperations[index];
-        if (previous?.type === operation.type && "text" in previous && "text" in operation) previous.text += operation.text;
-        else { appendPositions.set(`${operation.type}:${key}`, pendingOperations.length); pendingOperations.push({ ...operation }); }
-      }
-    };
     const finishTiming = () => {
       if (message.replyDurationMs !== undefined || elapsedBeforeRun === undefined) return;
       message.replyDurationMs = Math.round(elapsedBeforeRun + Math.max(0, performance.now() - runStarted));
-      if (operationSource) enqueue([{ type: "update_message", fields: { replyDurationMs: message.replyDurationMs } }]);
+      if (operationSource) pendingOperations.push({ type: "update_message", fields: { replyDurationMs: message.replyDurationMs } });
     };
     const current = () => {
       if (pendingSnapshot) {
@@ -174,17 +161,23 @@ export class WebCommunicationAdapter implements CommunicationAdapter {
       return message;
     };
     const flush = () => {
-      if (timer) clearTimeout(timer); timer = undefined;
       if (!pendingOperations.length) return;
-      const operations = pendingOperations; pendingOperations = []; appendPositions.clear();
-      this.store.publishOperations(message, operations, () => { flush(); return current(); });
+      const operations = pendingOperations; pendingOperations = [];
+      this.store.publishOperations(message, operations, current);
     };
     const release = () => { if (this.activeReplies.get(conversationId)?.id === message.id) this.activeReplies.delete(conversationId); };
+    const finishImageCandidates = (delivered: boolean) => {
+      try { this.conversationImages?.finishReply(message.id, delivered); }
+      catch { console.warn("CONVERSATION_IMAGE_CANDIDATE_CLEANUP_RETRY"); }
+    };
     const save = (full = false) => {
       flush();
       if (checkpointTimer) clearTimeout(checkpointTimer); checkpointTimer = undefined;
       this.store.save(current(), full);
-      if (message.snapshot && message.snapshot.status !== "running") release();
+      if (message.snapshot && message.snapshot.status !== "running") {
+        if (message.snapshot.status !== "completed") finishImageCandidates(false);
+        release();
+      }
     };
     const updateActivitySource = async (update: AgentActivityUpdate) => {
       if (terminal) return;
@@ -192,56 +185,65 @@ export class WebCommunicationAdapter implements CommunicationAdapter {
       const checkpoint = update.status !== "running" || (operationPath ? update.checkpoint : structure !== update.structure);
       if (!operationPath) structure = update.structure;
       pendingSnapshot = update.snapshot;
-      if (operationPath) enqueue(update.operations!);
-      let firstVisible = false;
-      if (!firstVisiblePublished) {
-        if (operationPath) firstVisible = containsFirstVisibleText(update.operations!);
-        else {
-          const snapshot = current().snapshot;
-          firstVisible = Boolean(snapshot?.answerDraft.trim() || snapshot?.items.some(item =>
-            (item.type === "response" || item.type === "commentary") && item.text.trim()));
-        }
-      }
-      if (firstVisible) { firstVisiblePublished = true; visibleTextItems.clear(); }
+      if (operationPath) pendingOperations.push(...update.operations!);
       if (update.status !== "running") { terminal = true; finishTiming(); }
       if (checkpoint) save(!operationPath);
       else {
-        if (firstVisible) {
-          if (operationPath) flush();
-          else { if (timer) clearTimeout(timer); timer = undefined; this.store.publish(current()); }
-        }
-        else if (!timer) { timer = setTimeout(() => { timer = undefined; if (operationPath) flush(); else this.store.publish(current()); }, 200); timer.unref(); }
+        if (operationPath) flush();
+        else this.store.publish(current());
         if (!checkpointTimer) { checkpointTimer = setTimeout(() => { checkpointTimer = undefined; save(!operationPath); }, 1000); checkpointTimer.unref(); }
       }
     };
     const updateMessage = (fields: Extract<WebMessageOperation, { type: "update_message" }>["fields"]) => {
       message = { ...current(), ...fields };
-      if (operationSource) enqueue([{ type: "update_message", fields }]);
+      if (operationSource) pendingOperations.push({ type: "update_message", fields });
       save(!operationSource);
     };
-    this.activeReplies.set(conversationId, { id: message.id, current, save: () => save(), update:interactions=>updateMessage({interactions}) });
+    const saveImage = (output: ConversationOutput) => {
+      flush();
+      const next = { ...current(), interactions: outputInteractions(message, output) };
+      // Publish only after the image reference and message projection are committed together.
+      this.store.save(next);
+      message = next;
+    };
+    const recoverImages = () => {
+      try {
+        for (const output of this.conversationImages?.pendingForReply(message.id) ?? []) saveImage(output);
+      } catch {
+        console.warn("CONVERSATION_IMAGE_DELIVERY_RETRY");
+      }
+    };
+    this.activeReplies.set(conversationId, { id: message.id, current, save: () => save(),
+      update: interactions => updateMessage({ interactions }), saveImage });
     return {
+      initialSnapshot: previous?.snapshot,
       replyId: message.id,
       openActivity: async snapshot => {
         pendingSnapshot = undefined;
         structure = activityStructure(snapshot.items);
         message = { ...message, snapshot, text: snapshot.answerDraft }; save(true);
+        recoverImages();
       },
       updateActivity: async snapshot => updateActivitySource({
         status: snapshot.status, structure: activityStructure(snapshot.items), snapshot: () => snapshot
       }),
       updateActivitySource,
-      sendFinalReply: async text => { terminal = true; finishTiming(); updateMessage({ text }); release(); },
+      sendFinalReply: async text => {
+        recoverImages();
+        terminal = true; finishTiming(); updateMessage({ text }); release();
+        finishImageCandidates(true);
+      },
       sendOutput: async output => {
-        const interaction: WebInteraction = { id: `output:${output.id}`, kind: "output", title: output.title,
-          status: "completed", actions: [], output };
-        const items = [...(message.interactions ?? [])], index = items.findIndex(item => item.id === interaction.id);
-        if (index < 0) {
-          const files = output.blocks.every(block=>block.type==="artifact");
-          if (items.filter(item => item.kind === "output" && Boolean(item.output?.blocks.every(block=>block.type==="artifact"))===files).length >= (files?100:6)) throw new Error("Too many outputs in this reply");
-          items.push(interaction);
-        } else items[index] = interaction;
-        updateMessage({ interactions: items });
+        for (const pending of this.conversationImages?.pendingForReply(message.id, output.id) ?? []) saveImage(pending);
+        const interactions = outputInteractions(message, output);
+        if (output.blocks.every(block => block.type === "image") && this.conversationImages) {
+          // Preserve the already streamed anchor before recording the selected snapshot.
+          save();
+          const delivery = this.conversationImages.prepareDelivery(conversationId, message.id, output);
+          saveImage(delivery);
+          return delivery;
+        }
+        updateMessage({ interactions });
       },
       sendFailure: async text => { terminal = true; finishTiming(); updateMessage({ text }); release(); },
       sendImages: async images => {
@@ -273,7 +275,7 @@ export class WebCommunicationAdapter implements CommunicationAdapter {
     if (!asset || !asset.mime.startsWith("image/")) throw new Error("IMAGE_NOT_FOUND");
     return { data: Buffer.from(asset.bytes), mimeType: asset.mime, source };
   }
-  async sendBackgroundResult(notice: { userId?: string; conversationId: string; idempotencyKey: string; title: string; text: string; replyDurationMs?: number; scheduleReminder?: import("../channels/change-preview.js").CalendarPreviewState; snapshot?: import("../agent/transcript.js").AgentRunSnapshot; session?: Session }): Promise<{ messageId: string }> {
+  async sendBackgroundResult(notice: { userId?: string; conversationId: string; idempotencyKey: string; title: string; text: string; replyDurationMs?: number; attachments?: MessageAttachment[]; scheduleReminder?: import("../channels/change-preview.js").CalendarPreviewState; snapshot?: import("../agent/transcript.js").AgentRunSnapshot; session?: Session }): Promise<{ messageId: string }> {
     if (notice.userId && notice.userId !== this.store.owner || notice.session && notice.session.userId !== this.store.owner) throw new Error("WEB_OWNER_MISMATCH");
     const id = `background:${notice.idempotencyKey}`;
     const existing = this.store.message(id);
@@ -281,6 +283,7 @@ export class WebCommunicationAdapter implements CommunicationAdapter {
     if (!existing) this.store.save({ id,
       conversationId: notice.session ? this.store.conversationForSession(notice.session) : this.conversation(notice.conversationId),
       text: notice.text, snapshot: notice.snapshot, replyDurationMs: notice.replyDurationMs,
+      attachments: notice.attachments ? validateAttachments(notice.attachments) : undefined,
       ...(notice.scheduleReminder ? { interactions: [scheduleReminderInteraction(notice.idempotencyKey, notice.scheduleReminder)] } : {}), taskTitle: notice.title, role: "assistant", createdAt: Date.now() });
     return { messageId: id };
   }
@@ -314,4 +317,20 @@ export class WebCommunicationAdapter implements CommunicationAdapter {
     if (!service) throw new Error("Unknown authorization service");
     this.interaction(this.conversation(notice.conversationId), authorizationInteraction(randomUUID(), service, "pending", notice));
   }
+}
+
+function outputInteractions(message: WebMessage, output: ConversationOutput): WebInteraction[] {
+  const interaction: WebInteraction = { id: `output:${output.id}`, kind: "output", title: output.title,
+    status: "completed", actions: [], output };
+  const items = [...(message.interactions ?? [])], index = items.findIndex(item => item.id === interaction.id);
+  if (index >= 0) items[index] = interaction;
+  else {
+    const files = output.blocks.every(block => block.type === "artifact");
+    const images = output.blocks.every(block => block.type === "image");
+    if (items.filter(item => item.kind === "output" && Boolean(item.output?.blocks.every(block => block.type === "artifact")) === files
+      && Boolean(item.output?.blocks.every(block => block.type === "image")) === images).length >= (files ? 100 : images ? 32 : 6))
+      throw new Error("Too many outputs in this reply");
+    items.push(interaction);
+  }
+  return items;
 }

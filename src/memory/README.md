@@ -16,7 +16,7 @@ A failed write cannot publish half an archive move or an incomplete batch.
 Persona and shared rules stay Agent-wide; private Markdown and archives stay scoped
 to their original users. Group conversations still receive no private documents.
 
-The Agent's `long_term_memory.read` returns Markdown strings and a revision.
+The Agent's `markdown read` returns a logical document's Markdown and revision.
 `replace` supplies unique exact `oldText` and `newText` (empty deletes a passage);
 `append` supplies text including newlines. Archives additionally support `create`
 and whole-file `delete` with the complete original body. Every replacement matches
@@ -49,16 +49,30 @@ before this change cannot be reconstructed from ID-only rewind markers.
 
 ## Context budgets and checkpoints
 
-Every catalogue route declares `context`: the exact supplier's window and output
-limits, their sources/date, and a `summary`, `openai-native`, `anthropic-native`,
-or `runtime` strategy. Protocol compatibility alone never enables native
-compaction. ZenMux OpenAI routes prefer its documented compact endpoint;
-unsupported native calls fall back to portable structured summaries and are not
-probed again for an hour. Claude through ZenMux, DeepSeek and Kimi currently use
-portable summaries. Codex App Server owns native compaction inside its tool loop;
-Zigent also bounds admission into each new adapter invocation.
-The adapter leaves Codex's native auto-compaction limit to its model catalogue;
-it never overwrites that limit with Zigent's conservative cold-start estimate.
+Every catalogue route declares its exact context and output limits and a
+`summary`, `openai-native`, `anthropic-native`, or `runtime` strategy. ZenMux GPT
+routes prefer its documented compact endpoint. A rejected native endpoint or
+replay pauses native compaction attempts for that route for an hour. Compatible
+protocols alone do not establish support for native compaction.
+
+Ordinary ChatGPT subscription chats persist one Codex App Server thread binding
+per Zigent session. Consecutive turns on the same account, model route and tool
+catalogue resume that thread with the new input. The App Server preserves its
+native compaction state and controls its own auto-compaction threshold. A route
+switch, history edit or fork, changed tool catalogue, or unavailable thread
+rebuilds from active Zigent history. The binding is consumed before submitting
+new input and published atomically with the next saved reply. A crash or a failed
+turn therefore cannot introduce uncommitted native history on the next request.
+Zigent continues to own the original conversation and tool journal.
+
+The DeepSeek API documents that Responses `context_management` is unsupported.
+Routes without a verified native mechanism use DeepSeek Harness's one-shot
+compaction approach and its pinned upstream prompt. The summarization request
+replays the routed prefix with its instructions and tool schema when supported,
+appends the upstream directive and accepts a text checkpoint only. No host tool
+executor is provided. The same approach serves as fallback when a verified native
+endpoint fails. The previous Zigent rolling summaries remain in historical audit
+records. New requests use original active messages and exact-route checkpoints.
 
 The old implicit 32,000-token Agent cap has been removed. An explicit
 `memoryContextWindowTokens` remains an operator cap, and an explicit
@@ -78,50 +92,29 @@ and also bound its summary requests; estimated request sizes never shrink the mo
 window for other conversations. Explicit account context restrictions (including
 Kimi's numeric 403 entitlement limits) permit compression; missing model access does not.
 
-The gateway checks complete requests before every model round and every fallback
-route, including instructions, tool schemas, images and tool results. Unicode
-estimates are conservative approximations, calibrated with comparable HTTP
-request usage; cached tokens already included in input are never added twice.
-Aggregate adapter usage is not mistaken for a context-window measurement.
-An upstream context rejection permits one same-route compact-and-retry, never a
-repeat of tools already executed. Irreducible oversized current input on a verified
-limit enters the existing model-fallback/confirmation path instead of silently
-truncating the user's request. An unverified estimate alone never proves supplier
-overflow. Current-only prefixes are not summarized: restoring the required
-original input alongside its summary cannot save space. Progress is announced
-only for a compressible prefix. Recovery from a real overflow requires a smaller
-request before a same-route retry; a rejected native replay may instead retry the
-original portable representation.
+The gateway checks HTTP requests before each model round and fallback, including
+instructions, tool schemas, images and tool results. Runtime routes admit the new
+input and leave native history pressure to the App Server when it owns the
+thread. Unicode estimates are calibrated against comparable HTTP request usage.
+One provider-confirmed context rejection can trigger a same-route retry after
+reducing the request. Irreducible input enters the existing model-fallback path.
 
-Old bulky tool observations are cleared only when exact run-local retrieval is
-available, with recent/protected tools and pending confirmations retained.
-`conversation_history.read_live_tool` reads the original by call ID and expected
-hash; clearing never executes that tool again. Projection edits stay stable within
-the run, while summaries always consume unmodified source messages.
-Summaries preserve goals, constraints,
-decisions (including rejected approaches), current state, evidence references and
-next actions. They are incremental, chunked to fit the summarizer's own budget,
-and checked for complete sections, truncation and actual space recovery before
-publication. Reasoning output has a separate reservation from checkpoint text.
-Complete recent turns stay verbatim; a long single turn can be cut only between
-closed tool exchanges while its original user input and image anchors remain.
+Old bulky tool results are replaced with exact references only when
+`conversation_history.read_live_tool` is available. Recent and protected tools
+and pending confirmations remain intact. A summary normally consumes the original
+prefix. Tool-result references can make the same balanced span fit when the
+summary request would otherwise exceed its own window. Closed tool exchanges,
+the current user input and image anchors remain protected. The gateway rejects
+empty, truncated or oversized summaries and only advances a checkpoint if the
+replacement makes the request smaller.
 
-Portable historical checkpoints use the first retained turn as their boundary.
-Exact-route request checkpoints are stored separately in `context_checkpoints`
-without replacing original messages or audit traces. Prefix fingerprints and
-route/protocol/supplier/API-model binding prevent reuse after edits or incompatible
-fallback; native blocks are replayed unchanged and only on their original route.
-Credential rotation also invalidates the binding. A native replay rejected by
-the supplier gets one portable rebuild from originals without repeating tools.
-Rewinds invalidate checkpoints; forks rebuild from their own original messages.
-Image-bearing in-memory anchors are not serialized as Buffer JSON checkpoints.
-Checkpoint writes are atomic; failed/partial summaries cannot advance history.
-Checkpoints also retain bounded deterministic provenance, generation and numeric
-diagnostics. Every fourth portable generation rebuilds from source still available
-to the run; earlier session archives remain accessible through history retrieval.
-Hashes verify source identity, not semantic completeness of a summary.
-All actual compaction usage is metered through the existing supplier cost policy,
-including zero monetary cost for subscriptions and ordinary cache-write tokens.
+`context_checkpoints` stores request checkpoints separately from original messages.
+Prefix fingerprints and exact route/credential binding guard replay. Native items
+stay bound to their original route, and rewinds invalidate checkpoints. Old
+Zigent summary checkpoints are rebuilt from originals as needed. Image-bearing
+anchors remain in memory instead of being serialized into SQLite. Actual
+compaction usage is metered on its route, including zero monetary cost and actual
+token usage for subscriptions.
 
 `GET api/models/context?model=<canonical-name>` reports effective policy through
 the existing authenticated web path. `diagnose-agent-runtime.yml` with an explicit
@@ -135,8 +128,8 @@ background tasks, independent of query keywords, profile size or model route.
 Soul and shared rules also stay complete. Personal context is outside the stable
 system prefix and pinned against conversation compaction. Full request admission
 still accounts for all memory text. Group conversations receive no private profile
-or archive titles. Archive bodies remain on demand: `long_term_memory.search`
-locates passages, and `read_archive` reads one complete archive by exact title.
+or archive titles. Archive bodies remain on demand: `markdown search`
+locates passages, and `markdown read` with the archive document ID reads one complete archive by exact title.
 Memory documents have no paginated body-read action; `read` returns the complete
 profile and shared rules.
 

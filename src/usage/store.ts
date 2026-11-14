@@ -70,7 +70,9 @@ export class UsageStore {
     if (!event.supplier.trim() || event.supplier === "unknown"
       || ((missingUsage || event.estimatedTokens) && event.cost?.type !== "subscription") || event.outcome === "rejected") return;
     const input = count(usage?.inputTokens), output = count(usage?.outputTokens);
-    const cached = Math.min(input, count(usage?.cachedInputTokens));
+    const reportedCached = count(usage?.cachedInputTokens);
+    // A partial subscription response can report cache reads without total input.
+    const cached = missingUsage && event.cost?.type === "subscription" ? reportedCached : Math.min(input, reportedCached);
     const model = event.kind === "image" || event.kind === "video"
       ? canonicalMediaModel(event.model,event.supplier,event.kind,this.configuredModels) : event.model;
     const proposedQuote = event.kind === "image" ? priceImage(model,event.supplier,event.cost,event.imageUsage)

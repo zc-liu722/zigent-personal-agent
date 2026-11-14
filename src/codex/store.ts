@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { EventEmitter } from "node:events";
 import { dispatchSchema, PROJECT_LIMIT, projectSchema, workerEventSchema, type CodexDevice, type CodexDispatch, type CodexScope, type CodexTask, type WorkerEvent } from "./types.js";
 import { safeDisplay } from "./display.js";
+import { dispatchProject } from "./target.js";
 
 type Row = Record<string, unknown>;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -23,7 +24,6 @@ export class CodexStore extends EventEmitter {
       CREATE TABLE IF NOT EXISTS codex_commands(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS codex_limits(key TEXT PRIMARY KEY,count INTEGER NOT NULL,reset_at INTEGER NOT NULL);`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS codex_display(seq INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT NOT NULL,attempt INTEGER NOT NULL,item_id TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL,UNIQUE(task_id,attempt,item_id));
-      CREATE TABLE IF NOT EXISTS project_execution_grants(device_id TEXT NOT NULL,project_id TEXT NOT NULL,digest TEXT NOT NULL,approved_at INTEGER NOT NULL,PRIMARY KEY(device_id,project_id));
       CREATE INDEX IF NOT EXISTS codex_display_task ON codex_display(task_id,seq);
       CREATE TABLE IF NOT EXISTS codex_display_receipts(event_id TEXT PRIMARY KEY,task_id TEXT NOT NULL,digest TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS codex_display_receipts_task ON codex_display_receipts(task_id);`);
@@ -45,7 +45,7 @@ export class CodexStore extends EventEmitter {
   }
   close() { this.removeAllListeners(); closeSqlite(this.db); }
   assertScope(scope: CodexScope) {
-    if (scope.agentId !== this.options.agentId || scope.userId !== this.options.ownerUserId || scope.conversationKind !== "p2p") throw new Error("Codex 只能在所属用户的私聊中使用");
+    if (scope.agentId !== "deepmind" || this.options.agentId !== "deepmind" || scope.agentId !== this.options.agentId || scope.userId !== this.options.ownerUserId || scope.conversationKind !== "p2p") throw new Error("Codex 只能由 deepmind 在所属用户的私聊中使用");
   }
   private tx<T>(action: () => T): T { this.db.exec("BEGIN IMMEDIATE"); try { const result = action(); this.db.exec("COMMIT"); return result; } catch (error) { this.db.exec("ROLLBACK"); throw error; } }
   limit(key: string, max: number, now = Date.now()) {
@@ -71,7 +71,7 @@ export class CodexStore extends EventEmitter {
   pairPreview(scope: CodexScope, code: string, now = Date.now()) {
     this.assertScope(scope);
     const row = prepareSql(this.db, "SELECT * FROM codex_devices WHERE pair_code=? AND revoked=0 AND expires_at>?").get(code.toUpperCase(), now) as Row | undefined;
-    if (!row) throw new Error("配对码已失效，请在 Mac 重新连接");
+    if (!row) throw new Error("配对码已失效，请重新连接桌面 Codex");
     return { id: String(row.id), name: String(row.name), projects: JSON.parse(String(row.projects)) as CodexDevice["projects"], paired: Boolean(row.paired) };
   }
   pair(scope: CodexScope, code: string) {
@@ -100,10 +100,11 @@ export class CodexStore extends EventEmitter {
     const previous = prepareSql(this.db, "SELECT payload FROM codex_tasks WHERE creation_key=?").get(key) as Row | undefined;
     if (previous) return JSON.parse(String(previous.payload)) as CodexTask;
     const device = this.devices(scope).find(device => device.id === input.deviceId);
-    if (!device?.projects.some(project => project.id === input.projectId && project.available !== false)) throw new Error("请选择已连接设备上的可用授权项目");
+    if (!device) throw new Error("请选择已连接的桌面 Codex");
+    const project = dispatchProject(device, input);
     const prior = input.continueTaskId ? this.owned(scope, input.continueTaskId) : undefined;
-    if (prior && (prior.protocol !== "text-v1" || !prior.threadId || prior.deviceId !== input.deviceId || prior.projectId !== input.projectId
-      || !["succeeded", "blocked", "cancelled"].includes(prior.state) || JSON.stringify(prior.project) !== JSON.stringify(device.projects.find(project => project.id === input.projectId))))
+    if (prior && (prior.protocol !== "text-v1" || !prior.threadId || prior.deviceId !== input.deviceId || prior.project?.directory?.toLowerCase().replaceAll("\\", "/") !== project.directory?.toLowerCase()
+      || !["succeeded", "blocked", "cancelled"].includes(prior.state) || prior.execution?.mode !== "direct"))
       throw new Error("原会话项目或状态已变化，请重新选择会话");
     const previousRequest = prior?.originalRequest, newRequest = origin?.originalRequest;
     const originalRequest = !newRequest ? previousRequest : !previousRequest || newRequest.includes(previousRequest) ? newRequest
@@ -111,7 +112,7 @@ export class CodexStore extends EventEmitter {
     if (originalRequest && originalRequest.length > 64000) throw new Error("原始要求过长，请明确本次任务范围后重新派发");
     const task: CodexTask = { originalRequest, intent: prior ? origin ? `${prior.intent ?? prior.prompt}\n\n用户后续要求：\n${input.prompt}` : prior.intent ?? prior.prompt : input.prompt,
       ...(input.reviewAfterCompletion ? { review: { state: "pending" as const, deadlineAt: now + input.timeoutMinutes * 60000, model: origin?.model, reasoningEfforts: origin?.reasoningEfforts } } : {}), id: randomUUID(), userId: scope.userId, conversationId: scope.conversationId, sessionId: scope.sessionId,
-      deviceId: input.deviceId, projectId: input.projectId, project: device.projects.find(project => project.id === input.projectId), protocol: "text-v1", ...(sourceRunId ? { sourceRunId } : {}), title: input.title, prompt: input.prompt,
+      deviceId: input.deviceId, projectId: project.id, project, protocol: "text-v1", ...(sourceRunId ? { sourceRunId } : {}), title: input.title, prompt: input.prompt,
       ...(prior?.threadId ? { threadId: prior.threadId, continueTaskId: prior.id, execution: prior.execution ? { ...prior.execution, publication: "pending", files: 0, usage: undefined, usageReportedAt: undefined } : undefined } : {}), state: "queued", phase: "等待接单", attempt: 1, revision: 1, createdAt: now, updatedAt: now, deadlineAt: now + input.timeoutMinutes * 60000,
       notification: "none" };
     prepareSql(this.db, "INSERT INTO codex_tasks VALUES(?,?,?,?,?,?)").run(task.id, key, task.deviceId, task.state, JSON.stringify(task), now);
@@ -139,15 +140,13 @@ export class CodexStore extends EventEmitter {
       const task = this.get(id), review = task?.review;
       if (!task || task.state !== "succeeded" || !review || review.state !== "running" || review.leaseToken !== token || (review.leaseUntil ?? 0) <= now) return;
       const scope = { agentId: this.options.agentId, userId: task.userId, conversationId: task.conversationId, sessionId: task.sessionId, conversationKind: "p2p" as const };
-      const project = this.devices(scope).find(d => d.id === task.deviceId)?.projects.find(p => p.id === task.projectId);
-      const unchanged = project && JSON.stringify(project) === JSON.stringify(task.project)
-        && (!project.executor || this.executionGrant(scope, task.deviceId, task.projectId));
+      const unchanged = this.devices(scope).some(d => d.id === task.deviceId) && Boolean(task.project?.directory) && task.execution?.mode === "direct";
       if (!unchanged) decision = { decision: "blocked", message: "项目授权或范围已变化，结果已保留，请确认后继续。" };
       if (decision.decision === "continue" && (!unchanged || !task.threadId || review.deadlineAt <= now || !decision.followup)) {
         decision = { decision: "blocked", message: !unchanged ? "项目授权或范围已变化，请确认后继续。" : review.deadlineAt <= now ? "本次授权执行时间已到，现有结果保留，请决定是否继续。" : "补做内容尚未明确，请决定下一步。" };
       }
       if (decision.decision === "continue") {
-        const next = this.create(scope, { deviceId: task.deviceId, projectId: task.projectId, title: task.title, prompt: decision.followup!,
+        const next = this.create(scope, { deviceId: task.deviceId, projectId: task.projectId, directory: task.project?.directory, title: task.title, prompt: decision.followup!,
           continueTaskId: task.id, reviewAfterCompletion: true, timeoutMinutes: Math.max(5, Math.min(1440, Math.ceil((review.deadlineAt - now) / 60000))) }, `review:${task.id}`, now, task.sourceRunId);
         next.originalRequest = task.originalRequest;
         next.review = { state: "pending", deadlineAt: review.deadlineAt, model: review.model, reasoningEfforts: review.reasoningEfforts };
@@ -190,13 +189,6 @@ export class CodexStore extends EventEmitter {
   nextQueued(deviceId: string): CodexTask | undefined {
     const row = prepareSql(this.db, "SELECT payload FROM codex_tasks WHERE device_id=? AND state='queued' ORDER BY updated_at LIMIT 1").get(deviceId) as Row | undefined;
     return row ? JSON.parse(String(row.payload)) : undefined;
-  }
-  executionGrant(scope: CodexScope, deviceId: string, projectId: string, approve = false): boolean {
-    const project = this.devices(scope).find(d => d.id === deviceId)?.projects.find(p => p.id === projectId);
-    if (!project?.executor || project.available === false) return false;
-    const digest = hash(JSON.stringify(project));
-    if (approve) prepareSql(this.db, "INSERT INTO project_execution_grants VALUES(?,?,?,?) ON CONFLICT(device_id,project_id) DO UPDATE SET digest=excluded.digest,approved_at=excluded.approved_at").run(deviceId, projectId, digest, Date.now());
-    return Boolean(prepareSql(this.db, "SELECT 1 FROM project_execution_grants WHERE device_id=? AND project_id=? AND digest=?").get(deviceId, projectId, digest));
   }
   claim(deviceId: string, now = Date.now()) {
     return this.tx(() => {
@@ -348,6 +340,7 @@ export class CodexStore extends EventEmitter {
       const revoked = !this.paired(task.deviceId);
       if (task.state === "queued") {
         if (revoked || task.deadlineAt <= now) {
+          task.summary = revoked ? "设备已断开，任务未开始执行。" : `任务未开始执行，超时前状态：${task.phase}。`;
           task.state = "blocked"; task.phase = revoked ? "设备已断开" : "等待接单超时"; task.notification = "pending:" + randomUUID(); task.updatedAt = now; task.revision += 1;
           this.save(task); this.record(task.id, randomUUID(), { type: "blocked", phase: task.phase }, now);
         }

@@ -1,5 +1,8 @@
+import { isSkillTool, canonicalSkillTool } from "./skills.js";
 import { parseProactiveTaskInput } from "./proactive-task-input.js";
 import { macDirectory } from "../codex/types.js";
+import { dispatchProject } from "../codex/target.js";
+import type { CodexDevice } from "../codex/types.js";
 import { operationDigest } from "./confirmed-operation.js";
 import { feishuCommand } from "./feishu-content-policy.js";
 import { operationPreview } from "./operation-preview.js";
@@ -7,28 +10,32 @@ import type { TaskTrigger } from "../tasks/types.js";
 import type { ChangeDocument, ChangePreview } from "../channels/change-preview.js";
 import { replaceMarkdownSections, skillSectionsSchema, skillTarget } from "../skills/service.js";
 import { parseAgentSkillMutation } from "../skills/agent-skills.js";
+import { calendarChangeBody } from "../productivity/calendar-mutation.js";
 
 type Fields = Record<string, unknown>;
 export type OperationRead = { tool: string; input: Fields };
 export type OperationDraft = { tool: string; input: Fields; title: string; description: string; reads: OperationRead[]; baseline: string;
+  pluginVersions?: Readonly<Record<string, string>>;
+  operationRecovery?: "schedule-v1" | "managed-skill-v1";
   delegationEvidence?: string;
   changes?: ChangePreview[]; changeDocuments?: ChangeDocument[];
   /** Private saved sources for read-only visual context; never included in channel notices. */
   taskTriggers?: Array<{ before?: TaskTrigger; after?: TaskTrigger }>;
   skillBaseline?: { revision: number; body: string; rulesDigest?: string } };
-export const confirmationGuidance = "Changes to calendar events, todos, proactive/health tasks, cloud content, skills, private project rules/goals/plans/preferences, location binding/deletion and extra phone notifications require the user's confirmation component, even when explicitly requested in chat. The tool only proposes the exact operation; no write occurs until the user clicks confirm. Do not ask for another verbal confirmation, call legacy confirm actions, or claim pending changes completed. Importing a new server-local document outside existing grants also requires the exact-file confirmation component. Reading already shared documents and factual health diary recording do not need confirmation; other read-only operations remain unchanged. Background tasks must not propose or execute these changes.";
+export const confirmationGuidance = "Changes to calendar events, todos, proactive/health tasks, cloud content, outgoing Gmail messages, skills, private project rules/goals/plans/preferences, location binding/deletion and extra phone notifications require the user's confirmation component, even when explicitly requested in chat. The tool only proposes the exact operation; no write occurs until the user clicks confirm. Do not ask for another verbal confirmation, call legacy confirm actions, or claim pending changes completed. Importing a new server-local document outside existing grants also requires the exact-file confirmation component. Reading already shared documents and factual health diary recording do not need confirmation; other read-only operations remain unchanged. Background tasks must not propose or execute these changes.";
 const actions: Record<string, Record<string, string>> = {
   documents: { import_file: "读取本地文档" },
   codex: { connect: "连接执行器", disconnect: "断开执行器", dispatch: "派发项目任务", message: "继续项目任务" },
   schedule: { create: "新建事项", update: "修改事项", complete: "完成待办", reopen: "重开待办", delete: "删除事项" },
   google_calendar: { create_event: "新建日程", update_event: "修改日程", delete_event: "取消日程" },
   todoist: { create_task: "新建待办", update_task: "修改待办", complete_task: "完成待办", reopen_task: "重开待办", delete_task: "删除待办" },
+  gmail: { send_message: "发送邮件" },
   google_drive: { create_file: "新建云盘文件", rename_file: "重命名云盘文件", update_text_file: "修改文本文件", edit_document: "修改云端文档", update_sheet: "修改云端表格", edit_presentation: "修改云端幻灯片" },
   proactive_tasks: { create: "创建主动任务", update: "修改主动任务", delete: "删除主动任务", pause: "暂停主动任务", resume: "恢复主动任务",
     trigger_activate: "启用触发规则", trigger_rollback: "回退触发规则", trigger_pause: "暂停触发规则", trigger_resume: "恢复触发规则" },
   health_tasks: { create: "创建健康提醒", update: "修改健康提醒", pause: "暂停健康提醒", cancel: "取消健康提醒" },
   user_location: { claim: "绑定定位", revoke: "解绑并清除定位" },
-  update_skill: { create: "创建技能", replace: "修改技能", delete: "删除技能", replace_section: "修改技能", replace_sections: "修改技能" }
+  skills: { create: "创建技能", replace: "修改技能", delete: "删除技能", replace_section: "修改技能", replace_sections: "修改技能" }
 };
 const mcpReads: Record<string, Set<string>> = {
   notion: new Set(["notion-search", "notion-fetch"]),
@@ -37,13 +44,15 @@ const mcpReads: Record<string, Set<string>> = {
 const cloudCommands = new Set(["docs +create", "docs +update", "docs +whiteboard-update", "sheets +workbook-create", "sheets +table-put", "drive files patch"]);
 export function operationTitle(tool: string, value: unknown): string | undefined {
   const input = object(value), action = String(input.action ?? "");
-  if (tool === "update_skill" && input.name === "health" && ["replace_section", "replace_sections"].includes(action)) return "更新健康项目";
+  if (tool === "workspaces") {
+    if (action === "promote") return "保留为持久项目";
+  }
   if (mcpReads[tool] && action === "call" && !mcpReads[tool]!.has(String(input.operation))) return tool === "notion" ? "修改 Notion 内容" : "修改 XMind 导图";
   if (tool === "feishu_cli" && action === "run" && Array.isArray(input.args)) {
     const command = [input.service, ...input.args.slice(0, input.service === "drive" ? 2 : 1)].join(" ");
     return cloudCommands.has(command) ? "修改飞书内容" : undefined;
   }
-  const entries = Object.hasOwn(actions, tool) ? actions[tool]! : undefined;
+  const entries = Object.hasOwn(actions, canonicalSkillTool(tool)) ? actions[canonicalSkillTool(tool)]! : undefined;
   return entries && Object.hasOwn(entries, action) ? entries[action] : undefined;
 }
 export function object(value: unknown): Fields { return value && typeof value === "object" && !Array.isArray(value) ? value as Fields : {}; }
@@ -91,6 +100,8 @@ function preview(value: unknown, depth = 0): string {
   }).join("\n");
 }
 export function operationReads(tool: string, input: Fields): OperationRead[] {
+  if (tool === "workspaces" && input.action === "promote") return [{tool, input:{action:"inspect",workspaceId:input.workspaceId}}];
+  if (tool === "gmail") return [{ tool, input: { ...input, action: "send_preview" } }];
   if (tool === "codex" && input.action === "connect") return [{ tool, input: { action: "pair_preview", code: input.code } }];
   if (tool === "codex" && input.action === "dispatch") {
     const task = object(input.task);
@@ -115,7 +126,7 @@ export function operationReads(tool: string, input: Fields): OperationRead[] {
     return reads;
   }
   if (tool === "health_tasks" && input.id) return [{ tool, input: { action: "list" } }];
-  if (tool === "update_skill") return [{ tool, input: { action: "read", name: input.name } }];
+  if (isSkillTool(tool)) return [{ tool, input: { action: "read", name: input.name } }];
   if (tool === "google_drive" && input.file_id) return [{ tool, input: { action: "get_file", file_id: input.file_id, ...(input.resource_key ? { resource_key: input.resource_key } : {}) } }];
   if (tool === "notion" && input.operation !== "notion-create-pages") {
     const raw = object(input.arguments);
@@ -153,15 +164,18 @@ export function operationReads(tool: string, input: Fields): OperationRead[] {
 export function operationSnapshots(reads: OperationRead[], results: unknown[], input: Fields): unknown[] {
   return reads.map((read, i) => {
     const value = object(results[i]);
+    if (read.tool === "workspaces") {
+      const workspace = object(value.workspace);
+      return {workspace:Object.fromEntries(["id","name","lifetime","sessionId","expiresAt"].filter(key=>workspace[key]!==undefined).map(key=>[key,workspace[key]]))};
+    }
     if (read.tool === "codex" && read.input.action === "devices") {
       const task = object(input.task), target = input.action === "message" ? object(object(results[0]).task) : task;
       const device = Array.isArray(value.devices) ? value.devices.find(item => object(item).id === (input.action === "disconnect" ? input.id : target.deviceId)) : undefined;
       if (!device) throw new Error("设备已失效，请重新连接");
       const saved = object(device);
       if (input.action === "disconnect") return { device: { id: saved.id, name: saved.name, projects: saved.projects } };
-      const project = Array.isArray(saved.projects) ? saved.projects.find(item => object(item).id === target.projectId && object(item).available !== false) : undefined;
-      if (!project) throw new Error("项目已失效，请重新选择");
-      if (input.action === "message" && operationDigest(project) !== operationDigest(target.project)) throw new Error("会话项目已变化，请重新选择");
+      const project = input.action === "message" ? target.project : dispatchProject(saved as CodexDevice, target);
+      if (!object(project).directory) throw new Error("请提供工作目录");
       return { device: { id: saved.id, name: saved.name }, project };
     }
     if (read.tool === "codex" && read.input.action === "get") {
@@ -191,7 +205,7 @@ export function operationSnapshots(reads: OperationRead[], results: unknown[], i
       return Object.fromEntries(["id", "title", "instruction", "trigger", "skill", "status", "revision", "deliveryPolicy"]
         .filter(key => plan[key] !== undefined).map(key => [key, plan[key]]));
     }
-    if (read.tool === "update_skill") return ["create", "replace", "delete"].includes(String(input.action))
+    if (isSkillTool(read.tool)) return ["create", "replace", "delete"].includes(String(input.action))
       ? Object.fromEntries(["name", "exists", "revision", "description", "body", "rules"].filter(key => value[key] !== undefined).map(key => [key, value[key]]))
       : { revision: value.revision, body: value[skillTarget(input.target)], ...(value.rulesDigest ? { rulesDigest: value.rulesDigest } : {}) };
     if (read.tool === "feishu_cli") return Object.fromEntries(Object.entries(value)
@@ -202,10 +216,18 @@ export function operationSnapshots(reads: OperationRead[], results: unknown[], i
 export function buildOperationDraft(tool: string, input: Fields, snapshots: unknown[]): OperationDraft {
   const title = operationTitle(tool, input);
   if (!title) throw new Error("此操作不在确认范围内。");
-  if (tool === "update_skill") {
-    if (input.name !== "health") parseAgentSkillMutation(input);
-    else if (!["replace_section", "replace_sections"].includes(String(input.action))) throw new Error("health is a protected project skill");
+  if (tool === "workspaces") {
+    const workspace = object(object(snapshots[0]).workspace);
+    const name = workspace.name;
+    if (typeof name !== "string" || !name.trim() || name.length>160) throw new Error("请提供有效的项目名称。");
+    if (!["temporary","legacy"].includes(String(workspace.lifetime))) throw new Error("该工作区无需转为持久项目。");
+    return {tool,input:structuredClone(input),title,description:`项目：${name}\n长期保留并加入项目清单。`,
+      reads:operationReads(tool,input),baseline:operationDigest(snapshots),
+      changes:[{title:String(name),before:"临时或未分类工作区",after:"持久项目，长期保留"}]};
   }
+  if (tool === "google_calendar" && ["create_event", "update_event"].includes(String(input.action)))
+    calendarChangeBody(input, object(object(snapshots[0]).event));
+  if (isSkillTool(tool)) parseAgentSkillMutation(input);
   if (["proactive_tasks", "health_tasks"].includes(tool) && input.title !== undefined && (!String(input.title).trim() || [...String(input.title).trim()].length > 4)) throw new Error("任务名称需要具体且不超过四个字符。");
   if (tool === "proactive_tasks") parseProactiveTaskInput(input);
   let description = "";
@@ -235,7 +257,7 @@ export function buildOperationDraft(tool: string, input: Fields, snapshots: unkn
   if (snapshots.length) {
     const source = object(snapshots[0]);
     const before = object(source.event ?? source.task ?? source.item ?? source.file ?? source);
-    if (tool === "update_skill") {
+    if (isSkillTool(tool)) {
       if (input.expected_revision !== before.revision) throw new Error("Skill revision conflict: read the current file; all pending section changes use the same expected_revision. Use replace_sections for all edits to one file.");
       if (typeof input.source_request_id !== "string" || !input.source_request_id.trim()) throw new Error("source_request_id is required");
       if (["create", "replace", "delete"].includes(String(input.action))) {
@@ -264,15 +286,24 @@ export function buildOperationDraft(tool: string, input: Fields, snapshots: unkn
   if (tool === "user_location" && input.action === "claim") description += "\n将当前私聊身份绑定到此定位数据源。";
   if (tool === "proactive_tasks" && String(input.action).startsWith("trigger_")) description += "\n此变更影响所有订阅该规则的任务。";
   else if (["proactive_tasks", "health_tasks"].includes(tool)) description += "\n确认后按此约定运行；以后每次触发无需再次确认。";
+  if (tool === "gmail") {
+    const snapshot = object(snapshots[0]);
+    description = `发件人：${snapshot.from_address}\n收件人：${(input.to as string[]).join(", ")}`
+      + (Array.isArray(input.cc) && input.cc.length ? `\n抄送：${input.cc.join(", ")}` : "")
+      + (Array.isArray(input.bcc) && input.bcc.length ? `\n密送：${input.bcc.join(", ")}` : "")
+      + `\n主题：${snapshot.subject}\n\n${input.body}`
+      + (Array.isArray(snapshot.attachments) && snapshot.attachments.length ? "\n\n附件：\n" + snapshot.attachments.map(value => { const file = object(value); return `${file.name}（${file.size} 字节）`; }).join("\n") : "")
+      + (input.reply_message_id ? `\n\n回复邮件：${input.reply_message_id}` : "");
+  }
   if (description.length > 22_000) throw new Error("本次变更过长，无法完整展示确认；请拆分为较小的变更。");
   const display = operationPreview(tool, input, snapshots, title, description, preview);
   // Feishu renders description; web renders changes. Both must show the same exact operation.
-  if (tool === "update_skill" && ["create", "replace", "delete"].includes(String(input.action))) {
+  if (isSkillTool(tool) && ["create", "replace", "delete"].includes(String(input.action))) {
     description = display.changes.map(change => `${change.title}\n${change.before === undefined ? "" : `\n修改前：\n${change.before}\n`}${change.after === undefined ? "" : `\n修改后：\n${change.after}`}`).join("\n\n");
     if (description.length > 22_000) throw new Error("本次变更过长，无法完整展示确认；请拆分为较小的变更。");
   }
   if (display.changes.reduce((size, change) => size + (change.before?.length ?? 0) + (change.after?.length ?? 0), 0) > 44_000)
     throw new Error("本次变更过长，无法完整展示确认；请拆分为较小的变更。");
   return { tool, input: structuredClone(input), title, description, ...display, reads: operationReads(tool, input), baseline: operationDigest(snapshots),
-    ...(tool === "update_skill" && ["replace_section", "replace_sections"].includes(String(input.action)) ? { skillBaseline: { revision: Number(object(snapshots[0]).revision), body: String(object(snapshots[0]).body), ...(object(snapshots[0]).rulesDigest ? { rulesDigest: String(object(snapshots[0]).rulesDigest) } : {}) } } : {}) };
+    ...(isSkillTool(tool) && ["replace_section", "replace_sections"].includes(String(input.action)) ? { skillBaseline: { revision: Number(object(snapshots[0]).revision), body: String(object(snapshots[0]).body), ...(object(snapshots[0]).rulesDigest ? { rulesDigest: String(object(snapshots[0]).rulesDigest) } : {}) } } : {}) };
 }

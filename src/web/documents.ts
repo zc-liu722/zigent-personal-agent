@@ -42,7 +42,7 @@ export class WebDocuments {
   contextFor(conversationId: string): string | undefined {
     if (!this.store.conversationInfo(conversationId)) return;
     const rows = prepareSql(this.store.db, `SELECT json_extract(interaction.value,'$.output') AS output, edit.key AS document_id, CAST(edit.value AS INTEGER) AS edited_at
-      FROM web_messages AS message, json_each(message.payload,'$.interactions') AS interaction,
+      FROM web_message_records AS message, json_each(message.payload,'$.interactions') AS interaction,
         json_each(interaction.value,'$.documentEdits') AS edit
       WHERE message.deleted_at IS NULL AND message.conversation_id=? AND json_extract(interaction.value,'$.kind')='output'
       ORDER BY CAST(edit.value AS INTEGER) DESC, message.seq DESC LIMIT 3`).all(conversationId) as Array<{ output: string; document_id: string; edited_at: number }>;
@@ -53,7 +53,7 @@ export class WebDocuments {
       return block?.type === "document" && output.success
         ? [{ filename: block.filename, title: block.title ?? output.data.title, content: block.content, truncated: false, editedAt: row.edited_at }] : [];
     });
-    const writings = prepareSql(this.store.db, `SELECT edit.value AS value FROM web_messages AS message,
+    const writings = prepareSql(this.store.db, `SELECT edit.value AS value FROM web_message_records AS message,
       json_each(message.payload,'$.writingEdits') AS edit WHERE message.deleted_at IS NULL AND message.conversation_id=?
       ORDER BY json_extract(edit.value,'$.updatedAt') DESC LIMIT 3`).all(conversationId) as Array<{ value: string }>;
     for (const row of writings) {
@@ -100,6 +100,15 @@ export class WebDocuments {
     }
     if (message?.conversationId !== conversationId || !this.store.conversationInfo(conversationId) || !interaction)
       return { code: 404, error: "文件不存在。" };
+    if (interaction.id.startsWith("audio:") && message.assets?.includes(documentId)
+      && interaction.documents?.some(document => document.id === documentId)) {
+      if (edit) return { code: 403, error: "转录原件只读，请在项目空间中整理。" };
+      const metadata = this.store.documentMetadata([documentId])[documentId], asset = this.store.asset(documentId);
+      if (!asset || !metadata?.name.endsWith(".转录.txt") || !asset.mime.startsWith("text/plain")) return { code: 404, error: "转录文件不存在。" };
+      const content = Buffer.from(asset.bytes).toString("utf8");
+      return { code: 200, document: { id: documentId, title: metadata.name, filename: metadata.name, content,
+        revision: createHash("sha256").update(content).digest("hex"), editable: false } };
+    }
     if (interaction.kind === "memory-proposal") return edit
       ? this.memory.saveDocument(conversationId, messageId, interactionId, documentId, edit.content, edit.revision)
       : this.memory.openDocument(conversationId, messageId, interactionId, documentId);

@@ -6,6 +6,7 @@ import type { ModelGatewayConfig } from "./gateway-config.js";
 import { ModelWebSearchError } from "./errors.js";
 import { modelRequestDispatcher } from "./http-transport.js";
 import { tokenCount, validTokenCount } from "./stream-usage.js";
+import { searchImageCandidates } from "./search-images.js";
 
 type SearchResult = { type: "url"; url: string; title?: string; snippet?: string; content?: string };
 
@@ -68,7 +69,7 @@ export async function executeSupplierWebSearch(config: ModelGatewayConfig, route
       return {
         result: { query, answer: evidence.map(item =>
           [item.title, item.url, item.snippet, item.content].filter(Boolean).join("\n")).join("\n\n"),
-          sources, searchSupplier: service.supplier },
+          sources, images:searchImageCandidates(payload), imageRetrieval:"Use actual image URLs with image_assets present and cite sourceUrl. If no structured images were returned, image_assets webpage reads images from the source page. No image candidates does not prove no images exist.", searchSupplier: service.supplier },
         usage,
         webSearchCalls: [{ id: callId, status: "completed", query, sources }],
         citations: sources.map(({ url, title }) => ({ type: "url_citation", url, title }))

@@ -15,6 +15,7 @@ export type DeliveredImage = {
 };
 
 export interface AgentRunChannel {
+  readonly initialSnapshot?: AgentRunSnapshot;
   readonly replyId?: string;
   openActivity(snapshot: AgentRunSnapshot): Promise<void>;
   updateActivity(snapshot: AgentRunSnapshot): Promise<void>;
@@ -23,6 +24,6 @@ export interface AgentRunChannel {
   sendFinalReply(text: string): Promise<void>;
   sendImages?(images: readonly GeneratedImage[]): Promise<readonly DeliveredImage[] | void>;
   sendVideos?(videos: readonly GeneratedVideo[]): Promise<void>;
-  sendOutput?(output: ConversationOutput): Promise<void>;
+  sendOutput?(output: ConversationOutput): Promise<ConversationOutput | void>;
   sendFailure(text: string): Promise<void>;
 }

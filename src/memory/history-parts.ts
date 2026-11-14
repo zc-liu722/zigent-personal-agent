@@ -13,14 +13,15 @@ const visibleText = `b.content || ${visibleAnswers}`;
  * source is an internal CTE name, never caller input.
  */
 export function projectHistoryParts(parts: readonly HistoryPart[], options: {
-  source?: "base" | "eligible"; keysOnly?: boolean;
+  source?: "base" | "eligible"; keysOnly?: boolean; legacyOnly?: boolean;
 } = {}): string {
   const { source = "base", keysOnly = false } = options;
   const projections: string[] = [];
   const add = (id: string, type: string, text: string, metadata: string, sort: string, from: string, where = "") => {
     const fields = keysOnly ? `b.id AS message_id,${id} AS part_id,${sort} AS sort_key`
       : `b.id AS message_id,${id} AS part_id,${type} AS type,${text} AS text,${metadata} AS metadata,${sort} AS sort_key`;
-    projections.push(`SELECT ${fields} FROM ${source} b${from} ${where ? `WHERE ${where}` : ""}`);
+    const legacy = options.legacyOnly ? "" : "NOT EXISTS(SELECT 1 FROM conversation_message_parts cp WHERE cp.message_id=b.id)";
+    projections.push(`SELECT ${fields} FROM ${source} b${from} ${[where, legacy].filter(Boolean).length ? `WHERE ${[where, legacy].filter(Boolean).join(" AND ")}` : ""}`);
   };
   // Mixed-part reads previously expanded every visible answer before pagination.
   // Retain malformed-answer failures while avoiding copies of every message body.
@@ -55,6 +56,20 @@ export function projectHistoryParts(parts: readonly HistoryPart[], options: {
       "printf('t:%010d:0',t.key)", ",json_each(b.tool_trace_json) t",
       `b.role='assistant' AND (json_extract(t.value,'$.role')='tool'
         OR (json_extract(t.value,'$.role') IN ('assistant','user') AND length(json_extract(t.value,'$.text'))>0))`);
+  }
+  if (parts.includes("thoughts")) {
+    add("'trace:' || t.key || ':thought'", "'thought'", "json_extract(t.value,'$.reasoningContent')",
+      "json_object('source','reasoning','status','completed')", "printf('t:%010d:0:thought',t.key)", ",json_each(b.tool_trace_json) t",
+      "b.role='assistant' AND json_extract(t.value,'$.role')='assistant' AND length(json_extract(t.value,'$.reasoningContent'))>0 AND NOT EXISTS(SELECT 1 FROM json_each(b.activity_trace_json) a WHERE json_extract(a.value,'$.type')='thought' AND json_extract(a.value,'$.text')=json_extract(t.value,'$.reasoningContent'))");
+  }
+  if (!options.legacyOnly) {
+    // Process-only sources omit question_answers_json; do not reference it in their projection.
+    const text = parts.includes("content")
+      ? `CASE WHEN p.category='content' THEN conversation_read(p.hash) || ${visibleAnswers} ELSE conversation_read(p.hash) END`
+      : "conversation_read(p.hash)";
+    projections.push(`SELECT b.id AS message_id,p.part_id,${keysOnly ? "" : `p.type AS type,
+      ${text} AS text,p.metadata AS metadata,`}p.ordinal AS sort_key FROM ${source} b JOIN conversation_message_parts p ON p.message_id=b.id
+      WHERE p.category IN (${parts.map(part => "'" + part + "'").join(",")})`);
   }
   return projections.join(" UNION ALL ");
 }

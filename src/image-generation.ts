@@ -5,7 +5,8 @@ import { modelCostMultiplier, type AgentConfig, type ModelCostPolicy } from "./c
 import type { ImageExperimentVariant, ImageGenerationRecord, ImageGenerationUsage } from "./memory/types.js";
 import { SupplierHealthRegistry } from "./models/supplier-health.js";
 import { generateCodexImage, converseCodexImages } from "./models/codex-image-generation.js";
-import { DEFAULT_IMAGE_GENERATION_TIMEOUT_MS } from "./image-generation-policy.js";
+import { DEFAULT_IMAGE_GENERATION_TIMEOUT_MS, ImageGenerationTimeoutError,
+  isImageTransportTimeout, retryImageTimeouts } from "./image-generation-policy.js";
 
 export type ImageSize = "1024x1024" | "1536x1024" | "1024x1536" | "auto";
 export type ImageQuality = "low" | "medium" | "high" | "auto";
@@ -36,6 +37,7 @@ export type ReferenceImage = {
 };
 
 export type ImageGenerationRequest = {
+  readonly signal?: AbortSignal;
   readonly reasoningEfforts?: Readonly<Record<string, import("./config.js").ReasoningEffort>>;
   readonly prompt: string;
   /** Stable local generation record identity; never sent to the supplier. */
@@ -73,6 +75,8 @@ export type ImageConversationRequest = {
   readonly selectedModel?: import("./config.js").Provider;
   readonly reasoningEfforts?: ImageGenerationRequest["reasoningEfforts"];
   readonly signal?: AbortSignal;
+  /** Persist and publish each usable image without waiting for the text turn. */
+  readonly onAttempt?: (attempt: ImageGenerationAttemptResult) => Promise<void>;
 };
 export type ImageConversationResult = { readonly text: string; readonly attempts: readonly ImageGenerationAttemptResult[] };
 
@@ -147,28 +151,6 @@ function directRequestDispatcher(config: AgentConfig, url: string): Dispatcher |
   return dispatcher;
 }
 
-function isLocalProxy(value: string): boolean {
-  const hostname = new URL(value).hostname.toLowerCase();
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-}
-
-function isProxyConnectionRefused(error: unknown): boolean {
-  let current = error;
-  for (let depth = 0; depth < 4 && current; depth += 1) {
-    const details = current instanceof Error
-      ? { message: current.message, cause: current.cause }
-      : current && typeof current === "object"
-        ? current as { message?: unknown; code?: unknown; cause?: unknown }
-        : undefined;
-    if (details && (details.code === "ECONNREFUSED"
-      || (typeof details.message === "string" && /econnrefused|connection refused/i.test(details.message)))) {
-      return true;
-    }
-    current = details?.cause;
-  }
-  return false;
-}
-
 async function fetchImageRequest(
   config: AgentConfig,
   url: string,
@@ -182,20 +164,7 @@ async function fetchImageRequest(
       : init);
   }
 
-  try {
-    return await fetch(url, { ...init, dispatcher } as RequestInit & { dispatcher?: Dispatcher });
-  } catch (error) {
-    if (!config.zenmuxProxyUrl || !isLocalProxy(config.zenmuxProxyUrl) || !isProxyConnectionRefused(error)) {
-      throw error;
-    }
-    console.warn("Local Zenmux proxy is unavailable; retrying image request without proxy", {
-      proxyUrl: config.zenmuxProxyUrl,
-      endpoint: url
-    });
-    return fetch(url, directDispatcher
-      ? { ...init, dispatcher: directDispatcher } as RequestInit & { dispatcher?: Dispatcher }
-      : init);
-  }
+  return fetch(url, { ...init, dispatcher } as RequestInit & { dispatcher?: Dispatcher });
 }
 
 function imageMimeType(value: string | null | undefined): string {
@@ -349,6 +318,7 @@ function imageGenerationUsage(
 
 export class ImageGenerationGateway implements ImageGenerator {
   readonly conversation?: ImageGenerator["conversation"];
+  codexImageRound?: import("./models/codex-contract.js").CodexImageRound;
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly supplier: string;
@@ -359,7 +329,7 @@ export class ImageGenerationGateway implements ImageGenerator {
     private readonly recordUsage?: UsageRecorder
   ) {
     if (config.imageGeneration?.transport === "codex-app-server") {
-      this.conversation = request => converseCodexImages(config, request, this.recordUsage);
+      this.conversation = request => converseCodexImages(config, request, this.recordUsage, this.runCodexImage);
     }
     this.baseUrl = config.imageGeneration?.baseUrl ?? DEFAULT_BASE_URL;
     this.model = config.imageGeneration?.model ?? DEFAULT_MODEL;
@@ -367,11 +337,25 @@ export class ImageGenerationGateway implements ImageGenerator {
       ?? (isZenmuxEndpoint(this.baseUrl) ? "zenmux" : "image-generation");
   }
 
+  private readonly runCodexImage: import("./models/codex-contract.js").CodexImageRound = (...args) => {
+    if (!this.codexImageRound) throw new Error("Codex image component is not ready");
+    return this.codexImageRound(...args);
+  };
+
   metadata(): { readonly model: string; readonly supplier: string; readonly cost?: ModelCostPolicy } {
     return { model: this.config.imageGeneration?.modelName ?? this.model, supplier: this.supplier, cost: this.config.imageGeneration?.cost };
   }
 
   async generate(request: ImageGenerationRequest): Promise<ImageGenerationAttemptResult> {
+    // The subscription route owns its phased deadline and retry loop.
+    if (this.config.imageGeneration?.transport === "codex-app-server") return this.generateAttempt(request, 0);
+    return retryImageTimeouts(retry => this.generateAttempt(request, retry), {
+      maxRetries: this.config.imageGenerationRetryAttempts, signal: request.signal
+    });
+  }
+
+  private async generateAttempt(request: ImageGenerationRequest, retry: number): Promise<ImageGenerationAttemptResult> {
+    request.signal?.throwIfAborted();
     const timeoutMs = this.config.imageGenerationTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     const apiKey = this.config.imageGeneration?.apiKey;
     const prompt = request.prompt;
@@ -390,7 +374,7 @@ export class ImageGenerationGateway implements ImageGenerator {
       if (image.data.byteLength > MAX_IMAGE_BYTES) throw new Error("Reference image exceeds the 10 MB limit");
     }
     if (this.config.imageGeneration?.transport === "codex-app-server") {
-      return generateCodexImage(this.config, request, this.recordUsage);
+      return generateCodexImage(this.config, request, this.recordUsage, this.runCodexImage);
     }
     if (!apiKey) throw new Error("Image generation is not configured; set ZENMUX_API_KEY or <AGENT>_ZENMUX_API_KEY");
     const isEdit = referenceImages.length > 0;
@@ -417,12 +401,15 @@ export class ImageGenerationGateway implements ImageGenerator {
         })()
       : JSON.stringify({ model: this.model, prompt, n, size, quality });
     const metering: UsageObservation = {
-      id: `image:${this.supplier}:${request.usageRecordId ?? randomUUID()}`, mediaRecordId:request.usageRecordId,
+      id: `image:${this.supplier}:${request.usageRecordId ?? randomUUID()}${retry ? `:retry:${retry}` : ""}`,
+      mediaRecordId: request.usageRecordId ? `${request.usageRecordId}:attempt:${retry}` : undefined,
       model:this.config.imageGeneration?.modelName ?? this.model,apiModel:this.model,supplier:this.supplier,cost:this.config.imageGeneration?.cost,
       kind:"image",createdAt:Date.now(),outcome:"failed",outputImages:0
     };
     let recorded=false;
     const flush=()=>{if (!recorded) {recorded=true;this.recordUsage?.(metering);}};
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const signal = request.signal ? AbortSignal.any([request.signal, deadline]) : deadline;
     try {
       let response: Response;
       try {
@@ -432,10 +419,12 @@ export class ImageGenerationGateway implements ImageGenerator {
             ? { Authorization: `Bearer ${apiKey}` }
             : { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
           body,
-          signal: AbortSignal.timeout(timeoutMs)
+          signal
         });
       } catch (error) {
         this.supplierHealth.markFailure(this.supplier, this.config.modelCircuitBreakerMs);
+        request.signal?.throwIfAborted();
+        if (deadline.aborted || isImageTransportTimeout(error)) throw new ImageGenerationTimeoutError(`图片生成请求超时：${requestErrorText(error)}`);
         throw new Error(`Image generation request failed: ${requestErrorText(error)}`);
       }
       let raw: string;
@@ -443,6 +432,9 @@ export class ImageGenerationGateway implements ImageGenerator {
         raw = await response.text();
       } catch (error) {
         this.supplierHealth.markFailure(this.supplier, this.config.modelCircuitBreakerMs);
+        request.signal?.throwIfAborted();
+        if ((response.ok || response.status === 408 || response.status === 504) && (deadline.aborted || isImageTransportTimeout(error)))
+          throw new ImageGenerationTimeoutError(`图片生成响应超时：${requestErrorText(error)}`);
         throw new Error(`Image generation response failed: ${requestErrorText(error)}`);
       }
       let payload: unknown;
@@ -458,12 +450,17 @@ export class ImageGenerationGateway implements ImageGenerator {
       if (!response.ok) {
         metering.outcome = "rejected";
         this.supplierHealth.markFailure(this.supplier, this.config.modelCircuitBreakerMs);
+        if (response.status === 408 || response.status === 504)
+          throw new ImageGenerationTimeoutError(`图片生成超时（HTTP ${response.status}）。`);
         throw new Error(`${errorText(payload)} (HTTP ${response.status})`);
       }
       this.supplierHealth.markSuccess(this.supplier);
       if (!isRecord(payload) || !Array.isArray(payload.data)) throw new Error("Image generation returned an invalid response");
       const meteredUsage = imageGenerationUsage(payload, this.model, prompt, size, payload.data.length);
       metering.usage=meteredUsage; metering.imageUsage={...meteredUsage,...meteredUsage.billingDetails};
+      // Complete results keep the durable image-record link. Timed-out attempts
+      // have separate identities so they cannot overwrite another attempt's usage.
+      metering.mediaRecordId=request.usageRecordId;
       metering.usageComplete=!meteredUsage.estimated; metering.estimatedTokens=meteredUsage.estimated;
       metering.outputImages=payload.data.filter(item => isRecord(item) && (typeof item.url === "string" || typeof item.b64_json === "string")).length;
       metering.outcome=metering.outputImages > 0 ? "completed" : "failed";

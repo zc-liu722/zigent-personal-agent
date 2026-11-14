@@ -5,7 +5,7 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 import { initializeHistorySearch, prepareHistorySearch, historyMatchExpression, historySearchIndex, historySearchNeedles, historySearchTerms } from "./history-search.js";
 
-const page = { limit: z.number().int().min(1).max(20).default(10), offset: z.number().int().min(0).max(1_000_000).default(0) };
+const page = { source_revision: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(20).default(10), offset: z.number().int().min(0).max(1_000_000).default(0) };
 const dates = { from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() };
 const sessionId = z.string().min(1).max(200);
 const filters = {
@@ -68,8 +68,8 @@ function decodeScanCursor(value: string, fingerprint: string): ScanCursor {
 
 const speakerLabel = `CASE WHEN s.chat_type='group' AND m.role='user' THEN
   CASE WHEN m.sender_user_id IS NULL THEN '群成员（历史身份未知）' ELSE '群成员 ' || (
-    SELECT count(DISTINCT p.sender_user_id) FROM messages p WHERE p.deleted_at IS NULL AND p.session_id=m.session_id AND p.role='user'
-    AND p.turn_id<=(SELECT min(f.turn_id) FROM messages f WHERE f.deleted_at IS NULL AND f.session_id=m.session_id
+    SELECT count(DISTINCT p.sender_user_id) FROM conversation_history_messages p WHERE p.deleted_at IS NULL AND p.session_id=m.session_id AND p.role='user'
+    AND p.turn_id<=(SELECT min(f.turn_id) FROM conversation_history_messages f WHERE f.deleted_at IS NULL AND f.session_id=m.session_id
       AND f.role='user' AND f.sender_user_id=m.sender_user_id)) END ELSE NULL END`;
 
 export function queryConversationHistory(db: DatabaseSync, agentId: string, scope: ConversationHistoryScope, request: ConversationHistoryRequest) {
@@ -81,7 +81,10 @@ export function queryConversationHistory(db: DatabaseSync, agentId: string, scop
     throw new Error("Conversation history is unavailable in this context");
   }
   initializeHistorySearch(db);
+  const sourceRevision = Number(prepareSql(db,"SELECT version FROM conversation_revision WHERE singleton=1").get()!.version);
+  if (request.source_revision !== undefined && request.source_revision !== sourceRevision) throw new Error("Conversation source version changed; restart pagination from offset=0");
   const conditions = [scope.conversationKind === "p2p" ? "s.chat_type='p2p' AND s.user_id=?" : "s.chat_type='group' AND s.chat_id=?"];
+  conditions.push("NOT EXISTS(SELECT 1 FROM conversation_visibility v WHERE v.session_id=s.session_id)");
   const values: SQLInputValue[] = [scope.conversationKind === "p2p" ? scope.userId : scope.conversationId];
   if (request.action !== "list" && request.session_id) {
     // Resolve access before message/turn anchors; inaccessible and unknown sessions are indistinguishable.
@@ -95,12 +98,12 @@ export function queryConversationHistory(db: DatabaseSync, agentId: string, scop
     if (request.from) { conditions.push(`${time}>=?`); values.push(Date.parse(request.from)); }
     if (request.to) { conditions.push(`${time}<=?`); values.push(Date.parse(request.to)); }
   }
-  const pagination = (rows: unknown[]) => ({ items: rows.slice(0, request.limit),
+  const pagination = (rows: unknown[]) => ({ source_revision: sourceRevision, items: rows.slice(0, request.limit),
     has_more: rows.length > request.limit, ...(rows.length > request.limit ? { next_offset: request.offset + request.limit } : {}) });
   if (request.action === "list") {
     const rows = prepareSql(db, `SELECT s.session_id,substr(s.initial_user_preview,1,160) AS title,
       s.status,s.created_at,s.last_active_at,
-      (SELECT count(*) FROM messages m WHERE m.deleted_at IS NULL AND m.session_id=s.session_id AND m.role IN ('user','assistant')) AS message_count
+      (SELECT count(*) FROM conversation_history_messages m WHERE m.deleted_at IS NULL AND m.session_id=s.session_id AND m.role IN ('user','assistant')) AS message_count
       FROM sessions s WHERE ${conditions.join(" AND ")} ORDER BY s.last_active_at DESC,s.session_id DESC LIMIT ? OFFSET ?`)
       .all(...values, request.limit + 1, request.offset);
     return { action: request.action, ...pagination(rows) };
@@ -108,7 +111,7 @@ export function queryConversationHistory(db: DatabaseSync, agentId: string, scop
   conditions.push("m.deleted_at IS NULL", "m.role IN ('user','assistant')");
   if (request.action === "read" && request.message_id) {
     if (request.scope === "turn") {
-      conditions.push("m.turn_id=(SELECT anchor.turn_id FROM messages anchor WHERE anchor.deleted_at IS NULL AND anchor.session_id=s.session_id AND anchor.id=? AND anchor.role IN ('user','assistant'))");
+      conditions.push("m.turn_id=(SELECT anchor.turn_id FROM conversation_history_messages anchor WHERE anchor.deleted_at IS NULL AND anchor.session_id=s.session_id AND anchor.id=? AND anchor.role IN ('user','assistant'))");
     } else conditions.push("m.id=?");
     values.push(request.message_id);
   }
@@ -116,9 +119,21 @@ export function queryConversationHistory(db: DatabaseSync, agentId: string, scop
   if (request.role !== "all") { conditions.push("m.role=?"); values.push(request.role); }
   const baseColumns = ["m.id", "m.session_id", "m.turn_id", "m.role", "m.created_at",
     ...(request.parts.includes("content") ? ["m.content", "m.question_answers_json"] : []),
-    ...(request.parts.some(part => part !== "content") ? ["m.activity_trace_json"] : []),
-    ...(request.parts.includes("tools") ? ["m.tool_trace_json"] : [])];
-  const columns = `p.message_id,b.session_id,b.turn_id,b.role,b.created_at,b.speaker_label,p.part_id,p.type,p.metadata`;
+    ...(request.parts.some(part => part !== "content") ? ["CASE WHEN NOT EXISTS(SELECT 1 FROM conversation_message_parts cp WHERE cp.message_id=m.id) THEN m.activity_trace_json END AS activity_trace_json"] : []),
+    ...(request.parts.includes("tools") || request.parts.includes("thoughts") ? ["CASE WHEN NOT EXISTS(SELECT 1 FROM conversation_message_parts cp WHERE cp.message_id=m.id) THEN m.tool_trace_json END AS tool_trace_json"] : [])];
+  const runMatch = "r.draft_id=p.message_id OR 'committed:'||r.draft_id=p.message_id OR EXISTS(SELECT 1 FROM conversation_attempts a WHERE a.run_id=r.id AND 'attempt:'||a.id=p.message_id)";
+  const columns = `p.message_id,b.session_id,b.turn_id,b.role,b.created_at,b.speaker_label,p.part_id,p.type,p.metadata,
+    (SELECT id FROM conversation_runs r WHERE ${runMatch}) AS run_id,
+    (SELECT generation_status FROM conversation_runs r WHERE ${runMatch}) AS generation_status,
+    (SELECT delivery_status FROM conversation_runs r WHERE ${runMatch}) AS delivery_status,
+    CASE WHEN p.message_id LIKE 'attempt:%' THEN 'incomplete' WHEN p.message_id LIKE 'committed:%' THEN 'complete'
+      WHEN EXISTS(SELECT 1 FROM conversation_runs r WHERE r.draft_id=p.message_id AND r.context_status<>'eligible') THEN 'mixed' ELSE 'complete' END AS output_status,
+    CASE WHEN p.message_id LIKE 'attempt:%' THEN 'excluded' WHEN p.message_id LIKE 'committed:%' THEN 'eligible'
+      ELSE (SELECT context_status FROM conversation_runs r WHERE ${runMatch}) END AS context_status,
+    (SELECT a.id FROM conversation_attempts a JOIN conversation_runs r ON r.id=a.run_id
+      WHERE ('attempt:'||a.id)=p.message_id OR r.draft_id=p.message_id ORDER BY a.id DESC LIMIT 1) AS attempt_id,
+    (SELECT a.state FROM conversation_attempts a JOIN conversation_runs r ON r.id=a.run_id
+      WHERE ('attempt:'||a.id)=p.message_id OR r.draft_id=p.message_id ORDER BY a.id DESC LIMIT 1) AS attempt_status`;
   const decode = (rows: Array<Record<string, unknown>>) => rows.map(({ metadata, ...row }) => ({
     ...row, ...Object.fromEntries(Object.entries(JSON.parse(String(metadata))).filter(([, value]) => value !== null)
       .map(([key, value]) => [key, key === "failed" ? Boolean(value) : value]))
@@ -128,13 +143,13 @@ export function queryConversationHistory(db: DatabaseSync, agentId: string, scop
     const expression = index?.available ? historyMatchExpression(request.query, request.match) : undefined;
     const indexed = Boolean(expression), fts = historySearchIndex(request.match);
     const fingerprint = createHash("sha256").update(JSON.stringify([agentId, scope.userId, scope.conversationId, scope.conversationKind,
-      request.query, request.match, request.sort, request.session_id, request.turn_id, request.role, request.parts, request.from, request.to])).digest("hex");
-    const newest = request.scan_cursor ? undefined : prepareSql(db, `SELECT m.id,m.created_at FROM messages m
+      sourceRevision, request.query, request.match, request.sort, request.session_id, request.turn_id, request.role, request.parts, request.from, request.to])).digest("hex");
+    const newest = request.scan_cursor ? undefined : prepareSql(db, `SELECT m.id,m.created_at FROM conversation_history_messages m
       JOIN sessions s ON s.session_id=m.session_id WHERE ${conditions.join(" AND ")}
       ORDER BY m.created_at DESC,m.id DESC LIMIT 1`).get(...values) as { id: string; created_at: number } | undefined;
     const cursor: ScanCursor | undefined = request.scan_cursor ? decodeScanCursor(request.scan_cursor, fingerprint)
       : newest ? { version: 1, fingerprint, cutoffAt: newest.created_at, cutoffId: newest.id } : undefined;
-    if (!cursor) return { action: request.action, match: request.match, sort: request.sort, trust: "reference", items: [], has_more: false,
+    if (!cursor) return { action: request.action, match: request.match, sort: request.sort, trust: "reference", source_revision: sourceRevision, items: [], has_more: false,
       coverage: { index: indexed ? "fts5" : "bounded_source_scan", complete: true, scan_exhausted: true, scanned_messages: 0 } };
     // The authoritative scan always traverses the same source ordering, never the changing missing-index set.
     // Index backfill and soft deletion cannot shift an offset and skip unseen source messages.
@@ -146,12 +161,12 @@ export function queryConversationHistory(db: DatabaseSync, agentId: string, scop
       scanValues.push(cursor.before.at, cursor.before.at, cursor.before.id);
     }
     const scanLimit = 100, candidateLimit = 200;
-    const scanRows = prepareSql(db, `SELECT m.id,m.created_at FROM messages m JOIN sessions s ON s.session_id=m.session_id
+    const scanRows = prepareSql(db, `SELECT m.id,m.created_at FROM conversation_history_messages m JOIN sessions s ON s.session_id=m.session_id
       WHERE ${scanConditions.join(" AND ")} ORDER BY m.created_at DESC,m.id DESC LIMIT ?`)
       .all(...scanValues, scanLimit + 1) as Array<{ id: string; created_at: number }>;
     // Rank IDs first. At most 200 indexed candidates plus 100 source records can load bodies or run JS normalization.
     const indexedRows = indexed && !cursor.before ? prepareSql(db, `SELECT d.message_id AS id,bm25(${fts}) AS rank FROM ${fts}
-      JOIN history_search_documents_v1 d ON d.id=${fts}.rowid JOIN messages m ON m.id=d.message_id
+      JOIN history_search_documents_v1 d ON d.id=${fts}.rowid JOIN conversation_history_messages m ON m.id=d.message_id
       JOIN sessions s ON s.session_id=m.session_id WHERE ${windowConditions.join(" AND ")} AND ${fts} MATCH ?
       ORDER BY ${request.sort === "relevance" ? "rank," : ""}m.created_at DESC,m.id DESC LIMIT ?`)
       .all(...windowValues, expression!, candidateLimit + 1) as Array<{ id: string; rank: number }> : [];
@@ -163,7 +178,7 @@ export function queryConversationHistory(db: DatabaseSync, agentId: string, scop
     }
     const searchProjection = `WITH base AS MATERIALIZED (
       SELECT ${baseColumns.join(",")},${speakerLabel} AS speaker_label,json_extract(candidate.value,'$.rank') AS search_rank
-      FROM json_each(?) candidate JOIN messages m ON m.id=json_extract(candidate.value,'$.id')
+      FROM json_each(?) candidate JOIN conversation_history_messages m ON m.id=json_extract(candidate.value,'$.id')
       JOIN sessions s ON s.session_id=m.session_id WHERE ${windowConditions.join(" AND ")}),
       parts(message_id,part_id,type,text,metadata,sort_key) AS (${projectHistoryParts(request.parts)})`;
     const needles = historySearchNeedles(request.query), lexical = request.match !== "phrase" && needles.length > 0;
@@ -205,7 +220,7 @@ export function queryConversationHistory(db: DatabaseSync, agentId: string, scop
   // Keep its query plan, including how skipped/invalid source rows are evaluated.
   const contentOnly = request.parts.length === 1 && request.parts[0] === "content";
   const rows = contentOnly ? prepareSql(db, `WITH base AS (
-    SELECT ${baseColumns.join(",")},${speakerLabel} AS speaker_label FROM messages m
+    SELECT ${baseColumns.join(",")},${speakerLabel} AS speaker_label FROM conversation_history_messages m
       JOIN sessions s ON s.session_id=m.session_id WHERE ${conditions.join(" AND ")}),
     parts(message_id,part_id,type,text,metadata,sort_key) AS (${projectHistoryParts(request.parts)})
     SELECT ${columns},history_source_hash(p.text) AS source_hash,
@@ -216,13 +231,13 @@ export function queryConversationHistory(db: DatabaseSync, agentId: string, scop
   // Materialize only ordered part identities across the session. Bodies and speaker labels
   // are projected for the selected page's messages inside the same SQLite read snapshot.
   : prepareSql(db, `WITH eligible AS NOT MATERIALIZED (
-    SELECT ${baseColumns.join(",")} FROM messages m JOIN sessions s ON s.session_id=m.session_id
+    SELECT ${baseColumns.join(",")} FROM conversation_history_messages m JOIN sessions s ON s.session_id=m.session_id
     WHERE ${conditions.join(" AND ")}),
     part_keys(message_id,part_id,sort_key) AS (${projectHistoryParts(request.parts, { source: "eligible", keysOnly: true })}),
     page AS MATERIALIZED (SELECT p.message_id,p.part_id,p.sort_key,b.turn_id,b.role
       FROM part_keys p JOIN eligible b ON b.id=p.message_id ${partId ? "WHERE p.part_id=?" : ""}
       ORDER BY b.turn_id,CASE b.role WHEN 'user' THEN 0 ELSE 1 END,p.message_id,p.sort_key,p.part_id LIMIT ? OFFSET ?),
-    base AS MATERIALIZED (SELECT ${baseColumns.join(",")},${speakerLabel} AS speaker_label FROM messages m
+    base AS MATERIALIZED (SELECT ${baseColumns.join(",")},${speakerLabel} AS speaker_label FROM conversation_history_messages m
       JOIN sessions s ON s.session_id=m.session_id WHERE m.id IN (SELECT message_id FROM page)),
     parts(message_id,part_id,type,text,metadata,sort_key) AS (${projectHistoryParts(request.parts)})
     SELECT ${columns},history_source_hash(p.text) AS source_hash,
@@ -231,6 +246,7 @@ export function queryConversationHistory(db: DatabaseSync, agentId: string, scop
       JOIN base b ON b.id=p.message_id
     ORDER BY b.turn_id,CASE b.role WHEN 'user' THEN 0 ELSE 1 END,p.message_id,p.sort_key,p.part_id`)
     .all(...values, ...(partId ? [partId] : []), request.limit + 1, request.offset, request.content_offset + 1);
+  if (request.expected_hash && !rows.length) throw new Error("Historical part is unavailable or its identity changed; reread the message before continuing");
   if (request.expected_hash && rows.some(row => row.source_hash !== request.expected_hash)) {
     throw new Error("Historical source changed after it was read; search or read it again before continuing");
   }

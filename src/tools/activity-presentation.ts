@@ -16,9 +16,13 @@ export type ToolActivityResource = {
 /** Channel-neutral, user-facing description of what an agent is doing. */
 export type ToolActivityPresentation = {
   hidden?: boolean;
+  /** Underlying work is still pending even if this tool's wait window has ended. */
+  waiting?: boolean;
   message: string;
   /** Short, stable action + subject, from explicitly allowlisted fields. */
   title?: string;
+  /** The kind of action when the tool's name alone does not identify it. */
+  actionKind?: "search" | "read" | "edit" | "image" | "tasks" | "wait";
   /** Shell source explicitly selected from exec_command.cmd for the process view. */
   command?: string;
   /** Explicit file operation, independent of the underlying execution tool. */
@@ -40,6 +44,11 @@ export type ToolActivityPresenter = {
 };
 
 export const hiddenToolActivity = (): ToolActivityPresentation => ({ hidden: true, message: "" });
+
+/** Format one allowlisted name or search term for a compact, single-line title. */
+export function activitySubject(value: unknown): string {
+  return typeof value === "string" ? value.replace(/[\s\x00-\x1f\x7f]+/g, " ").trim().slice(0, 80) : "";
+}
 
 export const genericToolActivity: ToolActivityPresenter = {
   started: () => ({ message: "我正在处理这一步。" }),
@@ -90,7 +99,7 @@ export const webSearchActivity: ToolActivityPresenter = {
   started: (input) => {
     const queries = searchQueries(input);
     return {
-      title: "搜索网页",
+      title: queries.length > 0 ? `搜索 ${queries.join("；")}` : "搜索",
       message: queries.length > 0 ? "我正在网上查找这些信息。" : "我正在网上查找相关资料。",
       ...(queries.length > 0
         ? { details: [{ label: "搜索关键词", value: queries.join("；") }] }
@@ -102,7 +111,7 @@ export const webSearchActivity: ToolActivityPresenter = {
     const resources = searchResources(result);
     const sourceCount = searchSourceCount(result);
     return {
-      title: "搜索网页",
+      title: queries.length > 0 ? `搜索 ${queries.join("；")}` : "搜索",
       message: sourceCount > 0
         ? `我找到了 ${sourceCount} 个可以参考的来源，正在整理其中的信息。`
         : "搜索已经完成，我正在整理找到的信息。",
@@ -110,14 +119,15 @@ export const webSearchActivity: ToolActivityPresenter = {
       ...(resources.length > 0 ? { resources } : {})
     };
   },
-  failed: (input, error) => ({
-    title: "搜索网页",
-    message: "这次网上搜索没有顺利完成。",
-    details: [
-      ...(searchQueries(input).length > 0
-        ? [{ label: "搜索关键词", value: searchQueries(input).join("；") }]
-        : []),
-      { label: "原因", value: error }
-    ]
-  })
+  failed: (input, error) => {
+    const queries = searchQueries(input);
+    return {
+      title: queries.length > 0 ? `搜索 ${queries.join("；")}` : "搜索",
+      message: "这次网上搜索没有顺利完成。",
+      details: [
+        ...(queries.length > 0 ? [{ label: "搜索关键词", value: queries.join("；") }] : []),
+        { label: "原因", value: error }
+      ]
+    };
+  }
 };

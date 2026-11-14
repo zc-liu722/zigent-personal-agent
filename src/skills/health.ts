@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 
 export const HEALTH_SKILL_NAME = "health";
-export const HEALTH_SKILL_DESCRIPTION = "私人健康项目：通用规则与个人当前状态分开维护，按日期查询健康数据和项目日记。";
+export const HEALTH_SKILL_DESCRIPTION = "已授权的本人设备健康数据与跟进：按日期查询记录，分开维护规则和私人状态；普通健康档案使用独立工作区。";
 export const HEALTH_SKILL_RULES = readFileSync(new URL("../../skills/health/SKILL.md", import.meta.url), "utf8");
 export const HEALTH_RULES_DIGEST = createHash("sha256").update(HEALTH_SKILL_RULES).digest("hex");
 export const DEFAULT_HEALTH_SKILL = `# 健康项目个人当前状态
@@ -80,5 +80,5 @@ export function consolidateHealthPreferences(body: string): string {
 }
 
 export function renderHealthSkill(state: { body: string; rules: string }): string {
-  return `# 健康项目当前正文\n\n<!-- 当前视图；项目规则与个人状态通过 update_skill 分别维护。 -->\n\n${state.rules.trim()}\n\n---\n\n# 个人当前状态\n\n${state.body.trim()}\n`;
+  return `# 健康项目当前正文\n\n<!-- 当前视图；项目规则与个人状态通过 skills 分别维护。 -->\n\n${state.rules.trim()}\n\n---\n\n# 个人当前状态\n\n${state.body.trim()}\n`;
 }

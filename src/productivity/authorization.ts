@@ -4,13 +4,14 @@ import { dirname } from "node:path";
 import type { GoogleOAuthConfig, ProductivityIntegration, TodoistConfig } from "./config.js";
 import { XmindAuthBridgeClient } from "../xmind/auth-bridge.js";
 import { GOOGLE_CALENDAR_SCOPES } from "./google-calendar.js";
+import { GMAIL_SCOPES } from "./gmail.js";
 import { GOOGLE_DRIVE_SCOPES } from "./google-drive.js";
 import { TODOIST_SCOPES, TODOIST_TOKEN_URL, tokenGrant } from "./todoist-auth.js";
 import { withTokenLock, writePrivateJson, type OAuthGrant } from "./credentials.js";
 import { productivityFetch, record, requestJson } from "./http.js";
 import { authorizationFailure, authorizationFailureText, type AuthorizationFailure, type AuthorizationStage } from "./authorization-failure.js";
 
-export const PRODUCTIVITY_LABELS = { google_calendar: "Google Calendar", google_drive: "Google Drive", todoist: "Todoist" } as const;
+export const PRODUCTIVITY_LABELS = { google_calendar: "Google Calendar", google_drive: "Google Drive", gmail: "Gmail", todoist: "Todoist" } as const;
 export function productivityAuthorizationResultText(integration: ProductivityIntegration, authorized: boolean, failure?: AuthorizationFailure): string {
   return authorized ? `${PRODUCTIVITY_LABELS[integration]} 授权已完成并验证连接。请重新告诉我需要处理什么；刚才的操作尚未执行。`
     : failure ? `${PRODUCTIVITY_LABELS[integration]} ${authorizationFailureText(failure)}`
@@ -39,7 +40,7 @@ export class ProductivityAuthorizationCoordinator {
   constructor(readonly integration: ProductivityIntegration, private readonly config: ProductivityOAuthConfig, request = productivityFetch(config.proxyUrl), bridge?: Bridge) {
     this.request = (input, init) => request(input, { ...init,
       signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000), redirect: "error" });
-    this.bridge = bridge ?? (config.authorization ? new XmindAuthBridgeClient(config.authorization.bridgeUrl, config.authorization.bridgeSecret, this.request, integration) : undefined);
+    this.bridge = bridge ?? (config.authorization && integration !== "gmail" ? new XmindAuthBridgeClient(config.authorization.bridgeUrl, config.authorization.bridgeSecret, this.request, integration) : undefined);
   }
   get available(): boolean {
     return Boolean(this.bridge && this.config.ownerUserId && this.config.tokenPath
@@ -78,7 +79,7 @@ export class ProductivityAuthorizationCoordinator {
       const state = `${randomUUID()}.${randomBytes(32).toString("base64url")}`;
       const requestId = state.split(".")[0]!;
       const verifier = randomBytes(48).toString("base64url");
-      const scope = this.integration === "google_calendar" ? GOOGLE_CALENDAR_SCOPES : this.integration === "google_drive" ? GOOGLE_DRIVE_SCOPES : TODOIST_SCOPES;
+      const scope = this.integration === "google_calendar" ? GOOGLE_CALENDAR_SCOPES : this.integration === "google_drive" ? GOOGLE_DRIVE_SCOPES : this.integration === "gmail" ? GMAIL_SCOPES : TODOIST_SCOPES;
       let clientId = config.clientId, clientSecret = config.clientSecret;
       if (this.integration === "todoist" && !clientId) {
         this.stage = "client_registration";
@@ -113,6 +114,7 @@ export class ProductivityAuthorizationCoordinator {
       if (this.integration !== "todoist" && !grant.refreshToken) throw new Error("Google did not grant offline access");
       // Verify one harmless read before saving and announcing success. Response content is discarded.
       await requestJson(this.request, PRODUCTIVITY_LABELS[this.integration], this.integration === "todoist" ? "https://api.todoist.com/api/v1/tasks?limit=1"
+        : this.integration === "gmail" ? "https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress"
         : this.integration === "google_drive" ? "https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id)"
         : "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=1&fields=items(id)", {
         signal, headers: { Authorization: `Bearer ${grant.accessToken}` }

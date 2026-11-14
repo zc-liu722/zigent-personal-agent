@@ -53,6 +53,9 @@ export type ActiveTask = {
   updatedAt: number;
 };
 export type TaskRunResult = {
+  /** Model execution outcome; omitted by deterministic trigger/filter decisions. */
+  outcome?: "completed" | "failed";
+  formatValidationFailed?: true;
   text?: string;
   summary?: string;
   model?: string;

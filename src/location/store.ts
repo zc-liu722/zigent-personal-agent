@@ -823,6 +823,17 @@ export class UserLocationStore {
     return row ? rowLocation(row) : undefined;
   }
 
+  /** Canonical right endpoint: equal-time corrections use latest receipt, then ID. */
+  atOrAfter(at: number): (StoredLocation & { id: number }) | undefined {
+    const row = prepareSql(this.database, `SELECT * FROM location_points WHERE observed_at_ms >= ?
+      ORDER BY observed_at_ms, received_at_ms DESC, id DESC LIMIT 1`).get(at) as LocationRow | undefined;
+    return row ? rowLocation(row) : undefined;
+  }
+
+  pointHighWater(): number {
+    return Number(prepareSql(this.database, "SELECT COALESCE(MAX(id),0) AS n FROM location_points").get()!.n);
+  }
+
   /** Arrival-order feed for geofence evaluation, bounded without loading location history. */
   taskPoints(afterId: number, limit = 200): { points: Array<StoredLocation & { id: number }>; nextCursor: number; highWater: number } {
     const highWater = Number((prepareSql(this.database, "SELECT COALESCE(MAX(id),0) AS n FROM location_points").get() as { n: number }).n);

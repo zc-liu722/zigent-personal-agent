@@ -31,7 +31,7 @@ export function applyMessagePatch(previous, patch) {
         if (typeof operation.text !== 'string') return;
         text = snapshot.answerDraft = operation.text; break;
       case 'update_message':
-        if (!operation.fields || Object.keys(operation.fields).some(key => !['text', 'assets', 'interactions', 'replyDurationMs'].includes(key))) return;
+        if (!operation.fields || Object.keys(operation.fields).some(key => !['text', 'assets', 'interactions', 'attachments', 'replyDurationMs'].includes(key))) return;
         if ('replyDurationMs' in operation.fields && (!Number.isFinite(operation.fields.replyDurationMs) || operation.fields.replyDurationMs < 0)) return;
         if ('text' in operation.fields) {
           if (typeof operation.fields.text !== 'string') return;
@@ -40,7 +40,8 @@ export function applyMessagePatch(previous, patch) {
         fields = { ...fields, ...operation.fields }; break;
       case 'run_state':
         if (!['running', 'completed', 'failed', 'cancelled'].includes(operation.status)) return;
-        snapshot.status = operation.status; snapshot.failureMessage = operation.failureMessage; break;
+        if (operation.endedAt !== undefined && !Number.isFinite(operation.endedAt)) return;
+        snapshot.status = operation.status; snapshot.endedAt = operation.endedAt; snapshot.failureMessage = operation.failureMessage; break;
       default: return;
     }
   }

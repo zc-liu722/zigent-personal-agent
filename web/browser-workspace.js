@@ -299,8 +299,8 @@
     style.left = bounds.x / dimensions.width * 100 + '%'; style.top = bounds.y / dimensions.height * 100 + '%';
     style.width = bounds.width / dimensions.width * 100 + '%'; style.height = bounds.height / dimensions.height * 100 + '%';
     style.fontSize = Math.max(16, (parseFloat(meta.fontSize) || 16) * scale) + 'px';
-    style.fontFamily = meta.fontFamily || 'inherit'; style.color = meta.color || '#222';
-    style.backgroundColor = !meta.backgroundColor || /(?:transparent|rgba\(0, 0, 0, 0\))/.test(meta.backgroundColor) ? '#fff' : meta.backgroundColor;
+    style.fontFamily = meta.fontFamily || 'inherit'; style.color = meta.color || 'var(--palette-browser-editor-ink)';
+    style.backgroundColor = !meta.backgroundColor || /(?:transparent|rgba\(0, 0, 0, 0\))/.test(meta.backgroundColor) ? 'var(--palette-white)' : meta.backgroundColor;
   }
   function setEditorValue(item, value, selection) {
     const node = item.node, focused = node === document.activeElement;

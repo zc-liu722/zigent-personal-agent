@@ -1,6 +1,6 @@
 # Zigent
 
-**Your Personal Agent with Giant Context**
+**Your Personal Agent with Big Context**
 
 Zigent is a self-hosted personal agent architecture that you can continuously adapt with AI coding.
 
@@ -8,7 +8,13 @@ A personal agent has two goals: **be useful and proactive**. Generic proactivity
 
 Relevant proactivity starts with broad, real personal context: what your projects are working toward, your commitments today, how you slept, an important notification that just arrived, and the decisions you made earlier. Combined with the intelligence of a capable model, these signals can produce reminders, recommendations, and plans that are useful to you personally.
 
-**Giant Context** means more than a model's context window. It is the data and runtime engineering needed to collect authorized context from your life and work, persist it, retrieve it on demand, and dynamically organize a concise prompt during a conversation—ultimately turning context into reliable action.
+**Big Context** means more than a model's context window. It is the data and runtime engineering needed to collect authorized context from your life and work, persist it, retrieve it on demand, and dynamically organize a concise prompt during a conversation—ultimately turning context into reliable action.
+
+## Recent updates
+
+- Live work previews show streaming progress and web search titles. Select reply text to attach an annotation to that passage.
+- Conversations open with recent messages first and load older history on demand. Chat supports custom backgrounds and additional themes.
+- The runtime packages capability plugins and web assets as versioned components. Conversation storage keeps message bodies and large activity records in separate objects.
 
 ## Why shouldn't a personal agent be a generic product?
 
@@ -116,12 +122,13 @@ The repository is organized for development with AI coding tools:
 Common commands:
 
 ```bash
+npm run build
 npm run dev -- assistant
 npm run check
 npm run build
 npm run build:web
 ```
 
-Start the local component studio with `npm run dev:components`; its integrated chat requires a separate local sign-in. Web build output goes to `build/web/`; the default development runtime reads `web/` directly.
+Start the local component studio with `npm run dev:components`; its integrated chat requires a separate local sign-in. The main build packages immutable plugins and compiled web assets under `components/`. Use `npm run build:web` to export a standalone web build to `build/web/`.
 
 Source updates are synchronized into this repository through an explicit file allowlist and independent overlay templates, keeping personal production and community builds separate. A GitHub Actions build workflow is included and currently disabled.

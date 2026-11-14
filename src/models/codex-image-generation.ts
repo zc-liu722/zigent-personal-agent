@@ -7,11 +7,12 @@ import type { GeneratedImage, ImageConversationMessage, ImageConversationRequest
 import type { ImageGenerationUsage, TokenUsage } from "../memory/types.js";
 import { sniffImageMimeType } from "../media/image-mime.js";
 import type { UsageObservation, UsageRecorder } from "../usage/types.js";
-import { invokeCodexAppServerRound } from "./codex-app-server.js";
+import { isCodexAppServerError, type CodexImageRound } from "./codex-contract.js";
 import { imageHistoryHash, withImageConversation, type OfficialImageConversation } from "./image-conversation-store.js";
 import { effectiveReasoningEffort, savedReasoningEffort } from "./reasoning.js";
 import { currentPerformance } from "../performance/store.js";
-import { DEFAULT_IMAGE_GENERATION_TIMEOUT_MS } from "../image-generation-policy.js";
+import { DEFAULT_IMAGE_FINISH_TIMEOUT_MS, DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
+  ImageGenerationTimeoutError, retryImageTimeouts } from "../image-generation-policy.js";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -44,7 +45,7 @@ function conversationDriver(config: AgentConfig, request: ImageConversationReque
     && model.apiModel === selected.apiModel.replace(/^openai\//, "")
     && model.supplier === fallback.supplier && model.protocol === "codex-app-server" && model.cost.type === "subscription");
   if (!driver) return defaultDriver;
-  const requestedEffort = effectiveReasoningEffort(selected, { messages: [], tools: [], reasoningEfforts: request.reasoningEfforts });
+  const requestedEffort = effectiveReasoningEffort(selected, { reasoningEfforts: request.reasoningEfforts });
   const effort = savedReasoningEffort(driver, requestedEffort);
   return {
     config: { ...config, imageGeneration: { ...config.imageGeneration!, driver } },
@@ -113,12 +114,13 @@ async function originalHistory(messages: readonly ImageConversationMessage[], pr
  * choose generation, editing, references, or a text-only answer. No visual prompt is authored here.
  */
 export async function converseCodexImages(config: AgentConfig, request: ImageConversationRequest,
-  record?: UsageRecorder): Promise<ImageConversationResult> {
+  record: UsageRecorder | undefined, invoke: CodexImageRound): Promise<ImageConversationResult> {
   const selected = conversationDriver(config, request);
   config = selected.config;
   const current = request.messages.find(message => message.role === "user" && message.turnId === request.turnId);
   if (!current) throw new Error("Original user message is unavailable for the image conversation");
-  return withImageDeadline(config, request.signal, signal => withImageConversation(config, { ...request, signal }, async (previous, save) => {
+  let imageCompleted = false;
+  return retryImageTimeouts(() => withImageDeadline(config, request.signal, (signal, phases) => withImageConversation(config, { ...request, signal }, async (previous, save, invalidate) => {
     const pending = request.messages.filter(message => message.turnId < request.turnId && (!previous
       || message.turnId > previous.throughTurn || message.turnId === previous.throughTurn && message.role === "assistant"));
     const measurement = currentPerformance();
@@ -129,41 +131,61 @@ export async function converseCodexImages(config: AgentConfig, request: ImageCon
     };
     const [images, history] = await (measurement
       ? measurement.store.measure("media.image_context", imageDriver(config).name, prepare) : prepare());
-    return runOfficialImageTurn(config, current.text, images, history,
+    return runOfficialImageTurn(invoke, config, current.text, images, history,
       selected.reasoningEfforts, signal, record, previous, state => save({ ...state, throughTurn: request.turnId,
-        historyHash: imageHistoryHash(request, request.turnId) }));
-  }));
+        historyHash: imageHistoryHash(request, request.turnId) }), {
+          ...phases, onAttempt: async attempt => {
+            imageCompleted = true;
+            await request.onAttempt?.(attempt);
+          }, invalidate, userSignal: request.signal
+        });
+  })), { maxRetries: config.imageGenerationRetryAttempts, signal: request.signal, canRetry: () => !imageCompleted });
 }
+
+type ImageTurnPhases = { started(): void; rendered(): void };
 
 async function withImageDeadline<T>(config: AgentConfig, signal: AbortSignal | undefined,
-  operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  operation: (signal: AbortSignal, phases: ImageTurnPhases) => Promise<T>): Promise<T> {
   const timeoutMs = config.imageGenerationTimeoutMs ?? DEFAULT_IMAGE_GENERATION_TIMEOUT_MS;
   const deadline = new AbortController();
-  const timer = setTimeout(() => deadline.abort(new DOMException(
-    `图片生成等待超时（${Math.ceil(timeoutMs / 1000)} 秒）。本轮不会自动重新生成，请重试。`, "TimeoutError"
-  )), timeoutMs);
-  timer.unref();
+  let finishing = false;
+  let timer: ReturnType<typeof setTimeout>;
+  const arm = (ms: number, error: Error) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => deadline.abort(error), ms);
+    timer.unref();
+  };
+  const generation = () => arm(timeoutMs, new ImageGenerationTimeoutError(
+    `图片生成等待超时（${Math.ceil(timeoutMs / 1000)} 秒）。`));
+  generation();
+  const phases: ImageTurnPhases = {
+    started: () => { if (finishing) { finishing = false; generation(); } },
+    rendered: () => {
+      finishing = true;
+      arm(DEFAULT_IMAGE_FINISH_TIMEOUT_MS, new DOMException("图片已生成，文字收尾等待超时。", "TimeoutError"));
+    }
+  };
   const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
-  try { combined.throwIfAborted(); return await operation(combined); }
-  finally { clearTimeout(timer); }
+  try { combined.throwIfAborted(); return await operation(combined, phases); }
+  finally { clearTimeout(timer!); }
 }
 
-async function runOfficialImageTurn(config: AgentConfig, text: string, images: readonly ReferenceImage[], history: readonly unknown[],
+async function runOfficialImageTurn(invoke: CodexImageRound, config: AgentConfig, text: string, images: readonly ReferenceImage[], history: readonly unknown[],
   reasoningEfforts: ImageGenerationRequest["reasoningEfforts"], signal: AbortSignal | undefined, record: UsageRecorder | undefined,
-  previous?: OfficialImageConversation, save?: (state: { threadId: string; totalUsage?: TokenUsage }) => void): Promise<ImageConversationResult> {
+  previous?: OfficialImageConversation, save?: (state: { threadId: string; totalUsage?: TokenUsage }) => void,
+  lifecycle?: ImageTurnPhases & { onAttempt?: ImageConversationRequest["onAttempt"]; invalidate?: () => void; userSignal?: AbortSignal }): Promise<ImageConversationResult> {
   const driver = imageDriver(config), route = config.imageGeneration!;
   const attempts: ImageGenerationAttemptResult[] = [];
   images.forEach(inputImage);
   let officialText = "";
-  await invokeCodexAppServerRound(config, driver, {
+  let persistenceFailed = false;
+  try { await invoke(config, driver, {
     messages: [{ role: "user", text, images }], tools: [], reasoningEffort: "default", reasoningEfforts
-  }, undefined, signal, undefined,
+  }, signal,
   meter => record?.({ ...meter, model: driver.name, apiModel: driver.apiModel, supplier: driver.supplier, cost: driver.cost, kind: "text" }), {
     prompt: text, threadId: previous?.threadId, usageBaseline: previous?.totalUsage, history, ephemeral: !save,
-    complete: async (items, workspace, reply, state) => {
-      if (!items.length && !reply.trim()) throw new Error("The official image conversation returned no reply");
-      officialText = reply;
-      for (const item of items) {
+    started: lifecycle?.started, rendered: lifecycle?.rendered,
+    imageCompleted: async (item, workspace) => {
         const generationId = randomUUID(), model = route.modelName ?? route.model;
         const usage = imageUsage(item, model, driver.supplier);
         const metering: UsageObservation = { id: `image:${driver.supplier}:${generationId}`, mediaRecordId: generationId,
@@ -173,21 +195,41 @@ async function runOfficialImageTurn(config: AgentConfig, text: string, images: r
           ...(!usage.estimated ? { usage, imageUsage: { ...usage, ...usage.billingDetails }, usageComplete: usage.billingDetails?.breakdownComplete } : {}) };
         try {
           const image = await readOfficialImage(item, workspace);
-          attempts.push({ generationId, model, supplier: driver.supplier, prompt: text, size: "auto", quality: "auto", image, images: [image], usage });
           metering.outcome = "completed"; metering.outputImages = 1;
+          const attempt: ImageGenerationAttemptResult = { generationId, model, supplier: driver.supplier, prompt: text,
+            size: "auto", quality: "auto", image, images: [image], usage };
+          try { await lifecycle?.onAttempt?.(attempt); }
+          catch (error) { persistenceFailed = true; throw error; }
+          attempts.push(attempt);
         } finally { record?.(metering); }
-      }
+    },
+    complete: async (_items, _workspace, reply, state) => {
+      if (!attempts.length && !reply.trim()) throw new Error("The official image conversation returned no reply");
+      officialText = reply;
       save?.(state);
     }
-  });
+  }, currentPerformance()); } catch (error) {
+    // Image success is independent of text completion. Do not reuse an uncertain
+    // supplier thread, and never turn a persisted image into a generation failure.
+    if (!attempts.length || persistenceFailed || lifecycle?.userSignal?.aborted) {
+      if (!persistenceFailed && !lifecycle?.userSignal?.aborted && isCodexAppServerError(error) && error.status === 504)
+        throw new ImageGenerationTimeoutError(error.message);
+      throw error;
+    }
+    lifecycle?.invalidate?.();
+    officialText = "图片已生成，文字回复未完成。";
+  }
   return { text: officialText, attempts };
 }
 
 /** Compatibility entry point for explicit standalone gateway callers. */
 export async function generateCodexImage(config: AgentConfig, request: ImageGenerationRequest,
-  record?: UsageRecorder): Promise<ImageGenerationAttemptResult> {
-  const result = await withImageDeadline(config, undefined, signal =>
-    runOfficialImageTurn(config, request.prompt, request.referenceImages ?? [], [], request.reasoningEfforts, signal, record));
+  record: UsageRecorder | undefined, invoke: CodexImageRound): Promise<ImageGenerationAttemptResult> {
+  let imageCompleted = false;
+  const result = await retryImageTimeouts(() => withImageDeadline(config, request.signal, (signal, phases) =>
+    runOfficialImageTurn(invoke, config, request.prompt, request.referenceImages ?? [], [], request.reasoningEfforts, signal, record, undefined, undefined,
+      { ...phases, userSignal: request.signal, onAttempt: async () => { imageCompleted = true; } })),
+    { maxRetries: config.imageGenerationRetryAttempts, signal: request.signal, canRetry: () => !imageCompleted });
   if (result.attempts.length !== 1) throw new Error("The official image conversation did not return a single image");
   return result.attempts[0]!;
 }

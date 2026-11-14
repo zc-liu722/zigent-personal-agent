@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { executionSchema, type Execution } from "../project-spaces/workspace.js";
+import { directorySchema } from "./target.js";
 
 export const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 export const PROJECT_LIMIT = 200;
@@ -51,7 +52,7 @@ export const workerEventSchema = z.object({
 }).strict();
 export type WorkerEvent = z.infer<typeof workerEventSchema>;
 export const promptSchema = z.string().min(1).max(16000).refine(value => value.trim().length > 0, "请填写提示词");
-export const dispatchSchema = z.object({ deviceId: z.string().uuid(), projectId: identifier,
+export const dispatchSchema = z.object({ deviceId: z.string().uuid(), projectId: identifier.default("directory"), directory: directorySchema.optional(),
   title: z.string().trim().min(1).refine(value => Array.from(value).length <= 4, "任务标题最多四个字符"),
   prompt: promptSchema, continueTaskId: z.string().uuid().optional(),
   sourceTurns: z.array(z.object({ sessionId: z.string().min(1).max(200), turnId: z.number().int().positive() }).strict()).max(20).optional(),

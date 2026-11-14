@@ -21,6 +21,11 @@ export function createWebEvents(store: WebStore, coordinator: ConversationCoordi
       let pending = false;
       const changed = () => { if (pending) return; pending = true; setTimeout(() => { pending = false; if (!res.destroyed && !res.writableEnded) res.write("event: change\ndata: {}\n\n"); }, 200).unref(); };
       store.on("change", changed);
+      const modelSelected = url.searchParams.get("modelSelection") !== "1" ? changed : (value: unknown) => {
+        if (!store.authenticate(credential)) { res.end(); return; }
+        if (!res.destroyed && !res.writableEnded && !res.write(`event: model-selection\ndata: ${JSON.stringify(value)}\n\n`)) res.end();
+      };
+      store.on("model-selection", modelSelected);
       messageStream.add(res, credential, url.searchParams.get("messagePatches") === "1");
       const queue = (value: unknown) => {
         if (!store.authenticate(credential)) { res.end(); return; }
@@ -44,7 +49,7 @@ export function createWebEvents(store: WebStore, coordinator: ConversationCoordi
         if (next !== codexCursor && !res.destroyed && !res.writableEnded) { codexCursor = next; if (!res.write(`event: codex\ndata: {}\n\n`)) res.end(); }
       }, 1000); codexUpdates.unref();
       const heartbeat = setInterval(() => { if (!store.authenticate(credential)) res.end(); else res.write(": heartbeat\n\n"); }, 15_000);
-      res.on("close", () => { clearInterval(heartbeat); clearInterval(codexUpdates); store.off("performance-ping", performancePing); store.off("change", changed); messageStream.remove(res); store.off("queue", queue); store.off("browser", browserUpdate); streams.delete(res); });
+      res.on("close", () => { clearInterval(heartbeat); clearInterval(codexUpdates); store.off("performance-ping", performancePing); store.off("change", changed); store.off("model-selection", modelSelected); messageStream.remove(res); store.off("queue", queue); store.off("browser", browserUpdate); streams.delete(res); });
       return true;
     }
     return false;

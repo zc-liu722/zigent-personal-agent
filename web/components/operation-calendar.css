@@ -1,5 +1,5 @@
 /* Event summary only; the conversation owns the card and confirmation controls. */
-.calendar-preview { --calendar-accent: #ad5739; --calendar-faint: #f6f3ec; min-width: 0; color: var(--ink); }
+.calendar-preview { --calendar-accent: var(--palette-calendar-accent); --calendar-faint: var(--palette-calendar-faint); min-width: 0; color: var(--ink); }
 .calendar-preview-event { display: flex; align-items: stretch; gap: 12px; }
 .calendar-preview-datebadge { flex: 0 0 48px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 7px 5px 6px; color: var(--calendar-accent); background: var(--calendar-faint); border-radius: 9px; }
 .calendar-preview-datebadge span { font: 10px/1.5 var(--ui-font); }
@@ -17,7 +17,7 @@
 .calendar-preview-repeatlabel { color: var(--muted); font-size: 11px; }
 .calendar-preview-recurrence { font-size: 11px; }
 .calendar-preview .is-deleting .calendar-preview-eventtitle { text-decoration: line-through; }
-:root[data-theme="dark"] .calendar-preview { --calendar-accent: #df9778; --calendar-faint: #302e27; }
+:root[data-theme="dark"] .calendar-preview { --calendar-accent: var(--palette-calendar-accent); --calendar-faint: var(--palette-calendar-faint); }
 
 .calendar-preview-link { display: inline-flex; align-items: center; min-height: 36px; margin-top: 8px; padding: 5px 12px; border-radius: 9px; background: var(--soft); color: var(--accent); text-decoration: none; font-size: 13px; }
 .calendar-preview-link:hover { background: var(--line); }

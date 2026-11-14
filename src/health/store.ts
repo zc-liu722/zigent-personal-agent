@@ -7,15 +7,19 @@ import { diaryDate, diaryRange, meal, NUTRIENTS, type Meal } from "./diary.js";
 import type { ReferenceImage } from "../image-generation.js";
 import type { HrvBaselineSnapshot } from "./hrv.js";
 import { boundedHealthPage, queryHealthObservations, type HealthQuery } from "./query.js";
+import { retainedHealthPayload, hasHealthRetentionPolicy } from "./retention-policy.js";
+import { summarizeSleep } from "./sleep-summary.js";
+import { MAX_HEALTH_BODY_BYTES } from "./limits.js";
 export type { HealthObservation } from "./normalize.js";
 export type { HealthQuery } from "./query.js";
 export class HealthStore {
-  private constructor(private readonly db: DatabaseSync) {}
-  static async open(path: string): Promise<HealthStore> {
+  private constructor(private readonly db: DatabaseSync, private readonly agentId?: string) {}
+  static async open(path: string, agentId?: string): Promise<HealthStore> {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const db = new DatabaseSync(path);
     db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS health_batches (id TEXT PRIMARY KEY,received_at INTEGER NOT NULL,last_received_at INTEGER NOT NULL,metadata_json TEXT NOT NULL,payload_json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS health_rejected_uploads (id TEXT PRIMARY KEY,received_at INTEGER NOT NULL,metadata_json TEXT NOT NULL,body BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS health_changes (seq INTEGER PRIMARY KEY AUTOINCREMENT,observation_id TEXT NOT NULL,content_hash TEXT NOT NULL,observation_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS health_observations (id TEXT PRIMARY KEY,seq INTEGER NOT NULL REFERENCES health_changes(seq),metric TEXT NOT NULL,stream TEXT NOT NULL,observed_at INTEGER NOT NULL,end_at INTEGER,received_at INTEGER NOT NULL,content_hash TEXT NOT NULL,observation_json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS health_observations_time ON health_observations(observed_at);
@@ -27,10 +31,42 @@ export class HealthStore {
       CREATE TABLE IF NOT EXISTS health_photos (id TEXT PRIMARY KEY,mime_type TEXT NOT NULL,bytes BLOB NOT NULL,created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS health_diary_writes (request_id TEXT PRIMARY KEY,result_json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS health_diary_date ON health_observations(json_extract(observation_json,'$.values.date')) WHERE stream='project_diary';`);
+    if (agentId) {
+      try {
+        db.exec("BEGIN IMMEDIATE");
+        db.exec("CREATE TABLE IF NOT EXISTS health_owner (singleton INTEGER PRIMARY KEY CHECK(singleton=1),agent_id TEXT NOT NULL)");
+        const owner = db.prepare("SELECT agent_id FROM health_owner WHERE singleton=1").get();
+        // Only Deepmind may adopt the existing pre-isolation database.
+        if (!owner && agentId !== "deepmind" && db.prepare("SELECT 1 FROM health_observations LIMIT 1").get())
+          throw new Error("HEALTH_UNOWNED_DATA_REJECTED");
+        db.prepare("INSERT OR IGNORE INTO health_owner VALUES (1,?)").run(agentId);
+        if (db.prepare("SELECT agent_id FROM health_owner WHERE singleton=1").get()?.agent_id !== agentId)
+          throw new Error("HEALTH_DATABASE_AGENT_MISMATCH");
+        db.exec("COMMIT");
+      } catch (error) { db.exec("ROLLBACK"); db.close(); throw error; }
+    }
     if (process.platform !== "win32") await chmod(path, 0o600);
-    return new HealthStore(db);
+    return new HealthStore(db, agentId);
   }
   close(): void { closeSqlite(this.db); }
+  pruneRejectedUploads(now = Date.now()): void {
+    prepareSql(this.db, "DELETE FROM health_rejected_uploads WHERE received_at<=?").run(now - 86400_000);
+  }
+  /** Private bounded quarantine, separate from health observations and cursors. */
+  recordRejectedUpload(id: string, body: Buffer, metadata: Record<string, unknown>, now = Date.now()): void {
+    if (body.length > MAX_HEALTH_BODY_BYTES) throw new Error("BODY_TOO_LARGE");
+    this.transaction(() => {
+      this.pruneRejectedUploads(now);
+      prepareSql(this.db, "INSERT INTO health_rejected_uploads VALUES (?,?,?,?)").run(id, now, JSON.stringify(metadata), body);
+      const rows = prepareSql(this.db, "SELECT id,length(body) AS bytes FROM health_rejected_uploads ORDER BY received_at DESC,rowid DESC").all() as { id: string; bytes: number }[];
+      let bytes = 0;
+      for (const [index, row] of rows.entries()) {
+        bytes += row.bytes;
+        if (index >= 8 || bytes > 128 * 1024 * 1024)
+          prepareSql(this.db, "DELETE FROM health_rejected_uploads WHERE id=?").run(row.id);
+      }
+    });
+  }
   private transaction<T>(operation: () => T, mode: "read" | "write" = "write"): T {
     return sqliteTransaction(this.db, operation, mode);
   }
@@ -48,14 +84,15 @@ export class HealthStore {
     return true;
   }
   ingest(payload: unknown, metadata: HealthImportMetadata, now = Date.now(), originalJson = JSON.stringify(payload)): { duplicate: boolean; changed: number; highWaterSeq: number } {
-    if (Buffer.byteLength(originalJson) > 4 * 1024 * 1024) throw new Error("BODY_TOO_LARGE");
-    const rows = normalizeHealthPayload(payload, metadata, now);
+    if (Buffer.byteLength(originalJson) > MAX_HEALTH_BODY_BYTES) throw new Error("BODY_TOO_LARGE");
+    const retained = retainedHealthPayload(payload, this.agentId);
+    const rows = normalizeHealthPayload(retained, metadata, now);
     const id = hash(canonical([metadata.automationId, metadata.aggregation, payload]));
     const metadataJson = JSON.stringify(metadata);
     return this.transaction(() => {
       const existing = Boolean(prepareSql(this.db, "SELECT 1 FROM health_batches WHERE id=?").get(id));
       prepareSql(this.db, `INSERT INTO health_batches VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_received_at=excluded.last_received_at`)
-        .run(id, now, now, metadataJson, originalJson);
+        .run(id, now, now, metadataJson, hasHealthRetentionPolicy(this.agentId) ? JSON.stringify(retained) : originalJson);
       // Exact request retries never roll a revised observation back to an older batch.
       let changed = 0; if (!existing) for (const row of rows) if (this.upsert(row)) changed++;
       prepareSql(this.db, "INSERT INTO health_state VALUES ('last_ingest',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(now));
@@ -63,7 +100,8 @@ export class HealthStore {
     });
   }
   highWaterSeq(): number {
-    return Number((prepareSql(this.db, "SELECT COALESCE(MAX(seq),0) AS n FROM health_changes").get() as { n: number }).n);
+    // Deletion must not rewind scheduler cursors or reuse a retired change sequence.
+    return Number((prepareSql(this.db, "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='health_changes'),0) AS n").get() as { n: number }).n);
   }
   /** Last calculated personal reference, kept privately across restarts. Raw observations remain authoritative. */
   saveHrvBaseline(snapshot: HrvBaselineSnapshot): void {
@@ -84,6 +122,9 @@ export class HealthStore {
   }
   query(query: HealthQuery) {
     return { ...queryHealthObservations(this.db, query), highWaterSeq: this.highWaterSeq() };
+  }
+  sleep(query: Pick<HealthQuery, "from" | "to" | "stream">) {
+    return this.transaction(() => summarizeSleep(input => this.query(input), query), "read");
   }
   scanChanges(afterSeq: number, limit = 500): { changes: HealthObservation[]; nextCursor: number; hasMore: boolean } {
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("INVALID_CURSOR");

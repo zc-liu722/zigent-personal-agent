@@ -1,3 +1,7 @@
+import { ModelHardStopError } from "../models/errors.js";
+import type { ModelCatalogSnapshot } from "../models/catalog.js";
+import { isSkillTool } from "../tools/skills.js";
+import { parseAgentSkillMutation } from "../skills/mutations.js";
 import { BackgroundDeliveryUncertainError } from "../channels/background-delivery.js";
 import { randomUUID } from "node:crypto";
 import type { ConversationDiagnostic } from "../audit/diagnostics.js";
@@ -9,9 +13,9 @@ import type {
   InteractionActionResult
 } from "../channels/communication.js";
 import type { GeneratedReply } from "./executor.js";
-import type { PreparedTurn, Session, SessionMetadata, SessionImage } from "../memory/types.js";
+import type { ModelMemoryContext, PreparedTurn, Session, SessionMetadata, SessionImage } from "../memory/types.js";
 import { SessionPermissionError } from "../memory/types.js";
-import { TurnPreparationFallbackRequiredError, type MemoryOrchestrator } from "../memory/orchestrator.js";
+import type { MemoryOrchestrator } from "../memory/orchestrator.js";
 import { ReferenceImageStore } from "../reference-images.js";
 import type { ImageGenerator, ReferenceImage } from "../image-generation.js";
 import type { VideoGenerator } from "../video-generation.js";
@@ -43,6 +47,7 @@ type PendingFallback = {
   fallbackProvider: Provider;
   failedProvider: Provider;
   selectableProviders?: Provider[];
+  catalog?: Pick<ModelCatalogSnapshot, "models" | "modelOrder">;
   createdAt: number;
   continueTask: (provider: Provider) => Promise<void>;
   controller?: AbortController;
@@ -50,11 +55,12 @@ type PendingFallback = {
 };
 
 export type InteractionControllerOptions = {
+  onTurnSettled?: (message: InboundMessage, session: Session, turnId: number, snapshot: import("./transcript.js").AgentRunSnapshot) => void;
   onDiagnostic?: (message: InboundMessage, event: ConversationDiagnostic) => void;
   onUserMessage?: (message: InboundMessage, signal: AbortSignal) => Promise<void>;
   restoreOperationContext?: (scope: OperationScope) => Partial<ToolExecutionContext>;
   /** Domain reference state is separate from session summaries and instructions. */
-  workspaceContext?: (message: InboundMessage, turn: PreparedTurn) => Promise<string | undefined>;
+  workspaceContext?: (scope: ToolExecutionContext, messageId?: string) => Promise<string | undefined>;
   toolContext?: (
     message: InboundMessage,
     turn: PreparedTurn
@@ -64,13 +70,17 @@ export type InteractionControllerOptions = {
 };
 
 export type AgentInteractionRuntime = {
+  executionJournal?: import("./execution-journal.js").ExecutionJournal;
+  schedule?: import("../schedule/store.js").ScheduleStore;
+  skills?: import("../skills/service.js").SQLiteSkillService;
+  agentSkills?: import("../skills/agent-skills.js").SQLiteAgentSkillService;
   fileWorkbench?: import("../file-workbench/service.js").FileWorkbench;
   performance?: import("../performance/store.js").PerformanceStore;
   config: Pick<AgentConfig, "id" | "name" | "failureMessage" | "sessionInactivityMinutes"> & Partial<Pick<AgentConfig, "memoryStoragePath">>;
   tools?: AgentToolSet;
   model: {
     readonly defaultProvider: Provider;
-    resetCircuit?(provider?: Provider): void;
+    resetCircuit?(provider?: Provider, catalog?: Pick<ModelCatalogSnapshot, "models">): void;
     warmContextPolicy?(provider: Provider): void;
   };
   agent: Pick<AgentExecutor, "run">;
@@ -104,7 +114,14 @@ export class AgentInteractionController {
     if (communication.sendUserQuestion) this.questions = new UserQuestions(notice => communication.sendUserQuestion!(notice));
     if (runtime.tools && runtime.config.memoryStoragePath && communication.sendOperationConfirmation) {
       this.operations = new OperationConfirmations(`${runtime.config.memoryStoragePath}.confirmations.sqlite`, runtime.tools,
-        notice => communication.sendOperationConfirmation!(notice), options.restoreOperationContext);
+        notice => communication.sendOperationConfirmation!(notice), options.restoreOperationContext,
+        (draft, id, scope) => {
+          if (draft.tool === "schedule" && runtime.schedule) return runtime.schedule.operationResult(id) === undefined ? "not_applied" : "completed";
+          if (!isSkillTool(draft.tool)) return "unknown";
+          const input = parseAgentSkillMutation(draft.input);
+          const service = input.name === "health" ? runtime.skills : runtime.agentSkills;
+          return service?.mutationStatus(scope, scope.sessionId, input, `${scope.sessionId}:${scope.turnId}:${input.source_request_id}`) ?? "unknown";
+        });
     }
   }
 
@@ -158,6 +175,27 @@ export class AgentInteractionController {
     });
   }
 
+  /** Use the same domain context provider as user turns, without manufacturing a user message. */
+  async prepareBackgroundRun(input: {
+    scope: ToolExecutionContext; title: string; sourceConversationId: string;
+    onSession: (session: Session) => void;
+  }): Promise<{ context: ModelMemoryContext; toolContext: ToolExecutionContext }> {
+    const scope = input.scope;
+    if (scope.agentId !== this.runtime.config.id || !scope.taskRunId || !scope.taskLeaseToken
+      || scope.conversationKind !== "p2p" || !scope.conversationId) throw new Error("Background run identity is incomplete");
+    const session = await this.prepareBackgroundSession({ userId: scope.userId, conversationId: scope.conversationId,
+      sessionId: scope.sessionId, title: input.title });
+    input.onSession(session);
+    const context = await this.runtime.memory.prepareBackgroundContext(scope.userId, input.sourceConversationId, { signal: scope.signal });
+    const workspaceContext = await this.options.workspaceContext?.(scope);
+    scope.signal?.throwIfAborted();
+    // Restore read services, but never interactive authorization or confirmation callbacks.
+    const { authorizeAccount, startProductivityAuthorization, startFeishuUserAuthorization,
+      startNotionAuthorization, startXmindAuthorization, ...services } = this.options.restoreOperationContext?.(scope) ?? {};
+    return { context: { ...context, workspaceContext }, toolContext: { ...services, ...scope,
+      delegationMemory: context.longTermMemory.behaviorRules } };
+  }
+
   /** Joins the ordinary conversation queue; it never aborts a user turn. */
   async deliverBackgroundResult(input: {
     userId: string;
@@ -166,6 +204,7 @@ export class AgentInteractionController {
     title: string;
     text: string;
     replyDurationMs?: number;
+    attachments?: import("../channels/attachments.js").MessageAttachment[];
     snapshot?: import("./transcript.js").AgentRunSnapshot;
     scheduleReminder?: import("../channels/change-preview.js").CalendarPreviewState;
     targetSessionId?: string;
@@ -200,6 +239,7 @@ export class AgentInteractionController {
         title: input.title,
         text: pending.content,
         replyDurationMs: input.replyDurationMs,
+        attachments: input.attachments,
         snapshot: input.snapshot,
         scheduleReminder: input.scheduleReminder,
         session: pending.session
@@ -255,9 +295,9 @@ export class AgentInteractionController {
       this.diagnose(message, { phase: "started" });
       try {
         const preflight = async () => {
-          await this.options.onUserMessage?.(message, controller.signal);
+          if (!message.resume) await this.options.onUserMessage?.(message, controller.signal);
           this.diagnose(message, { phase: "message_ready" });
-          await this.operations?.supersede(message.userId, message.conversationId);
+          if (!message.resume) await this.operations?.supersede(message.userId, message.conversationId);
         };
         if (this.runtime.performance) await this.runtime.performance.measure("turn.preflight", "message", preflight);
         else await preflight();
@@ -332,6 +372,7 @@ export class AgentInteractionController {
     const started = performance.now();
     let outcome: import("../performance/metrics.js").Outcome = "ok";
     const run = new AgentRunSession(this.communication.createRunChannel(message.conversationId));
+    let reviewTurn: PreparedTurn | undefined;
     try {
       const command = !message.imageOnly ? parseAgentCommand(message.text) : undefined;
       if (command) {
@@ -343,59 +384,12 @@ export class AgentInteractionController {
       const inputImages = [...(message.images ?? [])];
       if (inputImages.length > 0) this.referenceImages.add(referenceImageKey, inputImages);
       const inputText = message.text;
-      let turn: PreparedTurn | undefined;
-      let activityOpened = false, compressionAnnounced = false;
-      try {
-        turn = await this.runtime.memory.prepareTurn(
-          message.userId,
-          inputText,
-          message.conversationId,
-          message.messageId,
-          message.conversationKind ?? "p2p",
-          true,
-          async () => {
-            if (compressionAnnounced) return;
-            signal.throwIfAborted();
-            if (!activityOpened) { await run.open(); activityOpened = true; }
-            signal.throwIfAborted();
-            run.receive({ type: "response.completed", itemId: "context-preparation", role: "commentary", text: "正在整理之前的对话，再继续处理。" });
-            compressionAnnounced = true;
-          },
-          { provider: message.model ?? this.runtime.model.defaultProvider, signal, reasoningEfforts: message.reasoningEfforts }
-        );
-      } catch (error) {
-        if (!(error instanceof TurnPreparationFallbackRequiredError)) throw error;
-        const interruptedMessage = error.session.messages.find((entry) => entry.messageId === message.messageId);
-        const interruptedRefs = inputImages.flatMap((image) => image.source ? [image.source] : []);
-        if (interruptedMessage && interruptedRefs.length > 0) {
-          await this.runtime.memory.recordInputImageRefs(error.session.id, interruptedMessage.turnId, interruptedRefs);
-        }
-        await this.requestFallback(
-          message.userId,
-          message.conversationId,
-          error.session,
-          error,
-          async (resumedTurn, provider) => {
-            if (!activityOpened) { await run.open(); activityOpened = true; }
-            const prepared = await this.prepareTurnImages(resumedTurn, inputImages, referenceImageKey, signal);
-            resumedTurn = prepared.turn;
-            await this.generateAndComplete(
-              resumedTurn,
-              message,
-              inputText,
-              provider,
-              run,
-              inputImages,
-              prepared.referenceImages,
-              referenceImageKey,
-              signal
-            );
-          },
-          () => run.cancel(signal.reason)
-        );
-        return;
-      }
+      let turn = await this.runtime.memory.prepareTurn(
+        message.userId, inputText, message.conversationId, message.messageId,
+        message.conversationKind ?? "p2p", true, { signal, resume: message.resume }
+      );
       if (!turn) return;
+      reviewTurn = turn;
       signal.throwIfAborted();
       this.clearInactivityTimer(turn.session.id);
       if (turn.transition.shouldSendSessionEndedCard && turn.transition.previousSession) {
@@ -406,7 +400,7 @@ export class AgentInteractionController {
           this.runtime.config.sessionInactivityMinutes
         ).catch((error: unknown) => console.error("Unable to send delayed session-end notice", error));
       }
-      if (!activityOpened) await run.open();
+      await run.open();
       signal.throwIfAborted();
       const prepared = await this.prepareTurnImages(turn, inputImages, referenceImageKey, signal);
       turn = prepared.turn;
@@ -428,9 +422,16 @@ export class AgentInteractionController {
         return;
       }
       console.error("Unable to answer inbound message", error);
-      await run.fail(this.runtime.config.failureMessage)
+      await run.fail(error instanceof ModelHardStopError ? error.message : this.runtime.config.failureMessage)
         .catch((sendError: unknown) => console.error("Unable to send failure message", sendError));
     } finally {
+      if(reviewTurn && !signal.aborted && run.auditSnapshot().status === "failed") {
+        try {
+          const session=await this.runtime.memory.getSession(reviewTurn.session.id);
+          this.scheduleSessionEnd(session);
+          this.options.onTurnSettled?.(message,session,reviewTurn.currentMessage.turnId,run.auditSnapshot());
+        } catch { console.warn("Settled-turn observer needs reconciliation"); }
+      }
       this.runtime.performance?.record("turn.total", performance.now() - started, message.model ?? this.runtime.model.defaultProvider, outcome);
     }
   }
@@ -501,7 +502,7 @@ export class AgentInteractionController {
           return { ok: true, message: "已取消模型切换" };
         }
         this.clearInactivityTimer(pending.session.id);
-        if (pending.selectableProviders) this.runtime.model.resetCircuit?.(selected);
+        if (pending.selectableProviders) this.runtime.model.resetCircuit?.(selected, pending.catalog);
         const task = this.runForConversation(pending.conversationId, async () => {
             const controller = pending.controller ?? new AbortController();
             this.activeRuns.set(pending.conversationId, { userId: pending.userId, controller });
@@ -578,7 +579,10 @@ export class AgentInteractionController {
   ): Promise<void> {
     let reply: GeneratedReply;
     try {
-      const workspaceContext = await this.options.workspaceContext?.(message, turn);
+      const workspaceContext = await this.options.workspaceContext?.({ agentId: this.runtime.config.id,
+        userId: message.userId, principalId: message.principalId, sessionId: turn.session.id,
+        turnId: turn.currentMessage.turnId, conversationId: message.conversationId,
+        conversationKind: message.conversationKind, signal }, turn.currentMessage.messageId);
       signal?.throwIfAborted();
       const recentRequests = await this.runtime.memory.getRecentUserRequests(turn.session.id, turn.currentMessage.turnId);
       const delegationRequest = recentRequests.map(entry => `[用户原话 · ${new Date(entry.createdAt).toISOString()} · 会话${turn.session.id} · 第${entry.turnId}轮]
@@ -587,6 +591,12 @@ ${entry.content}`).join("\n\n");
         agentId: this.runtime.config.id, userId: message.userId, principalId: message.principalId,
         sessionId: turn.session.id, turnId: turn.currentMessage.turnId, conversationId: message.conversationId,
         conversationKind: message.conversationKind, signal, delegationRequest,
+        stopAfterInteraction: () => {
+          const active = this.activeRuns.get(message.conversationId);
+          if (active && active.controller.signal === signal && active.userId === message.userId) {
+            active.controller.abort(new AgentRunInterruption("interaction_failed"));
+          }
+        },
         delegationMemory: turn.context.longTermMemory.behaviorRules,
         resolveDelegationSources: async sources => {
           const excerpts: string[] = [];
@@ -620,12 +630,15 @@ ${entry.content}`).join("\n\n");
       reply = await this.runtime.agent.run(text, { ...turn.context, workspaceContext: [workspaceContext, `Recent user-request evidence for Codex delegation (not the complete intent history). Rewrite and synthesize naturally; if goals or preferences come from older sessions, retrieve conversation_history and cite sourceTurns. Newer explicit corrections supersede older plans:\n${delegationRequest}`].filter(Boolean).join("\n\n") }, provider, {
         beforeFinalReply:()=>this.runtime.fileWorkbench?.deliveryGuidance(turn.session.id,turn.currentMessage.turnId),
         automaticFallback: false,
+        useDefaultIfUnavailable: true,
         signal,
         inputImages,
         contextPersistence: {
           load: () => this.runtime.memory.getContextCheckpoints(turn.session.id),
           save: checkpoints => this.runtime.memory.saveContextCheckpoints(turn.session.id, checkpoints)
         },
+        acpChat: await this.runtime.memory.acpChatRequest(message.conversationId, turn.session.id, turn.currentMessage.turnId),
+        codexChat: await this.runtime.memory.codexChatRequest(turn.session.id, turn.currentMessage.turnId),
         reasoningEfforts: message.reasoningEfforts,
         onEvent: (event) => {
           if (event.type === "model.route") this.diagnose(message, { phase: "model_route", status: event.status,
@@ -667,6 +680,7 @@ ${entry.content}`).join("\n\n");
             this.runtime.memory.recordImageGenerationRecords(turn.session.id, turn.currentMessage.turnId, records),
           ...toolContext,
           replyId: run.replyId,
+          visibleReplyText: () => run.auditSnapshot().items.flatMap(item => item.type === "response" || item.type === "commentary" ? [item.text] : []),
           ...(run.supportsImages ? { presentImages: (images: readonly import("../image-generation.js").GeneratedImage[]) => run.presentImages(images, signal) } : {}),
           ...(run.supportsOutput ? { presentOutput: (output) => run.presentOutput(output, signal) } : {})
         }
@@ -683,6 +697,9 @@ ${entry.content}`).join("\n\n");
         () => run.cancel(signal?.reason)
       );
       return;
+    } finally {
+      // A stopped model run must not keep its scratch lease alive forever, including while waiting for fallback choice.
+      this.runtime.fileWorkbench?.imageScratch.finish(turn.session.id,turn.currentMessage.turnId,false);
     }
     await this.completeTurn(turn, reply, run, message, signal, referenceImageKey);
   }
@@ -704,12 +721,16 @@ ${entry.content}`).join("\n\n");
       const last=[...run.auditSnapshot().items].reverse().find(item=>item.type==="response");
       run.receive({type:"response.completed",itemId:last?.id ?? "file-delivery-status",role:"answer",text:reply.text});
     }
-    const updatedSession = await this.runtime.memory.recordAssistantReply({
+    const recoveredSession = message.resume ? await this.runtime.memory.getSession(turn.session.id) : undefined;
+    const updatedSession = recoveredSession?.messages.some(entry => entry.role === "assistant" && entry.turnId === turn.currentMessage.turnId)
+      ? recoveredSession : await this.runtime.memory.recordAssistantReply({
       sessionId: turn.session.id,
       turnId: turn.currentMessage.turnId,
       content: reply.text,
       usage: reply.usage,
       model: reply.model,
+      acpSession: !candidatesPending && (!fileDelivery || fileDelivery.status === "delivered") ? reply.acpSession : undefined,
+      codexThread: !candidatesPending && (!fileDelivery || fileDelivery.status === "delivered") ? reply.codexThread : undefined,
       imageUsages: reply.imageUsages,
       modelIdentity: reply.route ? {
         model: reply.route.apiModel,
@@ -730,6 +751,12 @@ ${entry.content}`).join("\n\n");
       conversationKind: turn.session.chatType === "p2p" || turn.session.chatType === "group" ? turn.session.chatType : undefined
     }, turn.session.id, turn.currentMessage.turnId, reply);
     const deliveries = await run.complete(reply.text, reply.images, reply.videos, signal);
+    if(this.options.onTurnSettled) {
+      try { this.options.onTurnSettled(message,await this.runtime.memory.getSession(turn.session.id),turn.currentMessage.turnId,run.auditSnapshot()); }
+      catch { console.warn("Settled-turn observer needs reconciliation"); }
+    }
+    this.runtime.executionJournal?.complete({ agentId: this.runtime.config.id, sessionId: turn.session.id, turnId: turn.currentMessage.turnId });
+    this.runtime.fileWorkbench?.imageScratch.finish(turn.session.id,turn.currentMessage.turnId,!candidatesPending && fileDelivery?.status === "delivered");
     if (deliveries.length > 0) {
       await this.runtime.memory.recordImageDeliveries(turn.session.id, turn.currentMessage.turnId, deliveries)
         .catch((error: unknown) => console.warn("Unable to record image delivery references for audit", error));
@@ -793,11 +820,11 @@ ${entry.content}`).join("\n\n");
     return loaded;
   }
 
-  recoveryOptions(userId: string, conversationId: string, requestId: string): { failedProvider: Provider; selectableProviders: Provider[] } | undefined {
+  recoveryOptions(userId: string, conversationId: string, requestId: string): { failedProvider: Provider; selectableProviders: Provider[]; catalog?: PendingFallback["catalog"] } | undefined {
     this.purgeExpiredFallbacks();
     const pending = this.pendingFallbacks.get(requestId);
     if (!pending || pending.userId !== userId || pending.conversationId !== conversationId || !pending.selectableProviders) return;
-    return { failedProvider: pending.failedProvider, selectableProviders: [...pending.selectableProviders] };
+    return { failedProvider: pending.failedProvider, selectableProviders: [...pending.selectableProviders], catalog: pending.catalog };
   }
 
   waitForConversation(conversationId: string): Promise<unknown> {
@@ -808,7 +835,7 @@ ${entry.content}`).join("\n\n");
     userId: string,
     conversationId: string,
     session: Session,
-    error: Pick<AgentExecutionFallbackRequiredError, "failedProvider" | "fallbackProvider" | "kind" | "status" | "elapsedMs" | "failedSupplier" | "lastFailure" | "selectableProviders"> & { resumeWithProvider: (provider: Provider) => Promise<T> },
+    error: Pick<AgentExecutionFallbackRequiredError, "failedProvider" | "fallbackProvider" | "kind" | "status" | "elapsedMs" | "failedSupplier" | "lastFailure" | "selectableProviders" | "catalog"> & { resumeWithProvider: (provider: Provider) => Promise<T> },
     finishTask: (value: T, provider: Provider) => Promise<void>,
     cancelTask: () => Promise<void>,
     existingRequestId?: string
@@ -822,14 +849,12 @@ ${entry.content}`).join("\n\n");
       fallbackProvider: error.fallbackProvider,
       failedProvider: error.failedProvider,
       selectableProviders: error.selectableProviders,
+      catalog: error.catalog,
       createdAt: Date.now(),
       continueTask: async provider => {
         try { await finishTask(await error.resumeWithProvider(provider), provider); }
         catch (next) {
-          if (!(next instanceof AgentExecutionFallbackRequiredError) && !(next instanceof TurnPreparationFallbackRequiredError)) throw next;
-          // Repeated failures remain in the same preparation/execution phase.
-          if (error instanceof AgentExecutionFallbackRequiredError && !(next instanceof AgentExecutionFallbackRequiredError)
-            || error instanceof TurnPreparationFallbackRequiredError && !(next instanceof TurnPreparationFallbackRequiredError)) throw next;
+          if (!(next instanceof AgentExecutionFallbackRequiredError)) throw next;
           await this.requestFallback(userId, conversationId, session, next as unknown as typeof error, finishTask, cancelTask, requestId);
         }
       },

@@ -37,6 +37,14 @@ MAX_FILES = 100000
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 GITHUB_HOST_KEY = 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n'
 GITHUB_AGENTS = frozenset({'deepmind', 'xiaochang'})
+GITHUB_CREDENTIAL_HELPER = '''import pathlib, sys
+if sys.argv[1:] != ['get']:
+    raise SystemExit(0)
+fields = dict(line.rstrip('\\n').split('=', 1) for line in sys.stdin if '=' in line)
+if fields.get('protocol') == 'https' and fields.get('host') == 'github.com':
+    token = (pathlib.Path(__file__).parent / 'token').read_text(encoding='utf-8').strip()
+    print('username=x-access-token\\npassword=' + token + '\\n')
+'''
 GITHUB_SSH_CONFIG = '''Host github.com
   HostName ssh.github.com
   Port 443
@@ -286,6 +294,10 @@ class Worker:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.native = None
         self.is_windows = config.get('backend') == 'windows-native'
+        # Windows 3.13 treats 0700 as a protected owner-only DACL. Project files
+        # must inherit the provisioned Agent + desktop-owner grants, including
+        # files written by the SYSTEM web service. Private runtime state stays 0700.
+        self.project_directory_mode = 0o777 if self.is_windows else 0o700
         self.engine = config.get('engine', '/usr/bin/docker')
         if not self.is_windows and not Path(self.engine).is_absolute():
             raise ValueError('Container engine must be an absolute path')
@@ -295,6 +307,9 @@ class Worker:
         self.maximum = min(max(int(config.get('maxSnapshotBytes', 512 * 1024 * 1024)), 1024 * 1024), 2 * 1024 * 1024 * 1024)
         self.output_limit = min(max(int(config.get('maxOutputBytes', 128 * 1024 * 1024)), 1024 * 1024), 512 * 1024 * 1024)
         self.max_jobs = min(max(int(config.get('maxConcurrentJobs', 2)), 1), 16)
+        self.policy = config.get('executionPolicy', {})
+        self.budget_lock = threading.Lock()
+        self.budget_cache = {}
         self.lock = threading.RLock()
         self.running = {}
         self.admitting = {}
@@ -302,13 +317,17 @@ class Worker:
         self.terminals = {}
         self.previews = _preview_module.PreviewWorker(self)
         self.draining = False
+        self.drain_deadline = None
         self.db = sqlite3.connect(self.root / 'jobs.sqlite', check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
           CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,scope TEXT NOT NULL,workspace TEXT NOT NULL,state TEXT NOT NULL,
           command_hash TEXT NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT NULL,exit_code INTEGER,error TEXT,snapshot_error TEXT);
           CREATE INDEX IF NOT EXISTS jobs_scope ON jobs(scope,created DESC);
-          CREATE TABLE IF NOT EXISTS terminal_jobs(id TEXT PRIMARY KEY,request TEXT NOT NULL);''')
+          CREATE TABLE IF NOT EXISTS terminal_jobs(id TEXT PRIMARY KEY,request TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS shared_workspaces(scope TEXT NOT NULL,workspace TEXT NOT NULL,PRIMARY KEY(scope,workspace));
+          CREATE TABLE IF NOT EXISTS shared_jobs(id TEXT PRIMARY KEY);
+          CREATE TABLE IF NOT EXISTS retired_workspaces(scope TEXT NOT NULL,workspace TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(scope,workspace));''')
         if self.is_windows:
             from windows_engine import WindowsBackend
             self.native = WindowsBackend(self)
@@ -343,15 +362,91 @@ class Worker:
     def workspace(self, identity, identifier):
         if not isinstance(identifier, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,100}', identifier):
             raise ValueError('Invalid workspace ID')
+        if self.db.execute('SELECT 1 FROM retired_workspaces WHERE scope=? AND workspace=?', (identity['scope'], identifier)).fetchone():
+            raise ValueError('Temporary workspace has expired')
+        registered = self.config.get('registeredWorkspaces', {}).get(identifier)
+        if registered:
+            if not self.is_windows or identity['scope'] != self.config.get('scope'):
+                raise ValueError('Registered project identity mismatch')
+            directory = Path(registered)
+            if not directory.is_absolute() or not directory.is_dir():
+                raise ValueError('Registered project directory is unavailable')
+            for ancestor in (directory, *directory.parents):
+                if ancestor.is_symlink() or ancestor.is_junction():
+                    raise ValueError('Linked registered project directory')
+            return directory
         scope = self.root / 'workspaces' / identity['scope']
-        scope.mkdir(parents=True, exist_ok=True, mode=0o700)
+        scope.mkdir(parents=True, exist_ok=True, mode=self.project_directory_mode)
         directory = scope / identifier
-        if directory.is_symlink():
+        if directory.is_symlink() or self.is_windows and directory.is_junction():
             raise ValueError('Linked workspace')
         return directory
 
+    def retire_workspace(self, identity, identifier):
+        identifier = str(uuid.UUID(identifier))
+        if identifier in self.config.get('registeredWorkspaces', {}):
+            raise ValueError('Registered projects cannot expire')
+        with self.lock:
+            if self.busy(identity['scope'], identifier) or any(key[0] == identity['scope'] for key in self.admitting):
+                raise RuntimeError('Workspace is running a program')
+            parent = self.root / 'workspaces' / identity['scope']
+            for ancestor in (parent, *parent.parents):
+                if ancestor.is_symlink() or self.is_windows and ancestor.is_junction():
+                    raise ValueError('Linked workspace root')
+            row = self.db.execute('SELECT path FROM retired_workspaces WHERE scope=? AND workspace=?', (identity['scope'],identifier)).fetchone()
+            retired = parent / (row['path'] if row else '.retired-' + uuid.uuid4().hex)
+            if not re.fullmatch(r'\.retired-[a-f0-9]{32}', retired.name):
+                raise ValueError('Invalid retired directory')
+            # Save before rename: retries after a crash resume the same tree.
+            self.db.execute('INSERT OR IGNORE INTO retired_workspaces VALUES (?,?,?)', (identity['scope'], identifier, retired.name))
+            self.db.commit()
+            directory = parent / identifier
+            if directory.is_symlink() or self.is_windows and directory.is_junction():
+                raise ValueError('Linked workspace')
+            if directory.exists():
+                directory.rename(retired)
+            if not remove_transfer_tree(retired):
+                raise RuntimeError('Temporary directory is still busy')
+            # Logs remain historical evidence; task-tree snapshot copies expire.
+            for job in self.db.execute('SELECT id FROM jobs WHERE scope=? AND workspace=?', (identity['scope'],identifier)).fetchall():
+                (self.job_path(job['id']) / 'snapshot.zip').unlink(missing_ok=True)
+            self.db.execute('DELETE FROM shared_workspaces WHERE scope=? AND workspace=?', (identity['scope'],identifier))
+            self.db.commit()
+            return {'removed': True}
+
     def github_credentials(self, identity):
         return self.root / 'credentials' / identity['scope'] / 'github'
+
+    def github_token_credentials(self, identity):
+        return self.root / 'credentials' / identity['scope'] / 'github-token'
+
+    def provision_github_token(self, identity, data):
+        if not self.is_windows or not self.native or identity['agentId'] not in GITHUB_AGENTS:
+            raise ValueError('GitHub token enrollment requires a selected Windows native Agent')
+        if not re.fullmatch(rb'github_pat_[A-Za-z0-9_]{20,255}', data):
+            raise ValueError('Invalid fine-grained GitHub personal access token')
+        with self.lock:
+            directory = self.github_token_credentials(identity)
+            directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if directory.is_dir():
+                current = directory / 'token'
+                if current.is_file() and hmac.compare_digest(current.read_bytes(), data) and (directory / 'credential.py').is_file():
+                    return {'configured': True}
+                raise RuntimeError('A different GitHub personal access token is already configured')
+            stage = directory.parent / ('.github-token-' + uuid.uuid4().hex)
+            stage.mkdir(mode=0o700, exist_ok=False)
+            try:
+                for name, content in [('token', data), ('credential.py', GITHUB_CREDENTIAL_HELPER.encode())]:
+                    fd = os.open(stage / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(fd, 'wb') as stream:
+                        stream.write(content)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                os.rename(stage, directory)
+            except Exception:
+                shutil.rmtree(stage, ignore_errors=True)
+                raise
+        return {'configured': True}
 
     def provision_github(self, identity, data):
         if identity['agentId'] not in GITHUB_AGENTS:
@@ -416,7 +511,7 @@ class Worker:
             if expected != 'new' and not hmac.compare_digest(expected, revision(current)):
                 raise RuntimeError('Remote workspace changed; reconcile its snapshot before writing')
             stage = directory.with_name('.import-' + uuid.uuid4().hex)
-            stage.mkdir(mode=0o700)
+            stage.mkdir(mode=self.project_directory_mode)
             try:
                 with zipfile.ZipFile(io.BytesIO(data)) as archive:
                     entries, total, names = archive.infolist(), 0, set()
@@ -445,7 +540,7 @@ class Worker:
                     if not isinstance(manifest.get('directories', []), list) or len(manifest.get('directories', [])) > MAX_FILES:
                         raise ValueError('Invalid project directories')
                     for name in manifest.get('directories', []):
-                        safe_path(stage, relative(name), True).mkdir(mode=0o700, parents=True, exist_ok=True)
+                        safe_path(stage, relative(name), True).mkdir(mode=self.project_directory_mode, parents=True, exist_ok=True)
                     wanted = {MANIFEST}
                     for item in manifest['files']:
                         name = relative(item['path'])
@@ -456,7 +551,7 @@ class Worker:
                         if len(content) != item['size'] or sha(content) != item['sha256']:
                             raise ValueError('Project snapshot content mismatch')
                         target = safe_path(stage, name, True)
-                        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        target.parent.mkdir(mode=self.project_directory_mode, parents=True, exist_ok=True)
                         with target.open('xb') as stream:
                             stream.write(content)
                         target.chmod(item['mode'])
@@ -474,7 +569,7 @@ class Worker:
                             raise ValueError('Project links conflict with ordinary files')
                         occupied.add(name.lower())
                         path = safe_path(stage, name, True)
-                        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        path.parent.mkdir(mode=self.project_directory_mode, parents=True, exist_ok=True)
                         path.symlink_to(target)
                     for link in manifest['links']:
                         if not (stage / link['path']).resolve(strict=False).is_relative_to(stage):
@@ -528,21 +623,40 @@ class Worker:
             return 'Worker filesystem inode reserve is exhausted; program was stopped'
         maximum = int(self.config.get('maxProjectBytes', 4 * 1024 * 1024 * 1024))
         total, entries = 0, 0
-        for parent, directories, files in (row for root in (directory, *extra) for row in os.walk(root, followlinks=False)):
-            directories[:] = [name for name in directories if not (Path(parent) / name).is_symlink()]
-            entries += len(directories) + len(files)
+        # Concurrent commands in the same project share each bounded scan;
+        # otherwise 64 terminals would each walk the entire tree every 0.5s.
+        for root in (directory, *extra):
+            used, count = self.disk_inventory(root, maximum)
+            total += used
+            entries += count
             if entries > int(self.config.get('maxProjectEntries', 200000)):
                 return 'Project exceeded its operating file-count budget; program was stopped'
-            for name in files:
-                try:
-                    info = (Path(parent) / name).lstat()
-                except FileNotFoundError:
-                    continue
-                if stat.S_ISREG(info.st_mode):
-                    total += info.st_size
-                    if total > maximum:
-                        return 'Project exceeded its operating disk budget; program was stopped'
+            if total > maximum:
+                return 'Project exceeded its operating disk budget; program was stopped'
         return None
+
+    def disk_inventory(self, root, maximum):
+        # Serialize only filesystem budget scans, not admission/health/control.
+        with self.budget_lock:
+            key = str(root)
+            cached = self.budget_cache.get(key)
+            if cached and time.monotonic() - cached[0] < .5:
+                return cached[1:]
+            total, entries = 0, 0
+            for parent, directories, files in os.walk(root, followlinks=False):
+                directories[:] = [name for name in directories if not (Path(parent) / name).is_symlink()]
+                entries += len(directories) + len(files)
+                for name in files:
+                    try:
+                        info = (Path(parent) / name).lstat()
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISREG(info.st_mode): total += info.st_size
+                    if total > maximum: break
+                if total > maximum or entries > int(self.config.get('maxProjectEntries', 200000)): break
+            if len(self.budget_cache) >= 4096: self.budget_cache.clear()
+            self.budget_cache[key] = (time.monotonic(), total, entries)
+            return total, entries
 
     def start(self, identity, request):
         if not isinstance(request, dict) or not isinstance(request.get('id'), str):
@@ -563,7 +677,7 @@ class Worker:
                 self.admitting.pop(key, None)
 
     def admit(self, identity, request):
-        if not {'id', 'workspaceId', 'command', 'cwd', 'timeoutMs'} <= set(request) or set(request) - {'id', 'workspaceId', 'command', 'cwd', 'timeoutMs', 'repairOf', 'terminal'}:
+        if not {'id', 'workspaceId', 'command', 'cwd', 'timeoutMs'} <= set(request) or set(request) - {'id', 'workspaceId', 'command', 'cwd', 'timeoutMs', 'repairOf', 'terminal', 'workspaceMode'}:
             raise ValueError('Invalid execution request')
         job_id = str(uuid.UUID(request['id']))
         request['id'] = job_id
@@ -575,16 +689,22 @@ class Worker:
             raise ValueError('Invalid terminal parameters')
         cwd = relative(request['cwd'], True)
         timeout = request['timeoutMs']
-        if not isinstance(timeout, int) or timeout < 1000 or timeout > 86400000:
+        shared = request.get('workspaceMode') == 'shared'
+        if 'workspaceMode' in request and (not self.native or not shared):
+            raise ValueError('Invalid shared workspace mode')
+        if not (self.native and timeout is None) and (not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1000 or timeout > 86400000):
             raise ValueError('Invalid execution time limit')
         fingerprint = sha(encoded({'id': job_id, 'workspaceId': request['workspaceId'], 'command': command,
-                                   'cwd': cwd, 'timeoutMs': timeout, 'repairOf': request.get('repairOf'), 'terminal': terminal}))
+                                   'cwd': cwd, 'timeoutMs': timeout, 'repairOf': request.get('repairOf'), 'terminal': terminal,
+                                   **({'workspaceMode':'shared'} if shared else {})}))
         with self.lock:
             previous = self.db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
             if previous:
                 if previous['scope'] != identity['scope'] or previous['command_hash'] != fingerprint:
                     raise RuntimeError('Job identity already used for a different request')
                 return {'id': job_id, 'state': previous['state']}
+            if shared and not self.db.execute('SELECT 1 FROM shared_workspaces WHERE scope=? AND workspace=?', (identity['scope'],request['workspaceId'])).fetchone():
+                raise RuntimeError('Shared workspace has not been attached')
         directory = self.workspace(identity, request['workspaceId'])
         if not directory.is_dir():
             raise FileNotFoundError('Workspace has not been imported')
@@ -602,7 +722,10 @@ class Worker:
                 if previous['scope'] != identity['scope'] or previous['command_hash'] != fingerprint:
                     raise RuntimeError('Job identity already used for a different request')
                 return {'id': job_id, 'state': previous['state']}
-            if self.draining or len(self.running) >= self.max_jobs:
+            admission = self.admission_status()
+            if admission['draining']:
+                raise RuntimeError('Execution service is draining for release; try again later')
+            if not self.native and not admission['accepting']:
                 raise RuntimeError('Execution capacity is busy; try again later')
             if self.busy(identity['scope'], request['workspaceId']):
                 legacy = self.db.execute("SELECT j.id FROM jobs j LEFT JOIN terminal_jobs t ON j.id=t.id WHERE j.scope=? AND j.workspace=? AND j.state IN ('starting','running') AND t.id IS NULL",(identity['scope'],request['workspaceId'])).fetchone()
@@ -613,11 +736,32 @@ class Worker:
                             (job_id, identity['scope'], request['workspaceId'], 'starting', fingerprint, now, now))
             if terminal is not None:
                 self.db.execute('INSERT INTO terminal_jobs VALUES (?,?)',(job_id,json.dumps(terminal)))
+            if shared:
+                self.db.execute('INSERT INTO shared_jobs VALUES (?)',(job_id,))
             self.db.commit()
             self.job_path(job_id)
             self.running[job_id] = None
-            threading.Thread(target=self.run, args=(identity, request), daemon=True).start()
+            try:
+                threading.Thread(target=self.run, args=(identity, request), daemon=True).start()
+            except Exception:
+                self.running.pop(job_id, None)
+                self.update(job_id, 'failed', error='Execution thread could not start; command was not launched')
+                raise
         return {'id': job_id, 'state': 'starting'}
+
+    def admission_status(self):
+        with self.lock:
+            # A failed/disappeared release controller must not close admission
+            # forever. Shutdown drains have no deadline and remain permanent.
+            if self.draining and self.drain_deadline is not None and time.monotonic() >= self.drain_deadline:
+                self.draining = False
+                self.drain_deadline = None
+            return {'draining': self.draining, 'active': len(self.running), 'admitting': len(self.admitting),
+                    'previews': self.native.preview_active if self.native else 0,
+                    'limit': None if self.native else self.max_jobs,
+                    'processSoftLimit': self.policy.get('processSoftLimit', 64) if self.native else None,
+                    'processLimitScope': 'conversation' if self.native else 'worker',
+                    'accepting': not self.draining and (self.native is not None or len(self.running) < self.max_jobs)}
 
     def update(self, job_id, state, code=None, error=None, snapshot_error=None):
         with self.lock:
@@ -864,6 +1008,32 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         parts = [unquote(part) for part in parsed.path.split('/') if part]
         method = self.command
+        if method == 'DELETE' and len(parts) == 3 and parts[:2] == ['v1','workspaces']:
+            self.json(200, worker.retire_workspace(identity, parts[2]))
+            return
+        native_workspace = len(parts) >= 3 and parts[:2] == ['v1','native-workspaces']
+        if method == 'PUT' and len(parts) == 4 and parts[1] in ('native-workspaces', 'workspaces') and parts[3] == 'snapshot' and parts[2] in worker.config.get('registeredWorkspaces', {}):
+            raise ValueError('Registered live projects cannot be replaced by snapshots')
+        if native_workspace:
+            if not worker.native:
+                raise ValueError('Shared workspaces require the same-host Windows executor')
+            directory = worker.workspace(identity,parts[2])
+            if method == 'GET' and len(parts) == 3:
+                self.json(200,{'exists':directory.is_dir()})
+                return
+            if method == 'POST' and len(parts) == 4 and parts[3] == 'open':
+                if json.loads(self.body(1024)) != {}: raise ValueError('Invalid workspace attachment')
+                with worker.lock:
+                    attached = worker.db.execute('SELECT 1 FROM shared_workspaces WHERE scope=? AND workspace=?', (identity['scope'],parts[2])).fetchone()
+                    if worker.busy(identity['scope'],parts[2]) and not attached: raise RuntimeError('Workspace is running a program')
+                    directory.mkdir(mode=worker.project_directory_mode,parents=True,exist_ok=True)
+                    worker.db.execute('INSERT OR IGNORE INTO shared_workspaces VALUES (?,?)',(identity['scope'],parts[2]))
+                    worker.db.commit()
+                self.json(200,{'attached':True})
+                return
+            if method != 'PUT' or len(parts) != 4 or parts[3] != 'snapshot':
+                raise ValueError('Unknown native workspace operation')
+            parts[1] = 'workspaces'
         if method == 'GET' and parts == ['v1', 'health']:
             if worker.native:
                 self.json(200, worker.native.health(identity))
@@ -878,13 +1048,25 @@ class Handler(BaseHTTPRequestHandler):
         elif worker.native and method == 'POST' and parts == ['v1','admin','drain']:
             self.body(1024)
             with worker.lock:
-                worker.draining = True
-                active = len(worker.running) + len(worker.admitting)
+                if not worker.draining or worker.drain_deadline is not None:
+                    worker.draining = True
+                    worker.drain_deadline = time.monotonic() + 60
+                active = len(worker.running) + len(worker.admitting) + worker.native.preview_active
             self.json(200, {'draining': True, 'active': active})
+        elif worker.native and method == 'POST' and parts == ['v1','admin','resume']:
+            self.body(1024)
+            with worker.lock:
+                # Never undo a signal-driven shutdown.
+                if worker.drain_deadline is not None:
+                    worker.draining = False
+                    worker.drain_deadline = None
+                self.json(200, worker.admission_status())
         elif method == 'POST' and parts == ['v1','derived','preview']:
             self.json(200,worker.previews.run(identity,json.loads(self.body(190*1024*1024))))
         elif method == 'PUT' and parts == ['v1', 'credentials', 'github']:
             self.json(201, worker.provision_github(identity, self.body(8192)))
+        elif method == 'PUT' and parts == ['v1', 'credentials', 'github-token']:
+            self.json(201, worker.provision_github_token(identity, self.body(512)))
         elif method == 'PUT' and len(parts) == 4 and parts[:2] == ['v1', 'workspaces'] and parts[3] == 'snapshot':
             data = self.body(worker.maximum + 32 * 1024 * 1024)
             self.json(200, worker.import_snapshot(identity, parts[2], data, self.headers.get('X-Expected-Revision', '')))
@@ -978,8 +1160,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 with path.open('rb') as stream:
                     shutil.copyfileobj(stream, self.wfile, 1024 * 1024)
-            elif method == 'POST' and len(parts) == 4 and parts[3] == 'stdin':
+            elif method == 'POST' and len(parts) == 4 and parts[3] in ('stdin', 'interrupt'):
                 request = json.loads(self.body(128 * 1024))
+                if parts[3] == 'interrupt':
+                    if request != {}: raise ValueError('Invalid interrupt request')
+                    request = {'text': '\x03'}
                 if set(request) != {'text'} or not isinstance(request['text'], str) or len(request['text'].encode()) > 4096 or '\0' in request['text']:
                     raise ValueError('Invalid program input')
                 with worker.lock:
@@ -1020,7 +1205,19 @@ class Handler(BaseHTTPRequestHandler):
             self.json(404, {'error': 'Execution route not found'})
 
     def dispatch(self):
+        lane = None
         try:
+            # Admission is per HTTP request, never per child-process lifetime.
+            # Control operations have independent capacity and do not queue
+            # behind conversions, file transfers or ordinary execution calls.
+            path = urlsplit(self.path).path
+            control = path in ('/v1/health', '/v1/admin/drain', '/v1/admin/resume') or path.endswith(('/cancel', '/interrupt'))
+            lane = self.server.control if control else self.server.ordinary
+            if not lane.acquire(self.server.queue_timeout):
+                lane = None
+                self.close_connection = True
+                self.json(429, {'error': 'Execution request queue is full or timed out; command was not admitted'})
+                return
             self.handle_request()
         except FileNotFoundError as error:
             self.close_connection = True
@@ -1042,19 +1239,72 @@ class Handler(BaseHTTPRequestHandler):
             location = (trace.tb_frame.f_code.co_name + ':' + str(trace.tb_lineno)) if trace else 'unknown'
             detail = type(error).__name__ + '; errno=' + str(getattr(error, 'errno', None)) + '; winerror=' + str(getattr(error, 'winerror', None)) + '; at=' + location
             self.json(503, {'error': 'Execution infrastructure unavailable (' + detail + ')'})
+        finally:
+            if lane is not None:
+                lane.release()
 
     do_GET = dispatch
     do_POST = dispatch
     do_PUT = dispatch
+    do_DELETE = dispatch
+
+
+class RequestLane:
+    def __init__(self, concurrent, queued):
+        self.active = threading.BoundedSemaphore(concurrent)
+        self.queue = threading.BoundedSemaphore(concurrent + queued)
+        self.lock = threading.Lock()
+        self.running, self.waiting = 0, 0
+
+    def acquire(self, timeout):
+        if not self.queue.acquire(blocking=False): return False
+        with self.lock: self.waiting += 1
+        accepted = False
+        try:
+            accepted = self.active.acquire(timeout=timeout)
+            return accepted
+        finally:
+            with self.lock:
+                self.waiting -= 1
+                if accepted: self.running += 1
+            if not accepted: self.queue.release()
+
+    def release(self):
+        with self.lock: self.running -= 1
+        self.active.release()
+        self.queue.release()
+
+    def snapshot(self):
+        with self.lock: return {'active': self.running, 'queued': self.waiting}
 
 
 class BoundedHTTPServer(ThreadingHTTPServer):
-    def __init__(self, *args, **kwargs):
-        self.capacity = threading.BoundedSemaphore(8)
+    def __init__(self, *args, policy=None, **kwargs):
+        policy = policy or {}
+        def count(name, default):
+            value = policy.get(name, default)
+            if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 4096:
+                raise ValueError('Invalid execution request policy: ' + name)
+            return value
+        ordinary, control = count('concurrentRequests', 1), count('controlRequests', 1)
+        queued = count('maxQueuedRequests', 64)
+        self.ordinary = RequestLane(ordinary, queued)
+        self.control = RequestLane(control, queued)
+        self.queue_timeout = min(max(int(policy.get('requestQueueTimeoutMs', 30000)), 1), 60000) / 1000
+        self.capacity = threading.BoundedSemaphore(count('maxConnections', 128))
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):
         if not self.capacity.acquire(blocking=False):
+            # Explicit rejection before parsing or admission, instead of an
+            # unexplained connection reset that makes command outcome unclear.
+            try:
+                payload = encoded({'error': 'Execution connection queue is full; command was not admitted'})
+                request.settimeout(1)
+                request.sendall(b'HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: '
+                                + str(len(payload)).encode() + b'\r\n\r\n' + payload)
+            except OSError:
+                pass
             self.shutdown_request(request)
             return
         try:
@@ -1073,18 +1323,24 @@ class BoundedHTTPServer(ThreadingHTTPServer):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
+    parser.add_argument('--concurrent-requests', type=int, help='Ordinary HTTP requests processed concurrently; does not limit running processes')
     arguments = parser.parse_args()
     path = Path(arguments.config).resolve()
     permissions = path.stat()
     if path.is_symlink() or os.name != 'nt' and permissions.st_mode & 0o027:
         raise RuntimeError('Execution config must not be writable by group or readable by others')
     config = json.loads(path.read_text(encoding="utf-8"))
+    if arguments.concurrent_requests is not None:
+        config.setdefault('executionPolicy', {})['concurrentRequests'] = arguments.concurrent_requests
     worker = Worker(config)
-    server = BoundedHTTPServer((config.get('listenHost', '127.0.0.1'), int(config.get('listenPort', 17643))), Handler)
+    server = BoundedHTTPServer((config.get('listenHost', '127.0.0.1'), int(config.get('listenPort', 17643))), Handler, policy=worker.policy)
     server.daemon_threads = True
     server.worker = worker
+    worker.http_server = server
     def shutdown(*_):
-        worker.draining = True
+        with worker.lock:
+            worker.draining = True
+            worker.drain_deadline = None
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
@@ -1092,8 +1348,16 @@ def main():
         server.serve_forever(poll_interval=0.5)
     finally:
         server.server_close()
-        worker.draining = True
-        # Every command has a bounded timeout. A release waits for its worker jobs.
+        with worker.lock:
+            worker.draining = True
+            worker.drain_deadline = None
+        # Explicit worker shutdown owns cleanup, including terminals without a
+        # lifetime deadline. Normal release drain waits before stopping us.
+        with worker.lock:
+            identifiers = list(set(worker.running) | (set(worker.native.jobs) if worker.native else set()))
+            worker.cancelled.update(identifiers)
+        for identifier in identifiers:
+            worker.stop_container(identifier)
         while worker.running:
             time.sleep(0.25)
         worker.db.close()

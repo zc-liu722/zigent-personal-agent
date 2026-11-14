@@ -1,10 +1,11 @@
+import { ConversationStore } from "../conversation/store.js";
 import { prepareSql, closeSqlite, sqliteTransaction } from "../sqlite.js";
 import { BackgroundDeliveryUncertainError } from "../channels/background-delivery.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ModelConversationMessage } from "../models/types.js";
+import type { AcpChatSession, CodexChatThread, ModelConversationMessage } from "../models/types.js";
 import { isSearchEvidence } from "../models/search-evidence.js";
 import type { AgentActivityItem } from "../agent/transcript.js";
 import type { DeliveredImage } from "../channels/types.js";
@@ -34,6 +35,7 @@ import type { SavedContextCheckpoint } from "../models/context-manager.js";
 import { isContextEvidence } from "../models/context-evidence.js";
 import { queryConversationHistory, type ConversationHistoryRequest, type ConversationHistoryScope } from "./history.js";
 import { initializeHistorySearch, closeHistorySearch } from "./history-search.js";
+import { initializeMessageLocation } from "../location/message-location.js";
 
 export type BackgroundDelivery = {
   session: Session;
@@ -228,6 +230,23 @@ const schema = `
     PRIMARY KEY (session_id, model_name)
   );
 
+  CREATE TABLE IF NOT EXISTS codex_chat_threads (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL,
+    thread_id TEXT NOT NULL,
+    binding TEXT NOT NULL,
+    total_usage_json TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS acp_chat_sessions (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL,
+    supplier_session_id TEXT NOT NULL,
+    binding TEXT NOT NULL,
+    history_digest TEXT NOT NULL,
+    context_revision TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS session_rewinds (
     session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
     through_turn INTEGER NOT NULL,
@@ -383,6 +402,11 @@ function parseQuestionAnswers(value: string | null): UserQuestionAnswer[] | unde
 
 export class SQLiteMemoryStore {
   private database?: DatabaseSync;
+  private conversations?: ConversationStore;
+  get conversationStore(): ConversationStore {
+    if (!this.conversations) throw new Error("CONVERSATION_STORE_NOT_INITIALIZED");
+    return this.conversations;
+  }
 
   constructor(
     private readonly filePath: string,
@@ -396,6 +420,10 @@ export class SQLiteMemoryStore {
     this.database.exec(schema);
     this.claimOrVerifyOwnership();
     this.migrateSchema();
+    initializeMessageLocation(this.database);
+    this.conversations = new ConversationStore(this.database);
+    if (!this.conversations.hasBaseline("history")) this.conversations.baseline("history", this.database.prepare(`SELECT count(*) AS records,
+      COALESCE(sum(length(CAST(content AS BLOB))+COALESCE(length(CAST(tool_trace_json AS BLOB)),0)+COALESCE(length(CAST(activity_trace_json AS BLOB)),0)),0) AS bytes FROM messages`).get());
     initializeHistorySearch(this.database);
   }
 
@@ -503,7 +531,7 @@ export class SQLiteMemoryStore {
         .get(deliveryId) as BackgroundDeliveryRow | undefined;
       if (!link) throw new Error("Background delivery was not reserved");
       if (link.status === "delivered") return this.loadSession(link.session_id);
-      const next = prepareSql(this.db(), "SELECT COALESCE(MAX(turn_id),0)+1 AS n FROM messages WHERE session_id=?")
+      const next = prepareSql(this.db(), "SELECT COALESCE(MAX(turn_id),0)+1 AS n FROM conversation_messages WHERE session_id=?")
         .get(link.session_id) as { n: number };
       this.insertMessage(link.session_id, next.n, "assistant", link.content, emptyUsage(), now, messageId);
       prepareSql(this.db(), "UPDATE sessions SET last_active_at=? WHERE session_id=?").run(now, link.session_id);
@@ -538,10 +566,19 @@ export class SQLiteMemoryStore {
     messageId: string,
     inactivityMs: number,
     now: number,
-    chatType: ConversationKind = "p2p"
+    chatType: ConversationKind = "p2p",
+    resume = false
   ): Promise<UserTurnStart | undefined> {
+    if (resume) {
+      const row = prepareSql(this.db(), "SELECT s.session_id FROM sessions s JOIN conversation_messages m ON m.session_id=s.session_id WHERE s.user_id=? AND s.chat_id=? AND m.message_id=? AND m.role='user' LIMIT 1")
+        .get(userId, chatId, messageId) as { session_id: string } | undefined;
+      if (row) {
+        const session = await this.getSession(row.session_id), currentMessage = session.messages.find(message => message.messageId === messageId)!;
+        return { transition: { session, createdNew: false, shouldSendSessionEndedCard: false }, currentMessage };
+      }
+    }
     return this.transaction(() => {
-      const duplicate = prepareSql(this.db(), "SELECT 1 FROM messages WHERE message_id = ? LIMIT 1").get(messageId);
+      const duplicate = prepareSql(this.db(), "SELECT 1 FROM conversation_messages WHERE message_id = ? LIMIT 1").get(messageId);
       if (duplicate) return undefined;
 
       const transition = this.getOrCreateSessionInTransaction(userId, chatId, content, inactivityMs, now, chatType);
@@ -619,7 +656,7 @@ export class SQLiteMemoryStore {
         WHERE deleted_at IS NULL AND session_id = ? AND turn_id = ? AND role = 'user'
       `).run(refsJson, sessionId, turnId);
       if (result.changes !== 1) throw new Error(`User message for turn ${turnId} does not exist`);
-      const message = prepareSql(this.db(), `SELECT id, created_at FROM messages
+      const message = prepareSql(this.db(), `SELECT id, created_at FROM conversation_messages
         WHERE deleted_at IS NULL AND session_id = ? AND turn_id = ? AND role = 'user'`).get(sessionId, turnId) as { id: string; created_at: number };
       const completed = this.completedTurnCount(sessionId);
       refs.forEach((ref, index) => this.insertMessageImage(
@@ -632,7 +669,7 @@ export class SQLiteMemoryStore {
 
   async recordUserQuestionAnswers(sessionId: string, turnId: number, answers: readonly UserQuestionAnswer[]): Promise<void> {
     return this.transaction(() => {
-      const previous = prepareSql(this.db(), `SELECT question_answers_json FROM messages
+      const previous = prepareSql(this.db(), `SELECT question_answers_json FROM conversation_messages
         WHERE deleted_at IS NULL AND session_id = ? AND turn_id = ? AND role = 'user'`).get(sessionId, turnId) as
         { question_answers_json: string | null } | undefined;
       if (!previous) throw new Error("User question answers require an existing user turn");
@@ -655,7 +692,7 @@ export class SQLiteMemoryStore {
           WHERE generation_id = ? AND session_id = ? AND turn_id = ? AND status = 'success'`)
           .get(delivery.generationId, sessionId, turnId) as { generation_id: string } | undefined;
         if (!generation) throw new Error(`Image delivery for turn ${turnId} did not match generation ${delivery.generationId}`);
-        const message = prepareSql(this.db(), `SELECT id, created_at FROM messages
+        const message = prepareSql(this.db(), `SELECT id, created_at FROM conversation_messages
           WHERE deleted_at IS NULL AND session_id = ? AND turn_id = ? AND role = 'assistant'`).get(sessionId, turnId) as { id: string; created_at: number };
         this.insertMessageImage(
           message.id,
@@ -678,7 +715,7 @@ export class SQLiteMemoryStore {
       const rows: MessageImageRow[] = [];
       for (const imageId of imageIds) {
         const row = prepareSql(this.db(), `SELECT * FROM message_images WHERE image_id = ? AND session_id = ?
-          AND EXISTS (SELECT 1 FROM messages m WHERE m.id=message_images.message_id AND m.deleted_at IS NULL)`)
+          AND EXISTS (SELECT 1 FROM conversation_messages m WHERE m.id=message_images.message_id AND m.deleted_at IS NULL)`)
           .get(imageId, sessionId) as unknown as MessageImageRow | undefined;
         if (!row) throw new Error(`Session image ${imageId} is not available`);
         prepareSql(this.db(), `UPDATE message_images SET hot_through_completion = ? WHERE image_id = ?`)
@@ -708,6 +745,20 @@ export class SQLiteMemoryStore {
         this.insertImageGeneration(sessionId, turnId, imageUsage, now);
       }
       for (const videoUsage of videoUsages ?? []) this.insertVideoGeneration(sessionId, turnId, videoUsage, now);
+      prepareSql(this.db(), "DELETE FROM codex_chat_threads WHERE session_id=? AND turn_id<=?").run(sessionId, turnId);
+      if (input.codexThread) {
+        const { threadId, binding, totalUsage } = input.codexThread;
+        prepareSql(this.db(), `INSERT INTO codex_chat_threads(session_id,turn_id,thread_id,binding,total_usage_json)
+          VALUES (?,?,?,?,?) ON CONFLICT(session_id) DO NOTHING`)
+          .run(sessionId, turnId, threadId, binding, totalUsage ? JSON.stringify(totalUsage) : null);
+      }
+      prepareSql(this.db(), "DELETE FROM acp_chat_sessions WHERE session_id=? AND turn_id<=?").run(sessionId, turnId);
+      if (input.acpSession) {
+        const { sessionId: supplierSessionId, binding, historyDigest, contextRevision } = input.acpSession;
+        prepareSql(this.db(), `INSERT INTO acp_chat_sessions(session_id,turn_id,supplier_session_id,binding,history_digest,context_revision)
+          VALUES (?,?,?,?,?,?) ON CONFLICT(session_id) DO NOTHING`)
+          .run(sessionId, turnId, supplierSessionId, binding, historyDigest, contextRevision ?? null);
+      }
       this.addSessionUsage(sessionId, usage);
       prepareSql(this.db(), "UPDATE sessions SET last_active_at = ? WHERE session_id = ?").run(now, sessionId);
       return this.loadSessionMetadata(sessionId);
@@ -738,7 +789,7 @@ export class SQLiteMemoryStore {
 
   async getRecentUserRequests(sessionId: string, throughTurn: number): Promise<Array<{ turnId: number; content: string; createdAt: number }>> {
     await this.initialize();
-    const rows = prepareSql(this.db(), `SELECT turn_id, content, created_at FROM messages
+    const rows = prepareSql(this.db(), `SELECT turn_id, content, created_at FROM conversation_messages
       WHERE deleted_at IS NULL AND session_id = ? AND role = 'user' AND turn_id <= ?
       ORDER BY turn_id DESC, created_at DESC, rowid DESC LIMIT 6`).all(sessionId, throughTurn) as
       Array<{ turn_id: number; content: string; created_at: number }>;
@@ -769,6 +820,49 @@ export class SQLiteMemoryStore {
     });
   }
 
+  async getCodexChatThread(sessionId: string, currentTurnId: number): Promise<CodexChatThread | undefined> {
+    await this.initialize();
+    const row = prepareSql(this.db(), `SELECT thread_id,binding,total_usage_json FROM codex_chat_threads t
+      WHERE t.session_id=? AND t.turn_id<? AND NOT EXISTS (
+        SELECT 1 FROM messages m WHERE m.session_id=t.session_id AND m.deleted_at IS NULL
+          AND m.role IN ('assistant','user') AND m.turn_id>t.turn_id AND m.turn_id<?
+      )`)
+      .get(sessionId, currentTurnId, currentTurnId) as { thread_id: string; binding: string; total_usage_json: string | null } | undefined;
+    if (!row) return undefined;
+    return { threadId: row.thread_id, binding: row.binding,
+      totalUsage: row.total_usage_json ? JSON.parse(row.total_usage_json) as TokenUsage : undefined };
+  }
+
+  async consumeCodexChatThread(sessionId: string, threadId: string, currentTurnId: number): Promise<boolean> {
+    await this.initialize();
+    return Number(prepareSql(this.db(), `DELETE FROM codex_chat_threads WHERE session_id=? AND thread_id=?
+      AND EXISTS (SELECT 1 FROM messages WHERE session_id=? AND turn_id=? AND role='user' AND deleted_at IS NULL)`)
+      .run(sessionId, threadId, sessionId, currentTurnId).changes) === 1;
+  }
+
+  async getAcpChatSession(sessionId: string, currentTurnId: number): Promise<AcpChatSession | undefined> {
+    await this.initialize();
+    const row = prepareSql(this.db(), `SELECT supplier_session_id,binding,history_digest,context_revision FROM acp_chat_sessions s
+      WHERE s.session_id=? AND s.turn_id<? AND NOT EXISTS (
+        SELECT 1 FROM messages m WHERE m.session_id=s.session_id AND m.deleted_at IS NULL
+          AND m.role IN ('assistant','user') AND m.turn_id>s.turn_id AND m.turn_id<?
+      )`).get(sessionId, currentTurnId, currentTurnId) as {
+        supplier_session_id: string; binding: string; history_digest: string; context_revision: string | null
+      } | undefined;
+    if (row) return { sessionId: row.supplier_session_id, binding: row.binding, historyDigest: row.history_digest,
+      contextRevision: row.context_revision ?? undefined };
+  }
+
+  async consumeAcpChatSession(sessionId: string, currentTurnId: number, previous: AcpChatSession): Promise<boolean> {
+    await this.initialize();
+    return Number(prepareSql(this.db(), `DELETE FROM acp_chat_sessions AS s
+      WHERE s.session_id=? AND s.supplier_session_id=? AND s.binding=? AND s.history_digest=? AND s.turn_id<?
+      AND EXISTS (SELECT 1 FROM messages WHERE session_id=s.session_id AND turn_id=? AND role='user' AND deleted_at IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=s.session_id AND turn_id>s.turn_id AND turn_id<?
+        AND role IN ('assistant','user') AND deleted_at IS NULL)`)
+      .run(sessionId, previous.sessionId, previous.binding, previous.historyDigest, currentTurnId, currentTurnId, currentTurnId).changes) === 1;
+  }
+
   async saveContextCheckpoints(sessionId: string, entries: SavedContextCheckpoint[]): Promise<void> {
     await this.initialize();
     return this.transaction(() => {
@@ -792,9 +886,11 @@ export class SQLiteMemoryStore {
       }
       prepareSql(this.db(), "DELETE FROM context_checkpoints WHERE session_id=?").run(sessionId);
       // Retain discarded turns and their image/tool/activity records for private diagnostics.
+      prepareSql(this.db(), "DELETE FROM codex_chat_threads WHERE session_id=?").run(sessionId);
+      prepareSql(this.db(), "DELETE FROM acp_chat_sessions WHERE session_id=?").run(sessionId);
       // Keep accumulated token and generation usage: those calls have already been billed.
       const prior = prepareSql(this.db(), "SELECT usage_json FROM session_rewinds WHERE session_id=?").get(sessionId) as { usage_json: string } | undefined;
-      const rows = prepareSql(this.db(), "SELECT * FROM messages WHERE session_id=? AND turn_id>=? AND deleted_at IS NULL").all(sessionId,fromTurn) as unknown as MessageRow[];
+      const rows = prepareSql(this.db(), "SELECT * FROM conversation_messages WHERE session_id=? AND turn_id>=? AND deleted_at IS NULL").all(sessionId,fromTurn) as unknown as MessageRow[];
       const usage = rows.map(row => {
         const { inputTokens, outputTokens, cachedInputTokens, cacheHitTokensReported, model, modelName, modelBrand, modelSupplier, modelCostMultiplier } = this.mapMessage(row);
         return { inputTokens, outputTokens, cachedInputTokens, cacheHitTokensReported, model, modelName, modelBrand, modelSupplier, modelCostMultiplier };
@@ -804,7 +900,7 @@ export class SQLiteMemoryStore {
         .run(sessionId,rows.reduce((max,row) => Math.max(max,row.turn_id),0),JSON.stringify([...(prior ? JSON.parse(prior.usage_json) : []),...usage]));
       prepareSql(this.db(), `UPDATE messages SET deleted_at=?, rewind_from_turn=?
         WHERE session_id=? AND turn_id>=? AND deleted_at IS NULL`).run(Date.now(), fromTurn, sessionId, fromTurn);
-      const first = prepareSql(this.db(), "SELECT content FROM messages WHERE deleted_at IS NULL AND session_id=? AND role='user' ORDER BY turn_id LIMIT 1")
+      const first = prepareSql(this.db(), "SELECT content FROM conversation_messages WHERE deleted_at IS NULL AND session_id=? AND role='user' ORDER BY turn_id LIMIT 1")
         .get(sessionId) as { content: string } | undefined;
       prepareSql(this.db(), "UPDATE sessions SET initial_user_preview=? WHERE session_id=?").run(first ? preview(first.content) : "", sessionId);
     });
@@ -816,21 +912,23 @@ export class SQLiteMemoryStore {
     return this.transaction(() => {
       const source = this.sessionRow(sourceId);
       if (!source || source.user_id !== userId || source.chat_type !== "p2p" || this.currentSessionRow(chatId)) throw new Error("Branch unavailable");
-      const boundary = prepareSql(this.db(), "SELECT turn_id,role FROM messages WHERE deleted_at IS NULL AND session_id=? AND id=? AND role IN ('user','assistant')")
+      const boundary = prepareSql(this.db(), "SELECT turn_id,role FROM conversation_messages WHERE deleted_at IS NULL AND session_id=? AND id=? AND role IN ('user','assistant')")
         .get(sourceId, messageId) as { turn_id: number; role: "user" | "assistant" } | undefined;
       if (!boundary) throw new Error("Branch point unavailable");
       const through = boundary.turn_id - (boundary.role === "user" ? 1 : 0);
       const { session } = this.getOrCreateSessionInTransaction(userId, chatId, "", 0, now, "p2p");
-      const rows = prepareSql(this.db(), "SELECT * FROM messages WHERE deleted_at IS NULL AND session_id=? AND turn_id<=? ORDER BY turn_id,created_at")
+      const rows = prepareSql(this.db(), "SELECT * FROM conversation_messages WHERE deleted_at IS NULL AND session_id=? AND turn_id<=? ORDER BY turn_id,created_at")
         .all(sourceId, through) as unknown as MessageRow[];
       for (const row of rows) {
         const id = randomUUID();
+        this.conversationStore.history(id, row.content, row.tool_trace_json ? JSON.parse(row.tool_trace_json) : undefined,
+          row.activity_trace_json ? JSON.parse(row.activity_trace_json) : undefined);
         prepareSql(this.db(), `INSERT INTO messages (id,message_id,session_id,turn_id,role,content,sender_user_id,
           model_id,model_name,model_brand,model_supplier,model_cost_multiplier,tool_trace_json,activity_trace_json,input_image_refs_json,question_answers_json,created_at)
           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id,
             messageIds[row.message_id ?? ""] ?? messageIds[`history:${createHash("sha256").update(row.id).digest("hex")}`] ?? randomUUID(),
-            session.id,row.turn_id,row.role,row.content,row.sender_user_id,row.model_id,row.model_name,row.model_brand,
-            row.model_supplier,row.model_cost_multiplier,row.tool_trace_json,row.activity_trace_json,row.input_image_refs_json,row.question_answers_json,row.created_at);
+            session.id,row.turn_id,row.role,"",row.sender_user_id,row.model_id,row.model_name,row.model_brand,
+            row.model_supplier,row.model_cost_multiplier,null,null,row.input_image_refs_json,row.question_answers_json,row.created_at);
         // Source image references remain valid; generation billing belongs to the source session.
         prepareSql(this.db(), `INSERT INTO message_images (image_id,message_id,session_id,turn_id,ordinal,source_provider,
           source_message_id,source_image_key,description,description_model,hot_through_completion,mime_type,sha256,created_at)
@@ -908,15 +1006,15 @@ export class SQLiteMemoryStore {
 
   async queryConversationHistory(scope: ConversationHistoryScope, request: ConversationHistoryRequest) {
     await this.initialize();
-    return queryConversationHistory(this.db(), this.agentId, scope, request);
+    return sqliteTransaction(this.db(), () => queryConversationHistory(this.db(), this.agentId, scope, request));
   }
 
   /** Bounded conversation continuity for an already-authorized task; no tool traces, assets or other chats. */
   async recentPrivateConversation(userId: string, chatId: string, now = Date.now()): Promise<ModelConversationMessage[]> {
     await this.initialize();
-    const rows = prepareSql(this.db(), `SELECT m.role,substr(m.content,1,1000) AS content,m.question_answers_json FROM messages m
+    const rows = prepareSql(this.db(), `SELECT m.role,substr(m.content,1,1000) AS content,m.question_answers_json FROM conversation_messages m
       JOIN sessions s ON s.session_id=m.session_id
-      WHERE m.deleted_at IS NULL AND s.user_id=? AND s.chat_id=? AND s.chat_type='p2p' AND s.status IN ('active','pending') AND m.role IN ('user','assistant')
+      WHERE m.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM conversation_visibility v WHERE v.session_id=s.session_id) AND s.user_id=? AND s.chat_id=? AND s.chat_type='p2p' AND s.status IN ('active','pending') AND m.role IN ('user','assistant')
       AND m.created_at>=? AND m.created_at<=? ORDER BY m.created_at DESC,m.rowid DESC LIMIT 6`)
       .all(userId, chatId, now - 24 * 60 * 60 * 1000, now) as Array<{ role: "user" | "assistant"; content: string; question_answers_json: string | null }>;
     return rows.reverse().map(row => row.role === "user" ? { role: "user", text: renderUserMessageContent({
@@ -1133,7 +1231,7 @@ export class SQLiteMemoryStore {
     if (!session || session.status !== "active") throw new Error(`Active session ${sessionId} does not exist`);
     const next = prepareSql(this.db(), `
       SELECT MAX(COALESCE(MAX(turn_id), 0), COALESCE((SELECT through_turn FROM session_rewinds WHERE session_id=?),0)) + 1 AS turn_id
-      FROM messages WHERE session_id = ?
+      FROM conversation_messages WHERE session_id = ?
     `).get(sessionId,sessionId) as { turn_id: number };
     const message = this.insertMessage(
       sessionId,
@@ -1178,7 +1276,7 @@ export class SQLiteMemoryStore {
     };
   }
 
-  /** Model input only: preserve old image positions, but never load their compressed text or audit payloads. */
+  /** Model input uses original active messages and bounded audit projections. */
   async getContextSession(sessionId: string): Promise<SessionContext> {
     await this.initialize();
     return this.loadSession(sessionId, true);
@@ -1189,27 +1287,22 @@ export class SQLiteMemoryStore {
   private loadSession(sessionId: string, contextOnly = false): Session {
     const row = this.sessionRow(sessionId);
     if (!row) throw new Error(`Session ${sessionId} does not exist`);
-    const latestSummary = contextOnly ? prepareSql(this.db(), `SELECT * FROM messages
-      WHERE deleted_at IS NULL AND session_id = ? AND role = 'compressor' ORDER BY turn_id DESC, created_at DESC LIMIT 1`)
-      .get(sessionId) as MessageRow | undefined : undefined;
-    const boundary = latestSummary?.turn_id ?? 1;
     const messageRows = prepareSql(this.db(), `
       SELECT ${contextOnly ? `id, message_id, session_id, turn_id, role,
-        CASE WHEN turn_id >= ${Number(boundary)} THEN content ELSE '' END AS content,
+        content,
         sender_user_id, input_tokens, output_tokens, cached_input_tokens, cache_hit_tokens_reported,
         model_id, model_name, model_brand, model_supplier, model_cost_multiplier,
-        CASE WHEN turn_id >= ${Number(boundary)} THEN tool_trace_json ELSE NULL END AS tool_trace_json,
-        CASE WHEN turn_id >= ${Number(boundary)} THEN (
+        tool_trace_json,
+        (
           SELECT json_group_array(json(a.value)) FROM json_each(messages.activity_trace_json) a
           WHERE json_extract(a.value,'$.type')='tool' AND json_extract(a.value,'$.name')='web_search'
-        ) ELSE NULL END AS activity_trace_json, input_image_refs_json,
-        CASE WHEN turn_id >= ${Number(boundary)} THEN question_answers_json ELSE NULL END AS question_answers_json, created_at` : "*"} FROM messages
-      WHERE deleted_at IS NULL AND session_id = ? ${contextOnly ? `AND (turn_id >= ${Number(boundary)} OR EXISTS
-        (SELECT 1 FROM message_images WHERE message_images.message_id = messages.id))` : ""}
+        ) AS activity_trace_json, input_image_refs_json,
+        question_answers_json, created_at` : "*"} FROM ${contextOnly ? 'conversation_context_messages' : 'conversation_messages'} AS messages
+      WHERE deleted_at IS NULL AND session_id = ? ${contextOnly ? "AND role <> 'compressor'" : ""}
       ORDER BY turn_id, CASE role WHEN 'user' THEN 0 WHEN 'compressor' THEN 1 ELSE 2 END, created_at
     `).all(sessionId) as unknown as MessageRow[];
     const imageRows = prepareSql(this.db(), `SELECT * FROM message_images WHERE session_id = ?
-      AND EXISTS (SELECT 1 FROM messages m WHERE m.id=message_images.message_id AND m.deleted_at IS NULL)
+      AND EXISTS (SELECT 1 FROM conversation_messages m WHERE m.id=message_images.message_id AND m.deleted_at IS NULL)
       ORDER BY turn_id, ordinal`).all(sessionId) as unknown as MessageImageRow[];
     const imagesByMessage = new Map<string, SessionImage[]>();
     for (const row of imageRows) {
@@ -1227,7 +1320,7 @@ export class SQLiteMemoryStore {
     const participantLabels = new Map<string, string>();
     if (chatType === "group") {
       // Labels remain stable even when the first appearance is before the summary boundary.
-      const participants = contextOnly ? prepareSql(this.db(), `SELECT sender_user_id AS senderUserId FROM messages
+      const participants = contextOnly ? prepareSql(this.db(), `SELECT sender_user_id AS senderUserId FROM conversation_messages
         WHERE deleted_at IS NULL AND session_id=? AND role='user' AND sender_user_id IS NOT NULL
         GROUP BY sender_user_id ORDER BY MIN(turn_id), MIN(created_at)`).all(sessionId) as {senderUserId: string}[] : rawMessages.filter(message => message.role === "user");
       for (const message of participants) {
@@ -1251,7 +1344,7 @@ export class SQLiteMemoryStore {
     const videoUsages = contextOnly ? undefined : (prepareSql(this.db(), `SELECT * FROM video_generations WHERE session_id = ?
       ORDER BY turn_id, created_at, generation_id`).all(sessionId) as unknown as VideoGenerationRow[])
       .flatMap((video) => this.mapVideoGeneration(video));
-    const summaryMessage = latestSummary ? this.mapMessage(latestSummary) : [...messages].reverse().find((message) => message.role === "compressor");
+    const summaryMessage = [...messages].reverse().find((message) => message.role === "compressor");
     const rewound = contextOnly ? undefined : prepareSql(this.db(), "SELECT usage_json FROM session_rewinds WHERE session_id=?").get(sessionId) as { usage_json: string } | undefined;
     const feedbacks = contextOnly ? [] : (prepareSql(this.db(), `SELECT user_id, rating FROM session_feedback
       WHERE session_id = ? ORDER BY updated_at, user_id`).all(sessionId) as unknown as SessionFeedbackRow[])
@@ -1326,7 +1419,7 @@ export class SQLiteMemoryStore {
   }
 
   private completedTurnCount(sessionId: string): number {
-    const row = prepareSql(this.db(), `SELECT COUNT(*) AS count FROM messages
+    const row = prepareSql(this.db(), `SELECT COUNT(*) AS count FROM conversation_messages
       WHERE deleted_at IS NULL AND session_id = ? AND role = 'assistant'`).get(sessionId) as { count: number };
     return Number(row.count);
   }
@@ -1425,7 +1518,13 @@ export class SQLiteMemoryStore {
     senderUserId?: string,
     serializedTraces?: { tool: string | null; activity: string | null }
   ): ChatMessage {
-    const id = randomUUID();
+    const run = role === "assistant" ? prepareSql(this.db(), "SELECT draft_id FROM conversation_runs WHERE routing_active IN (1,2) AND session_id=? AND turn_id=? AND reply_id IS NOT NULL ORDER BY created_at DESC LIMIT 1")
+      .get(sessionId, turnId) as { draft_id: string } | undefined : undefined;
+    const id = run?.draft_id ?? randomUUID();
+    this.conversationStore.history(id, content,
+      serializedTraces?.tool ? JSON.parse(serializedTraces.tool) : toolTrace,
+      serializedTraces?.activity ? JSON.parse(serializedTraces.activity) : activityTrace);
+    if (role === "assistant") this.conversationStore.generated(sessionId, turnId, id, content, activityTrace);
     prepareSql(this.db(), `
       INSERT INTO messages (
         id, message_id, session_id, turn_id, role, content, sender_user_id,
@@ -1439,7 +1538,7 @@ export class SQLiteMemoryStore {
       sessionId,
       turnId,
       role,
-      content,
+      "",
       senderUserId ?? null,
       usage.inputTokens,
       usage.outputTokens,
@@ -1450,8 +1549,8 @@ export class SQLiteMemoryStore {
       modelIdentity?.brand ?? null,
       modelIdentity?.supplier ?? null,
       modelIdentity?.costMultiplier ?? null,
-      serializedTraces ? serializedTraces.tool : toolTrace && toolTrace.length > 0 ? JSON.stringify(toolTrace) : null,
-      serializedTraces ? serializedTraces.activity : activityTrace && activityTrace.length > 0 ? JSON.stringify(activityTrace) : null,
+      null,
+      null,
       null,
       now
     );

@@ -34,7 +34,7 @@
 .document-workspace-paper img { max-width: 100%; height: auto; }
 .document-workspace-paper table { display: block; max-width: 100%; overflow-x: auto; font-size: 14px; white-space: normal; }
 .document-workspace-paper td, .document-workspace-paper th { position: relative; min-width: 72px; }
-.document-workspace-paper .selectedCell::after { position: absolute; inset: 0; background: #d9775720; pointer-events: none; content: ''; }
+.document-workspace-paper .selectedCell::after { position: absolute; inset: 0; background: var(--palette-document-workspace-paper-fill); pointer-events: none; content: ''; }
 .document-workspace-paper li[data-checked] { list-style: none; position: relative; }
 .document-workspace-paper li[data-checked]::before { position: absolute; left: -1.5em; top: .45em; display: grid; place-items: center; width: 1em; height: 1em; border: 1px solid var(--muted); border-radius: 3px; font: 12px/1 var(--ui-font); content: ''; }
 .document-workspace-paper li[data-checked="true"]::before { color: var(--paper); background: var(--muted); content: '✓'; }
@@ -42,7 +42,7 @@
 .document-workspace-paper.ProseMirror-hideselection *::selection { background: transparent; }
 .document-workspace-paper.ProseMirror-hideselection { caret-color: transparent; }
 .document-workspace-paper img.ProseMirror-separator { display: inline !important; border: none !important; margin: 0 !important; }
-.document-workspace-feedback { flex: none; margin: 0; padding: 10px 28px; color: #aa543c; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.document-workspace-feedback { flex: none; margin: 0; padding: 10px 28px; color: var(--palette-document-workspace-feedback-text); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .document-workspace-notice { flex: none; }
 .document-workspace-conflict { padding: 0 28px 10px; background: transparent; }
 .document-workspace-conflict p { margin: 0 0 7px; color: var(--muted); font-size: 12px; line-height: 1.7; }

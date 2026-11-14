@@ -9,24 +9,40 @@ export type PersonalIntegrationConfig = {
 export type GoogleOAuthConfig = PersonalIntegrationConfig & {
   clientId?: string;
   clientSecret?: string;
+  /** Reuse the callback of the service supplying an inherited client. Grants remain independent. */
+  webCallbackService?: "google_calendar" | "google_drive";
   refreshToken?: string;
   tokenPath: string;
 };
 export type GoogleCalendarConfig = GoogleOAuthConfig;
 export type GoogleDriveConfig = GoogleOAuthConfig;
+export type GmailConfig = GoogleOAuthConfig;
 export type TodoistConfig = PersonalIntegrationConfig & { apiToken?: string; tokenPath?: string; clientId?: string; clientSecret?: string };
-export type ProductivityIntegration = "google_calendar" | "google_drive" | "todoist";
+export type ProductivityIntegration = "google_calendar" | "google_drive" | "gmail" | "todoist";
 export type TodoistConnection = { network?: "direct" | "proxy" };
 
 /** Never borrow another Agent's account or infer its owner from a recent conversation. */
-export function loadProductivityConfig(agentId: string, prefix: string, environment: NodeJS.ProcessEnv, storageDirectory: string, proxyUrl?: string, authorization?: PersonalIntegrationConfig["authorization"], todoistConnection?: TodoistConnection) {
+export function loadProductivityConfig(agentId: string, prefix: string, environment: NodeJS.ProcessEnv, storageDirectory: string, proxyUrl?: string, authorization?: PersonalIntegrationConfig["authorization"], todoistConnection?: TodoistConnection, webOwnerUserId?: string) {
   const read = (key: string) => environment[key]?.trim() || undefined;
   const verifiedOwner = read(`${prefix}_WEB_OWNER_USER_ID`) ?? read(`${prefix}_NOTIFICATION_OWNER_USER_ID`);
   const driveClientPrefix = [`${prefix}_GOOGLE_DRIVE`, "GOOGLE_DRIVE", `${prefix}_GOOGLE_CALENDAR`, "GOOGLE_CALENDAR"]
     .find(candidate => read(`${candidate}_CLIENT_ID`) || read(`${candidate}_CLIENT_SECRET`));
   const calendarClientPrefix = [`${prefix}_GOOGLE_CALENDAR`, "GOOGLE_CALENDAR"]
     .find(candidate => read(`${candidate}_CLIENT_ID`) || read(`${candidate}_CLIENT_SECRET`));
+  const gmailClientPrefix = [`${prefix}_GMAIL`, "GMAIL", `${prefix}_GOOGLE_DRIVE`, "GOOGLE_DRIVE", `${prefix}_GOOGLE_CALENDAR`, "GOOGLE_CALENDAR"]
+    .find(candidate => read(`${candidate}_CLIENT_ID`) || read(`${candidate}_CLIENT_SECRET`));
   return {
+    gmail: {
+      agentId, proxyUrl, tokenPath: join(storageDirectory, "gmail-oauth.json"),
+      ownerUserId: read(`${prefix}_GMAIL_OWNER_USER_ID`) ?? webOwnerUserId ?? verifiedOwner,
+      clientId: gmailClientPrefix ? read(`${gmailClientPrefix}_CLIENT_ID`) : undefined,
+      clientSecret: gmailClientPrefix ? read(`${gmailClientPrefix}_CLIENT_SECRET`) : undefined,
+      ...(gmailClientPrefix?.endsWith("_GOOGLE_DRIVE") || gmailClientPrefix === "GOOGLE_DRIVE"
+        ? { webCallbackService: "google_drive" as const }
+        : gmailClientPrefix?.endsWith("_GOOGLE_CALENDAR") || gmailClientPrefix === "GOOGLE_CALENDAR"
+          ? { webCallbackService: "google_calendar" as const } : {}),
+      refreshToken: read(`${prefix}_GMAIL_REFRESH_TOKEN`)
+    } satisfies GmailConfig,
     google_drive: {
       agentId, proxyUrl, authorization, tokenPath: join(storageDirectory, "google-drive-oauth.json"),
       ownerUserId: read(`${prefix}_GOOGLE_DRIVE_OWNER_USER_ID`) ?? verifiedOwner,

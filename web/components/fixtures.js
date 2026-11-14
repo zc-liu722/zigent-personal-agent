@@ -52,6 +52,11 @@ export const componentScenarios = [
   { id: 'report', group: '结构化输出', name: '指标、图表、表格与步骤', source: 'output-components.js', data: output('report', '本周迭代', [{ type: 'metrics', items: [{ label: '已整理', value: '18', change: '+6' }, { label: '完成率', value: '75%' }] }, { type: 'chart', chartType: 'bar', title: '每日完成', labels: ['一', '二', '三', '四', '五'], series: [{ label: '组件', values: [2, 4, 3, 5, 4] }] }, { type: 'table', columns: ['组件', '状态'], rows: [['日历', '完成'], ['待办', '进行中']] }, { type: 'steps', items: [{ title: '清点场景', status: 'completed' }, { title: '集中实现', status: 'active' }, { title: '发布预览台', status: 'pending' }] }, { type: 'resources', items: [{ title: '设计资料', url: 'https://example.com/design', description: '本周评审材料' }] }]) },
   { id: 'document', group: '结构化输出', name: '文档卡片', source: 'output-components.js', data: output('document', '组件清单', [{ type: 'document', filename: 'components.md', content: '# 组件清单\n\n统一维护交互组件。' }]) },
   { id: 'artifact', group: '结构化输出', name: '文件卡片', source: 'output-components.js', data: output('artifact', '导出文件', [{ type: 'artifact', versionId: '00000000-0000-4000-8000-000000000001', fileId: '00000000-0000-4000-8000-000000000002', filename: '组件清单.pdf', mime: 'application/pdf', size: 24576, sha256: '0'.repeat(64) }]) },
+  { id: 'sleep-timeline', group: '结构化输出', name: '睡眠时间线', source: 'sleep-timeline.js · sleep-timeline.css', data: {
+    ...output('sleep-timeline', '2026-11-06 睡眠时间线', [{ type: 'interactive', height: 260, summary: '北京时间，设备睡眠分段估计。', html: '<p>7小时40分 · 01:30–09:15</p>' }]),
+    program: 'sleep-timeline', data: { type: 'sleep-timeline', version: 1, start: Date.parse('2026-11-06T01:30:00+08:00'),
+      segments: [[0,1800000,'core'],[1800000,4500000,'deep'],[4500000,9000000,'core'],[9000000,11700000,'rem'],[11700000,12000000,'awake'],[12000000,14700000,'deep'],[14700000,22200000,'core'],[22200000,27900000,'rem']] }
+  } },
   { id: 'interactive', group: '结构化输出', name: '交互可视化', source: 'interactive-output.js', data: output('interactive', '投入与产出', [interactive]) },
   { id: 'animation', group: '结构化输出', name: '动态画面', source: 'interactive-output.js', data: output('animation', '循环演示', [animation]) }
 ];

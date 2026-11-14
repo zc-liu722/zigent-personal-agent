@@ -3,6 +3,7 @@ import { CodexService } from "./codex/service.js";
 import { createCodexHttp } from "./codex/http.js";
 import { createDashboardGateway } from "./dashboard/gateway.js";
 import { UserLocationReceiver } from "./location/service.js";
+import { createProjectMcpGateway } from "./plugins/project-mcp/gateway.js";
 
 process.umask(0o077);
 
@@ -24,8 +25,9 @@ async function main(): Promise<void> {
   const services = new Map<string, CodexService>();
   for (const options of await loadCodexBrokerConfigs()) services.set(options.agentId, new CodexService(options));
   const codex = createCodexHttp(services), dashboard = await createDashboardGateway();
+  const projects = createProjectMcpGateway(config.projectMcp);
   receiver.attachExtension({
-    async handle(req, res) { return Boolean(await dashboard?.handle(req, res)) || codex.handle(req, res); },
+    async handle(req, res) { return Boolean(await projects?.(req, res)) || Boolean(await dashboard?.handle(req, res)) || codex.handle(req, res); },
     close() { dashboard?.close(); codex.close(); }
   });
   try {

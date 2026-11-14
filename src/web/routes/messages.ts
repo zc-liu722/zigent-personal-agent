@@ -11,9 +11,9 @@ import { activityIdentity } from "../message-activity.js";
 import type { ConversationCoordinator } from "../conversation-coordinator.js";
 import type { WebMessage, WebStore } from "../store.js";
 import { queuedMessageView, type QueuedWebMessage } from "../store.js";
-import { isNotionAuthorizationRequest, type WebAuthorizationInteractions } from "../authorization.js";
+import { isFeishuAuthorizationRequest, isNotionAuthorizationRequest, type WebAuthorizationInteractions } from "../authorization.js";
 
-import { conditionalJson, data, json, type WebRoute } from "../http.js";
+import { conditionalCompressedJson, conditionalJson, data, json, type WebRoute } from "../http.js";
 
 export function createMessagesRoutes({ store, runtime, owner, coordinator, browsers, authorizations, createConversation, messageView }: {
   store: WebStore;
@@ -44,24 +44,63 @@ export function createMessagesRoutes({ store, runtime, owner, coordinator, brows
     // Browser lookup may yield; a conversation deleted meanwhile must not be returned.
     if (store.resolveConversation(conversationId) !== id) return undefined;
     const info = store.conversationInfo(id)!;
-    const messages = store.messages(id, before, limit, compact);
+    const messages = store.messages(id, before, limit, compact, true);
     const busy = coordinator.activeConversation(info.chatId) === id;
     return { hasOlder: messages.length > 0 && store.hasMessagesBefore(id, messages[0]!.seq), busy,
       activeMessageId: busy ? coordinator.activeMessage(info.chatId) : undefined,
       queued: store.queuedMessages(id).map(queuedMessageView), revision: store.conversationRevision(id),
       selectedModel: coordinator.selectedModel(id), branch: store.branchOrigin(id),
-      greeting: store.conversationGreeting(id), browser, assetDimensions: previews.dimensions(messages.flatMap(message => message.assets ?? [])),
+      browser, assetDimensions: previews.dimensions(messages.flatMap(message => message.assets ?? [])),
       messages: messages.map(message => messageView(message, info)) };
   }
   const handle: WebRoute = async ({ req, res, url, route, credential }) => {
+    if (route === "api/messages/annotations" && ["POST", "DELETE"].includes(req.method ?? "")) {
+      const identity = z.object({ conversationId: z.string().regex(/^[a-f0-9]{64}$/),
+        messageId: z.string().min(1).max(128), id: z.string().uuid(), version: z.number().int().min(0) });
+      const annotationSchema = identity.extend({
+        quote: z.string().trim().min(1).max(16000), text: z.string().trim().min(1).max(4000),
+        block: z.number().int().min(-1).max(100000),
+        anchor: z.object({
+          start: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+          end: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER)
+        }).strict().refine(({ start, end }) => end > start).optional()
+      }).strict();
+      const body = await data(req);
+      const parsed = (req.method === "DELETE" ? identity.strict() : annotationSchema).safeParse(body);
+      if (!parsed.success) { json(res, 400, { error: "批注内容或长度无效。" }); return true; }
+      const input = parsed.data, conversationId = store.resolveConversation(input.conversationId);
+      const message = conversationId ? store.message(input.messageId) : undefined;
+      if (!message || message.conversationId !== conversationId || message.role !== "assistant") {
+        json(res, 404, { error: "原回复不存在。" }); return true;
+      }
+      if (req.method === "DELETE") {
+        if (!store.deleteReplyAnnotation(message, input.id, input.version)) {
+          json(res, 409, { error: "批注已在其他页面修改，请重新打开。" }); return true;
+        }
+        json(res, 200, { annotations: store.replyAnnotations(message.id) }); return true;
+      }
+      const note = annotationSchema.parse(body);
+      const annotation = store.saveReplyAnnotation(message, {
+        id: note.id, quote: note.quote, text: note.text, block: note.block, anchor: note.anchor
+      }, input.version);
+      if (!annotation) { json(res, 409, { error: "批注已修改或数量已达上限，请重新打开。" }); return true; }
+      json(res, 200, { annotation, annotations: store.replyAnnotations(message.id) }); return true;
+    }
     if (route === "api/messages" && req.method === "GET") {
       const before = Number(url.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
       if (!Number.isSafeInteger(before) || before < 1) { json(res, 400, { error: "分页无效。" }); return true; }
       const limit = Number(url.searchParams.get("limit") ?? 100);
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) { json(res, 400, { error: "分页无效。" }); return true; }
-      const result = await page(url.searchParams.get("conversationId") ?? "", before, limit, url.searchParams.get("compact") === "1");
-      if (!result) { json(res, 404, { error: "对话不存在。" }); return true; }
-      conditionalJson(req, res, result); return true;
+      try {
+        const result = await page(url.searchParams.get("conversationId") ?? "", before, limit, url.searchParams.get("compact") === "1");
+        if (!result) { json(res, 404, { error: "对话不存在。" }); return true; }
+        await conditionalCompressedJson(req, res, result);
+      } catch {
+        // This request passed pagination validation; the server failed to read or encode the page.
+        console.warn("WEB_MESSAGE_PAGE_FAILED", { trace: res.getHeader("X-Zigent-Trace") });
+        if (!res.headersSent) json(res, 500, { error: "暂时无法加载对话，请重试。" }); else res.end();
+      }
+      return true;
     }
     if (route === "api/messages/activity" && req.method === "GET") {
       const input = z.object({ conversationId: z.string().regex(/^[a-f0-9]{64}$/), messageId: z.string().min(1).max(128) }).parse(Object.fromEntries(url.searchParams));
@@ -177,9 +216,18 @@ export function createMessagesRoutes({ store, runtime, owner, coordinator, brows
         const conversationId = await command;
         json(res, 201, { ok: true, conversationId }); return true;
       }
+      if (!input.editMessageId && !input.assets.length) {
+        const previousService = store.messages(id, Number.MAX_SAFE_INTEGER, 100, true, true)
+          .flatMap(message => message.interactions ?? []).filter(item => item.kind === "authorization").at(-1)?.service;
+        if (isFeishuAuthorizationRequest(input.text, previousService)) {
+          store.save({ id: input.id, conversationId: id, role: "user", text: input.text.trim(), assets: [], createdAt: Date.now() });
+          authorizations.redisplay("feishu", id, /切换|更换|换(?:账号|账户|团队|应用)/.test(input.text));
+          json(res, 202, { ok: true, conversationId: input.conversationId }); return true;
+        }
+      }
       if (!input.editMessageId && !input.assets.length && isNotionAuthorizationRequest(input.text, "notion")) {
         // Resolve an omitted service only for a connection command, using compact history.
-        const previousService = /notion/i.test(input.text) ? "notion" : store.messages(id, Number.MAX_SAFE_INTEGER, 100, true)
+        const previousService = /notion/i.test(input.text) ? "notion" : store.messages(id, Number.MAX_SAFE_INTEGER, 100, true, true)
           .flatMap(message => message.interactions ?? []).filter(item => item.kind === "authorization").at(-1)?.service;
         if (isNotionAuthorizationRequest(input.text, previousService)) {
           store.save({ id: input.id, conversationId: id, role: "user", text: input.text.trim(), assets: [], createdAt: Date.now() });

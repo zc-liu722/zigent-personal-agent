@@ -4,7 +4,7 @@
   const node = (tag, className, text) => { const item = document.createElement(tag); if (className) item.className = className; if (text !== undefined) item.textContent = text; return item; };
   const date = value => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) : '—';
   const count = value => new Intl.NumberFormat('zh-CN').format(value || 0);
-  const labels = { active: '已启用', paused: '已暂停', cancelled: '已取消', draft: '草稿', pending: '排队中', running: '执行中', succeeded: '执行完成', failed: '执行失败',
+  const labels = { active: '已启用', paused: '已暂停', cancelled: '已取消', draft: '草稿', pending: '排队中', running: '执行中', succeeded: '执行完成', failed: '执行失败', format_validation_failed: '格式校验失败',
     delivered: '已送达', stale: '已过期', uncertain: '待核对', none: '未发送', disabled: '已停用' };
   let api, close, conversation, navigate, discuss, renderRun, report, tab = 'tasks', version = 0, controller, timer, busy = false;
   const expanded = new Set();
@@ -63,7 +63,7 @@
   }
   function runRow(run) {
     const row = button('', () => showRun(run.taskId, run.id), 'automation-run'); row.dataset.runId = run.id; row.setAttribute('aria-label', `查看 ${date(run.triggeredAt)} 的工作过程`);
-    const heading = node('div', 'automation-run-heading'); heading.append(node('time', '', date(run.triggeredAt)), badge(run.state));
+    const heading = node('div', 'automation-run-heading'); heading.append(node('time', '', date(run.triggeredAt)), badge(run.formatValidationFailed ? 'format_validation_failed' : run.state));
     const facts = node('div', 'automation-run-facts');
     facts.append(node('span', '', run.deliveredAt ? `已送达 ${date(run.deliveredAt)}` : run.notificationStatus === 'pending' ? '待发送' : labels[run.notificationStatus] || '未发送'));
     if (run.tokens) facts.append(node('span', '', `${count(run.tokens.input + run.tokens.output)} token`));
@@ -203,7 +203,14 @@
         work = renderRun(result, work);
         const delivery = badge(result.notificationStatus);
         if (result.notificationStatus === 'pending') delivery.textContent = '待发送';
-        content.replaceChildren(heading, badge(result.state), delivery, work);
+        content.replaceChildren(heading, badge(result.formatValidationFailed ? 'format_validation_failed' : result.state), delivery);
+        if (result.formatValidationFailed) {
+          const output = result.rawOutput === undefined ? '原始输出不可用' : result.rawOutput || '模型输出为空';
+          const original = section('模型原始输出', node('pre', 'automation-raw-output', output));
+          original.classList.add('automation-format-failure');
+          content.append(original);
+        }
+        content.append(work);
         if (result.conversationId) content.append(button('打开对话', async () => { close('automation-dialog'); await navigate(result); }));
         status('');
         if (['running', 'pending'].includes(result.state) || result.notificationStatus === 'pending') runTimer = setTimeout(update, 3000);

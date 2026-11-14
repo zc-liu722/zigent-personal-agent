@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "processSoftLimit": 64,
+  "protectedRecentProcesses": 8,
+  "concurrentRequests": 8,
+  "controlRequests": 8,
+  "maxQueuedRequests": 64,
+  "maxConnections": 128,
+  "requestQueueTimeoutMs": 30000,
+  "previewConcurrentJobs": 2,
+  "initialYieldTimeMs": 10000,
+  "minYieldTimeMs": 250,
+  "windowsInitialYieldFloorMs": 10000,
+  "maxYieldTimeMs": 30000,
+  "minEmptyYieldTimeMs": 5000,
+  "maxBackgroundTerminalTimeoutMs": 300000,
+  "defaultMaxOutputTokens": 10000,
+  "maxOutputBytes": 1048576
+}

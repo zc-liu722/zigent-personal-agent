@@ -3,7 +3,7 @@ import type { TokenUsage } from "../memory/types.js";
 import type { RequestRecorder } from "../usage/types.js";
 import type { ModelGatewayConfig } from "./gateway-config.js";
 import { modelRequestDispatcher } from "./http-transport.js";
-import { buildProtocolRequest, anthropicMessagesEndpoint, responseEndpoint } from "./protocol-adapters.js";
+import { anthropicMessagesEndpoint, responseEndpoint } from "./endpoints.js";
 import { anthropicUsage, tokenCount, validTokenCount, type AnthropicUsage } from "./stream-usage.js";
 import { addTokenUsage } from "./context-summary.js";
 import { ModelContextOverflowError, ModelError, ModelInvalidResponseError } from "./errors.js";
@@ -11,12 +11,14 @@ import type { ModelRoundRequest } from "./types.js";
 
 /** Explicit route capability only. A protocol-compatible endpoint does not imply this support. */
 export async function compactNative(config: ModelGatewayConfig, route: ModelDeployment,
-  request: ModelRoundRequest, summaryTokens: number, signal?: AbortSignal, record?: RequestRecorder
+  request: ModelRoundRequest, summaryTokens: number, signal?: AbortSignal, record?: RequestRecorder, protocolAdapter?: ModelRoundRequest["protocolAdapter"]
 ): Promise<{ items: Record<string, unknown>[]; usage: TokenUsage }> {
   const openai = route.context?.strategy === "openai-native" && route.protocol === "openai-responses";
   const anthropic = route.context?.strategy === "anthropic-native" && route.protocol === "anthropic-messages";
   if (!openai && !anthropic) throw new ModelError("Native compaction is not enabled on this exact route");
-  const transport = buildProtocolRequest(route, request, false);
+  const buildRequest = request.protocolAdapter ?? protocolAdapter;
+  if (!buildRequest) throw new ModelError("HTTP model component is not ready");
+  const transport = buildRequest(route, request, false);
   const { stream: _stream, ...payload } = transport.payload;
   const started = Date.now();
   let usage: TokenUsage | undefined;

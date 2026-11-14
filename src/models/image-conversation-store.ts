@@ -17,7 +17,8 @@ export function imageHistoryHash(request: ImageConversationRequest, throughTurn:
 
 /** Agent-owned mutable state; survives service releases and never goes through Git. */
 export async function withImageConversation<T>(config: AgentConfig, request: ImageConversationRequest,
-  operation: (previous: OfficialImageConversation | undefined, save: (state: OfficialImageConversation) => void) => Promise<T>): Promise<T> {
+  operation: (previous: OfficialImageConversation | undefined, save: (state: OfficialImageConversation) => void,
+    invalidate: () => void) => Promise<T>): Promise<T> {
   const route = config.imageGeneration!, driver = route.driver!;
   // A driver switch is a per-turn model override of the same official thread.
   // Keep the supplier/image route isolated, but serialize across text drivers.
@@ -75,7 +76,7 @@ export async function withImageConversation<T>(config: AgentConfig, request: Ima
               state.totalUsage ? JSON.stringify(state.totalUsage) : null);
           db!.exec("COMMIT");
         } catch (error) { db!.exec("ROLLBACK"); throw error; }
-      });
+      }, remove);
     } catch (error) {
       // A failed/aborted supplier turn may have changed its history. Never silently
       // reuse that uncertain state; a subsequent user request bootstraps raw history.

@@ -147,16 +147,16 @@ window.ZigentMessageActions = class {
   close() { this.cancelPress(); this.dismiss({ immediate: true, restore: false }); if (this.selection.open) this.closeSelection(); }
 };
 
-// Mouse/keyboard use native selection. Touch owns a Range without installing it
-// in window.getSelection(), so iOS never adds a second set of handles or menus.
+// Mouse/keyboard keep the native range. Touch owns its range so iOS does not
+// add a second set of handles or menus.
 window.ZigentReplySelection = class {
-  constructor({ onAdd, onCopy, onNew, onBranch, createButton, readingScroller, readingTopEdge }) {
+  constructor({ onAdd, onCopy, onNew, onBranch, onAnnotate, createButton, readingScroller, readingTopEdge }) {
     this.readingScroller = readingScroller; this.readingTopEdge = readingTopEdge;
     this.toolbar = document.createElement('div');
     this.toolbar.className = 'reply-selection-toolbar'; this.toolbar.hidden = true;
     this.toolbar.setAttribute('role', 'toolbar'); this.toolbar.setAttribute('aria-label', '所选回复操作');
     for (const [icon, label, action] of [
-      ['copy', '复制', onCopy], ['reply-add', '添加到本会话', onAdd],
+      ['copy', '复制', onCopy], ...(onAnnotate ? [['annotate', '写批注', onAnnotate]] : []), ['reply-add', '添加到本会话', onAdd],
       ['reply-new', '添加到新会话', onNew], ['branch', '添加到分支会话', onBranch]
     ]) {
       const button = createButton(icon, label);
@@ -182,8 +182,7 @@ window.ZigentReplySelection = class {
     // before click, especially in Safari. Keyboard focus remains available.
     this.toolbar.addEventListener('pointerdown', event => event.preventDefault());
     document.body.append(this.toolbar);
-    this.highlight = document.createElement('div'); this.highlight.className = 'reply-selection-highlights';
-    this.highlight.setAttribute('aria-hidden', 'true'); document.body.append(this.highlight);
+    this.highlightLayers = new Map();
     this.handles = ['start', 'end'].map(side => {
       const handle = document.createElement('span'); handle.className = `reply-selection-handle ${side}`;
       handle.hidden = true; handle.dataset.nativeSelection = 'true'; handle.setAttribute('aria-hidden', 'true');
@@ -192,7 +191,9 @@ window.ZigentReplySelection = class {
         event.preventDefault(); event.stopPropagation(); this.cancelPress();
         // Expanded line hit areas can overlap for a short selection. Resolve the
         // closest boundary instead of letting DOM order always choose the end.
-        const candidates = ['start', 'end'].filter(name => !this.handles[name === 'start' ? 0 : 1].hidden);
+        const candidates = this.touchRange
+          ? ['start', 'end'].filter(name => !this.handles[name === 'start' ? 0 : 1].hidden)
+          : [side];
         const hitSide = candidates.reduce((closest, name) => {
           const point = this.handlePoints[name], best = this.handlePoints[closest];
           return Math.hypot(event.clientX - point.x, event.clientY - point.y) <
@@ -200,7 +201,7 @@ window.ZigentReplySelection = class {
         }, side);
         const point = this.handlePoints[hitSide];
         this.drag = { side: hitSide, id: event.pointerId, dx: event.clientX - point.x, dy: event.clientY - point.y };
-        handle.setPointerCapture(event.pointerId); this.toolbar.hidden = true;
+        handle.setPointerCapture(event.pointerId); this.sync();
       });
       document.body.append(handle); return handle;
     });
@@ -303,7 +304,14 @@ window.ZigentReplySelection = class {
   clearTouchRange() {
     if (this.touchBody) delete this.touchBody.dataset.replyTouchSelection;
     this.touchBody = undefined; this.touchRange = undefined; this.holdBody = undefined;
-    this.highlight.replaceChildren();
+    this.clearHighlights();
+  }
+  clearHighlights() {
+    for (const [element, layer] of this.highlightLayers) {
+      layer.remove();
+      element.classList.remove('reply-selection-surface');
+    }
+    this.highlightLayers.clear();
   }
   cancelPress() { clearTimeout(this.pressTimer); this.press = undefined; }
   caret(x, y, body) {
@@ -333,7 +341,14 @@ window.ZigentReplySelection = class {
       const range = selected.range.cloneRange(), comparison = range.comparePoint(point.node, point.offset);
       if (drag.side === 'start' && comparison <= 0) range.setStart(point.node, point.offset);
       else if (drag.side === 'end' && comparison >= 0) range.setEnd(point.node, point.offset);
-      if (!range.collapsed) this.touchRange = range;
+      if (!range.collapsed && (range.compareBoundaryPoints(Range.START_TO_START, selected.range) !== 0
+        || range.compareBoundaryPoints(Range.END_TO_END, selected.range) !== 0)) {
+        if (this.touchRange) this.touchRange = range;
+        else {
+          const start = [range.startContainer, range.startOffset], end = [range.endContainer, range.endOffset];
+          window.getSelection().setBaseAndExtent(...(drag.side === 'start' ? [...end, ...start] : [...start, ...end]));
+        }
+      }
     }
     this.sync();
     // Continue expanding a long selection when a handle reaches the reading edge.
@@ -381,13 +396,39 @@ window.ZigentReplySelection = class {
     // descendants. Measure only selected text to avoid painting either twice.
     const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT), rects = [];
     for (let node; (node = walker.nextNode());) {
-      if (!range.intersectsNode(node) || node.parentElement.closest('.activity, [data-selection-control], button, input, textarea, select')) continue;
+      const element = node.parentElement;
+      if (!range.intersectsNode(node) || element.closest('.activity, [data-selection-control], button, input, textarea, select')) continue;
       const part = document.createRange(); part.selectNodeContents(node);
       if (node === range.startContainer) part.setStart(node, range.startOffset);
       if (node === range.endContainer) part.setEnd(node, range.endOffset);
-      if (!part.collapsed) rects.push(...part.getClientRects());
+      if (part.collapsed) continue;
+      for (const rect of part.getClientRects()) {
+        if (rect.width && rect.height) rects.push({ element, rect });
+      }
     }
-    return rects.filter(rect => rect.width && rect.height);
+    return rects;
+  }
+  paintHighlights(rects, { left, right, top, bottom }) {
+    for (const { element } of rects) {
+      if (this.highlightLayers.has(element)) continue;
+      const layer = document.createElement('span');
+      layer.className = 'reply-selection-highlights';
+      layer.setAttribute('aria-hidden', 'true');
+      element.classList.add('reply-selection-surface');
+      element.append(layer);
+      this.highlightLayers.set(element, layer);
+    }
+    const origins = new Map([...this.highlightLayers].map(([element, layer]) => [element, layer.getBoundingClientRect()]));
+    for (const { element, rect } of rects) {
+      const origin = origins.get(element);
+      const x = Math.max(left, rect.left), y = Math.max(top, rect.top);
+      const mark = document.createElement('span');
+      Object.assign(mark.style, {
+        left: `${x - origin.left}px`, top: `${y - origin.top}px`,
+        width: `${Math.min(right, rect.right) - x}px`, height: `${Math.min(bottom, rect.bottom) - y}px`
+      });
+      this.highlightLayers.get(element).append(mark);
+    }
   }
   readingBounds() {
     const bounds = document.getElementById('timeline').getBoundingClientRect();
@@ -401,50 +442,45 @@ window.ZigentReplySelection = class {
     const scrollingElement = document.scrollingElement || document.documentElement;
     const documentFlow = this.readingScroller() === scrollingElement;
     const offsetX = documentFlow ? window.scrollX : 0, offsetY = documentFlow ? window.scrollY : 0;
-    // Document scrolling moves the transcript on Safari's compositor. Put every
-    // selection visual in that same coordinate system instead of repainting a
-    // fixed overlay after each scroll event; nested desktop scrolling stays fixed.
-    for (const element of [this.highlight, this.toolbar, ...this.handles]) element.classList.toggle('document-flow', documentFlow);
+    // Keep floating controls in the transcript's coordinate system during document scrolling.
+    for (const element of [this.toolbar, ...this.handles]) element.classList.toggle('document-flow', documentFlow);
     this.toolbar.hidden = true;
-    this.highlight.replaceChildren();
-    this.handles.forEach(handle => { handle.hidden = true; });
-    if (!this.selected || document.querySelector('dialog:modal, .conversation-sidebar.open')) return;
+    this.clearHighlights();
+    if (!this.selected || document.querySelector('dialog:modal, .conversation-sidebar.open')) {
+      this.handles.forEach(handle => { handle.hidden = true; });
+      return;
+    }
     const viewport = window.visualViewport, timeline = this.readingBounds();
     const left = (viewport?.offsetLeft || 0) + 8, right = left + (viewport?.width || innerWidth) - 16;
     const top = Math.max((viewport?.offsetTop || 0) + 8, timeline.top + 8);
     const bottom = Math.min((viewport?.offsetTop || 0) + (viewport?.height || innerHeight) - 8, timeline.bottom - 8);
     const allRects = this.textRects(this.selected);
-    const rects = allRects.filter(rect =>
+    const rects = allRects.filter(({ rect }) =>
       rect.bottom > top && rect.top < bottom && rect.right > left && rect.left < right);
-    if (!rects.length) return;
-    if (this.touchRange) {
-      // Range rectangles also support older Safari versions without CSS
-      // Highlights. They are clipped to the reading area and ignore all input.
-      const seen = new Set();
-      for (const rect of rects) {
-        const x = Math.max(left, rect.left), y = Math.max(top, rect.top);
-        const width = Math.min(right, rect.right) - x, height = Math.min(bottom, rect.bottom) - y;
-        const key = [x, y, width, height].join(','); if (seen.has(key)) continue;
-        seen.add(key);
-        const mark = document.createElement('span');
-        Object.assign(mark.style, { left: `${x + offsetX}px`, top: `${y + offsetY}px`, width: `${width}px`, height: `${height}px` });
-        this.highlight.append(mark);
-      }
-      this.handlePoints = {};
-      [allRects[0], allRects.at(-1)].forEach((rect, index) => {
-        const handle = this.handles[index], side = index ? 'end' : 'start', x = index ? rect.right : rect.left;
-        this.handlePoints[side] = { x, y: rect.top + rect.height / 2 };
-        if (rect.bottom <= top || rect.top >= bottom || x < left || x > right) return;
-        handle.style.left = `${x - 28 + offsetX}px`;
-        handle.style.top = `${(index ? rect.top : rect.top - 44) + offsetY}px`;
-        handle.style.setProperty('--selection-line-height', `${rect.height}px`); handle.hidden = false;
-      });
+    if (!rects.length) {
+      this.handles.forEach(handle => { handle.hidden = true; });
+      return;
     }
+    if (this.touchRange) this.paintHighlights(rects, { left, right, top, bottom });
+    this.handlePoints = {};
+    [allRects[0], allRects.at(-1)].forEach(({ rect }, index) => {
+      const handle = this.handles[index], side = index ? 'end' : 'start', x = index ? rect.right : rect.left;
+      this.handlePoints[side] = { x, y: rect.top + rect.height / 2 };
+      handle.classList.toggle('native-range', !this.touchRange);
+      handle.classList.toggle('dragging', Boolean(this.drag));
+      handle.hidden = rect.bottom <= top || rect.top >= bottom || x < left || x > right;
+      if (handle.hidden) return;
+      handle.style.left = `${x - 28 + offsetX}px`;
+      handle.style.top = `${(index ? rect.top : rect.top - 44) + offsetY}px`;
+      handle.style.setProperty('--selection-line-height', `${rect.height}px`);
+    });
     if (this.drag) return;
     this.toolbar.hidden = false;
-    const width = this.toolbar.offsetWidth, height = this.toolbar.offsetHeight, first = rects[0], last = rects.at(-1);
+    const width = this.toolbar.offsetWidth, height = this.toolbar.offsetHeight, first = rects[0].rect, last = rects.at(-1).rect;
     if (bottom - top < height) { this.toolbar.hidden = true; return; }
-    const y = first.top - height - 12 >= top ? first.top - height - 12 : last.bottom + 12;
+    // Leave space for both endpoint knobs when the toolbar sits beside a line.
+    const gap = 18;
+    const y = first.top - height - gap >= top ? first.top - height - gap : last.bottom + gap;
     this.toolbar.style.left = `${Math.max(left, Math.min((first.left + first.right - width) / 2, right - width)) + offsetX}px`;
     this.toolbar.style.top = `${Math.max(top, Math.min(y, bottom - height)) + offsetY}px`;
   }

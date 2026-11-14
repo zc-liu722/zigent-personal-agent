@@ -4,7 +4,7 @@ export { USD_REFERENCE as TOKEN_PRICE_USD_REFERENCE } from "./currency.js";
 
 export type PriceTier = { input: number; output: number; aboveTokens?: number; cachedInput?: number; cacheWrite5m?: number; cacheWrite1h?: number };
 type TokenPrice = {
-  currency: "USD" | "CNY"; tiers: readonly PriceTier[]; sourceUrl: string;
+  currency: "USD" | "CNY"; tiers: readonly PriceTier[]; sourceUrl: string; checkedAt?: string;
   note?: string;
   promotion?: { through: string; regular: PriceTier };
 };
@@ -13,6 +13,13 @@ export const TOKEN_PRICES_CHECKED_AT = "2026-10-20";
 // Verified against ZenMux's public /api/v1/models pricings and the linked supplier pages.
 // Each key is a full routing identity. Never use one supplier's quote for another route.
 export const tokenPrices: Readonly<Record<string, TokenPrice>> = {
+  "claude-fable-5.2-zenmux": {
+    currency: "USD",
+    tiers: [{ input: 8, output: 40, cachedInput: 0.2, cacheWrite5m: 10, cacheWrite1h: 16 }],
+    sourceUrl: "https://zenmux.ai/anthropic/claude-fable-5.2",
+    checkedAt: "2026-11-14",
+    note: "每百万 token：缓存读取 $0.2，5 分钟缓存写入 $10，1 小时缓存写入 $16。"
+  },
   "gemini-4argon-zenmux": {
     "currency": "USD",
     "tiers": [
@@ -276,5 +283,5 @@ export function modelTokenPrice(model: Pick<ModelDeployment, "name" | "cost">, n
   const notes = [price.note];
   for (const tier of tiers) if (tier.aboveTokens) notes.push(`输入超过 ${tier.aboveTokens / 1000}K：输入 ${amount(tier.input)}，输出 ${amount(tier.output)}。`);
   if (promotionActive && price.promotion) notes.push(`优惠至 ${price.promotion.through}；之后输入 ${amount(price.promotion.regular.input)}，输出 ${amount(price.promotion.regular.output)}。`);
-  return { input: range("input"), output: range("output"), unit, checkedAt, sourceUrl: price.sourceUrl, note: notes.filter(Boolean).join(" ") };
+  return { input: range("input"), output: range("output"), unit, checkedAt: price.checkedAt ?? checkedAt, sourceUrl: price.sourceUrl, note: notes.filter(Boolean).join(" ") };
 }

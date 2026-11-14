@@ -112,7 +112,10 @@ class WindowsBackend:
         os.replace(temporary, previous_path)
         self.runtime = self.config['windowsRuntime']
         self.verify_control_permissions()
-        self.slots = threading.BoundedSemaphore(worker.max_jobs)
+        # Conversions have a small independent resource pool. Interactive
+        # commands are retained/retired per conversation by the durable host.
+        self.preview_slots = threading.BoundedSemaphore(worker.policy.get('previewConcurrentJobs', 2))
+        self.preview_active = 0
         self.jobs = {}
         self.previews = WindowsPreviews(self)
         self.version = subprocess.check_output([self.runtime['execution'], '--version'], timeout=10).decode().strip()
@@ -166,9 +169,13 @@ class WindowsBackend:
         self.verify_control_permissions()
         self.refresh_rendering_identity()
         return {'protocol': 1, 'backend': 'windows-native', 'agentId': identity['agentId'], 'ownerUserId': identity['ownerUserId'],
-                'admissionTracking': True,
+                'admissionTracking': True, 'sharedFilesystem': True,
+                'admission': self.worker.admission_status(),
+                'sessionProcessManagement': True, 'executionPolicy': self.worker.policy,
+                'requestLanes': {'ordinary': self.worker.http_server.ordinary.snapshot(), 'control': self.worker.http_server.control.snapshot()},
                 'runtimeIdentity': self.config['runtimeIdentity'], 'instanceId': self.instance_id, 'hostEpoch': self.boot_id, 'githubSshConfigured': self.worker.github_credentials(identity).is_dir(),
-                'capabilities': {**self.config['runtimeCapabilities'], 'workspaceRoot': str(self.worker.workspace(identity, '_').parent)}, 'permissions': {'mode': 'full-access', 'network': True, 'localhost': True,
+                'githubTokenConfigured': self.worker.github_token_credentials(identity).is_dir(),
+                'capabilities': {**self.config['runtimeCapabilities'], 'workspaceRoot': str(self.worker.workspace(identity, '_').parent), 'registeredWorkspaces': self.config.get('registeredWorkspaces', {})}, 'permissions': {'mode': 'full-access', 'network': True, 'localhost': True,
                 'account': 'standard', 'accountSid': self.account_sid, 'controlPlaneProtected': True,
                 'agentDataIsolated': True, 'osIsolationBetweenConversations': False}}
 
@@ -178,7 +185,12 @@ class WindowsBackend:
     def environment(self, directory, identifier):
         self.verify_control_permissions()
         self.refresh_rendering_identity()
-        home = directory / '.zigent-home'; home.mkdir(exist_ok=True)
+        shared_source = directory == Path(r'F:\zigent-source') and any(
+            Path(root) == directory for root in self.config.get('registeredWorkspaces', {}).values())
+        # Share source files, while keeping tool homes and caches under each
+        # execution identity's private state.
+        home = self.worker.root / 'source-home' if shared_source else directory / '.zigent-home'
+        home.mkdir(exist_ok=True)
         # LibreOffice's profile internals still exceed MAX_PATH when TEMP is
         # below a deeply nested project. Keep per-command scratch under the
         # same protected account state, outside project snapshots.
@@ -189,7 +201,7 @@ class WindowsBackend:
                 'PATH': os.pathsep.join([str(Path(runtime['python']).parent), str(Path(runtime['node']).parent),
                     str(Path(runtime['execution']).parent), str(Path(runtime['soffice']).parent),
                     runtime['nodeModules'] + '\\.bin', str(Path(runtime['pwsh']).parent), windows + '\\System32',
-                    'C:\\Program Files\\Git\\cmd']),
+                    'C:\\Program Files\\Git\\cmd', 'C:\\Program Files\\Git\\usr\\bin']),
                 'HOME': str(home), 'USERPROFILE': str(home), 'APPDATA': str(home / 'AppData'), 'LOCALAPPDATA': str(home / 'LocalAppData'),
                 'TEMP': str(temp), 'TMP': str(temp), 'PYTHONUTF8': '1', 'PYTHONDONTWRITEBYTECODE': '1',
                 'PYTHONPATH': runtime['helpers'], 'NODE_PATH': runtime['nodeModules'],
@@ -200,6 +212,13 @@ class WindowsBackend:
         credentials = self.worker.github_credentials({'scope': self.config['scope']})
         if credentials.is_dir():
             environment['GIT_SSH_COMMAND'] = '"C:/Program Files/Git/usr/bin/ssh.exe" -F "' + (credentials / 'config').as_posix() + '"'
+        github_token = self.worker.github_token_credentials({'scope': self.config['scope']})
+        if github_token.is_dir():
+            token = (github_token / 'token').read_text(encoding='utf-8').strip()
+            environment.update({'GH_TOKEN': token, 'GITHUB_TOKEN': token, 'GIT_TERMINAL_PROMPT': '0',
+                'GIT_CONFIG_COUNT': '2', 'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': '',
+                'GIT_CONFIG_KEY_1': 'credential.https://github.com.helper',
+                'GIT_CONFIG_VALUE_1': '!"' + Path(runtime['python']).as_posix() + '" -I "' + (github_token / 'credential.py').as_posix() + '"'})
         return environment
 
     def command(self, request, job_directory):
@@ -207,11 +226,16 @@ class WindowsBackend:
         shell = terminal['shell']; tty = terminal['tty']
         if shell in ('pwsh', 'powershell'):
             path = job_directory / 'command.ps1'
-            prefix = "$global:LASTEXITCODE=0\n[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$OutputEncoding=[Console]::OutputEncoding\n"
-            # Preserve the final native exit status, following the pinned Codex
-            # hook_environment_executor.rs PowerShell status ordering. -File by
-            # itself otherwise reports success for a failed external program.
-            suffix = '\nif ($?) { exit 0 }; if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1\n'
+            prefix = ("$global:LASTEXITCODE=0\n$ErrorActionPreference='Stop'\n"
+                      "$PSNativeCommandUseErrorActionPreference=$true\n"
+                      "trap { $nativeExit=$_.Exception.PSObject.Properties['ExitCode']; "
+                      "Write-Error -ErrorRecord $_ -ErrorAction Continue; "
+                      "if ($null -ne $nativeExit -and $nativeExit.Value -ne 0) { exit $nativeExit.Value }; exit 1 }\n"
+                      "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$OutputEncoding=[Console]::OutputEncoding\n")
+            # PowerShell 7 stops at an unhandled native failure, including a
+            # piped program. A later Write-Host must not turn it into success.
+            # Legacy Windows PowerShell also preserves the last native code.
+            suffix = '\n$zigentStatementSucceeded=$?; if ($LASTEXITCODE) { exit $LASTEXITCODE }; if ($zigentStatementSucceeded) { exit 0 }; exit 1\n'
             path.write_text(prefix + request['command'] + suffix, encoding='utf-8-sig')
             # The supplied program is kept as script bytes, never rewritten as Bash.
             argv = [self.runtime['pwsh'] if shell == 'pwsh' else os.environ['SystemRoot'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe']
@@ -243,7 +267,7 @@ class WindowsBackend:
             call = engine.request('start', {'command': argv, 'cwd': str(directory), 'tty': tty, 'timeoutMs': timeout, 'env': environment})
             engine.command_id = call
             if identifier in self.worker.cancelled: job.stop()
-            result = engine.wait(call, timeout / 1000 + 30)
+            result = engine.wait(call, timeout / 1000 + 30 if timeout is not None else None)
             process.stdin.close()
             process.wait(timeout=20)
             return result
@@ -276,9 +300,7 @@ class WindowsBackend:
         state, code, error = 'failed', None, None
         stopped = False
         monitor_done = threading.Event(); resource_errors = []
-        admitted = self.slots.acquire(blocking=False)
         try:
-            if not admitted: raise RuntimeError('Native execution capacity is busy')
             if identifier in worker.cancelled: state = 'cancelled'; return
             argv, tty = self.command(request, result_directory)
             def monitor():
@@ -306,14 +328,13 @@ class WindowsBackend:
                 with worker.lock:
                     worker.update(identifier, state, code, error)
                     worker.running.pop(identifier, None); worker.terminals.pop(identifier, None); worker.cancelled.discard(identifier)
-                    if not worker.busy(identity['scope'], request['workspaceId']):
+                    if request.get('workspaceMode') != 'shared' and not worker.busy(identity['scope'], request['workspaceId']):
                         try:
                             snapshot(directory, result_directory / 'snapshot.zip', worker.maximum)
                             for row in worker.db.execute("SELECT id FROM jobs WHERE scope=? AND workspace=? AND state NOT IN ('starting','running')", (identity['scope'], request['workspaceId'])).fetchall():
                                 target = worker.job_path(row['id']) / 'snapshot.zip'
                                 if not target.exists() and not (target.parent / 'acknowledged.json').exists(): shutil.copyfile(result_directory / 'snapshot.zip', target)
                         except Exception as failure: worker.update(identifier, state, code, error, str(failure)[:1000])
-            if admitted: self.slots.release()
 
 
 class WindowsPreviews:
@@ -328,11 +349,14 @@ class WindowsPreviews:
         if request.get('expectedRuntimeIdentity') and request['expectedRuntimeIdentity'] != worker.config['runtimeIdentity']: raise RuntimeError('RENDERING_RUNTIME_CHANGED')
         data = base64.b64decode(request['source'], validate=True)
         if len(data) > 128 * 1024 ** 2 or hashlib.sha256(data).hexdigest() != request['sha256']: raise ValueError('Preview source mismatch')
-        if not backend.slots.acquire(blocking=False): raise RuntimeError('Preview queue is busy')
-        key = hashlib.sha256((worker.config['runtimeIdentity'] + '\0' + request['sha256']).encode()).hexdigest()
-        root = worker.root / 'derived-cache' / identity['scope']; root.mkdir(parents=True, exist_ok=True)
-        cache = root / key
+        with worker.lock:
+            if worker.admission_status()['draining']: raise RuntimeError('Execution service is draining for release; try again later')
+            if not backend.preview_slots.acquire(blocking=False): raise RuntimeError('Preview queue is busy')
+            backend.preview_active += 1
         try:
+            key = hashlib.sha256((worker.config['runtimeIdentity'] + '\0' + request['sha256']).encode()).hexdigest()
+            root = worker.root / 'derived-cache' / identity['scope']; root.mkdir(parents=True, exist_ok=True)
+            cache = root / key
             if (cache / 'receipt.json').is_file():
                 receipt = json.loads((cache / 'receipt.json').read_text(encoding="utf-8")); pdf = (cache / 'preview.pdf').read_bytes()
                 if hashlib.sha256(pdf).hexdigest() == receipt['sha256']: return {**receipt, 'pdf': base64.b64encode(pdf).decode()}
@@ -365,4 +389,6 @@ class WindowsPreviews:
                     if not cache.exists(): os.rename(stage, cache)
                 finally: shutil.rmtree(stage, ignore_errors=True)
                 return {**receipt, 'pdf': base64.b64encode(pdf).decode()}
-        finally: backend.slots.release()
+        finally:
+            with worker.lock: backend.preview_active -= 1
+            backend.preview_slots.release()

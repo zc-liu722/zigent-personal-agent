@@ -3,7 +3,7 @@
 type Command = { description: string; identity: "bot" | "user"; guide: string; flags: string[]; booleans?: string[] };
 export const FEISHU_COMMANDS: Readonly<Record<string, Command>> = {
   "docs +search": { description: "搜索可访问的文档", identity: "user", guide: "docs/search", flags: ["query", "page-size", "page-token", "filter"] },
-  "docs +fetch": { description: "按链接、目录、章节或关键词读取文档", identity: "bot", guide: "docs/read", flags: ["doc", "doc-format", "detail", "scope", "start-block-id", "end-block-id", "keyword", "context-before", "context-after", "max-depth", "revision-id"] },
+  "docs +fetch": { description: "按链接、目录、章节或关键词读取文档", identity: "user", guide: "docs/read", flags: ["doc", "doc-format", "detail", "scope", "start-block-id", "end-block-id", "keyword", "context-before", "context-after", "max-depth", "revision-id"] },
   "docs +create": { description: "新建图文文档", identity: "bot", guide: "docs/create", flags: ["title", "content", "doc-format", "parent-token", "parent-position", "reference-map"] },
   "docs +update": { description: "追加内容或局部修改文档", identity: "bot", guide: "docs/update", flags: ["doc", "command", "content", "doc-format", "pattern", "block-id", "revision-id", "reference-map"] },
   "docs +whiteboard-update": { description: "更新文档内的流程图", identity: "bot", guide: "docs/diagram", flags: ["whiteboard-token", "input_format", "source", "idempotent-token"], booleans: ["overwrite"] },

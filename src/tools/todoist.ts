@@ -52,7 +52,8 @@ export function createTodoistTool(config?: TodoistConfig, request = productivity
       }, required: ["action"], additionalProperties: false }
     },
     executionMode: "sequential",
-    activity: productivityActivity("Todoist", { authorize: "连接待办账号", status: "检查待办连接", list_projects: "查看待办项目", list_tasks: "查看待办", get_task: "查看待办详情", create_task: "创建待办", update_task: "修改待办", complete_task: "完成待办", reopen_task: "重新打开待办", delete_task: "删除待办" }),
+    activity: productivityActivity("Todoist", { authorize: "连接待办账号", status: "检查待办连接", list_projects: "查看待办项目", list_tasks: "查看待办", get_task: "查看待办详情", create_task: "创建待办", update_task: "修改待办", complete_task: "完成待办", reopen_task: "重新打开待办", delete_task: "删除待办" },
+      (_action, input, result) => ({ subject: record(result.task).content ?? input.content })),
     async execute(value, context) {
       assertProductivityAccess(config, context, "todoist", record(value).action, verifyProactiveRun);
       const input = inputSchema.parse(value);

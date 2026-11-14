@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-LOCKS = ["package-lock.json", "ops/document-editor/package-lock.json", "ops/file-runtime/package-lock.json"]
+LOCKS = ["package-lock.json", "ops/document-editor/package-lock.json", "ops/file-runtime/package-lock.json", "ops/meeting-media/package-lock.json"]
 PYTHON_LOCK = "ops/file-runtime/requirements.lock"
 CARGO_LOCK = "ops/execution/native/Cargo.lock"
 

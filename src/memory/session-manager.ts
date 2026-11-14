@@ -21,12 +21,20 @@ import type {
 export class SessionManager {
   constructor(private readonly store: SQLiteMemoryStore, private readonly inactivityMs: number) {}
 
+  get conversationStore() { return this.store.conversationStore; }
+
   close(): void {
     this.store.close();
   }
 
   getContextCheckpoints(sessionId: string) { return this.store.getContextCheckpoints(sessionId); }
   saveContextCheckpoints(sessionId: string, entries: SavedContextCheckpoint[]) { return this.store.saveContextCheckpoints(sessionId, entries); }
+  getAcpChatSession(sessionId: string, turnId: number) { return this.store.getAcpChatSession(sessionId, turnId); }
+  consumeAcpChatSession(sessionId: string, turnId: number, previous: import("../models/types.js").AcpChatSession) {
+    return this.store.consumeAcpChatSession(sessionId, turnId, previous);
+  }
+  getCodexChatThread(sessionId: string, turnId: number) { return this.store.getCodexChatThread(sessionId, turnId); }
+  consumeCodexChatThread(sessionId: string, threadId: string, turnId: number) { return this.store.consumeCodexChatThread(sessionId, threadId, turnId); }
 
   async getOrCreateForQuery(
     userId: string,
@@ -44,9 +52,10 @@ export class SessionManager {
     chatId: string,
     messageId: string,
     now = Date.now(),
-    chatType: ConversationKind = "p2p"
+    chatType: ConversationKind = "p2p",
+    resume = false
   ): Promise<UserTurnStart | undefined> {
-    return this.store.prepareUserTurn(userId, chatId, query, messageId, this.inactivityMs, now, chatType);
+    return this.store.prepareUserTurn(userId, chatId, query, messageId, this.inactivityMs, now, chatType, resume);
   }
 
   async lookupBackgroundDelivery(userId: string, chatId: string, deliveryId: string): Promise<BackgroundDelivery | undefined> {

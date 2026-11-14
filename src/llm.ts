@@ -1,26 +1,29 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { currentPerformance } from "./performance/store.js";
 import type { PerformanceStore } from "./performance/store.js";
 import type { ModelDeployment, Provider, WebSearchConfig } from "./config.js";
 import type { ReferenceImage } from "./image-generation.js";
-import { renderMessageForSummary } from "./memory/transcript.js";
-import type { ChatMessage, TokenUsage } from "./memory/types.js";
+import type { TokenUsage } from "./memory/types.js";
 import { missingCapabilities, modelCapabilities, requestedCapabilities, routeSupportsRequest } from "./models/capabilities.js";
-import { CodexAppServerError, CodexWarmPool, invokeCodexAppServerRound } from "./models/codex-app-server.js";
+import { isCodexAppServerError } from "./models/codex-contract.js";
+import { NATIVE_PROCESS_IDLE_MS } from "./models/native-process-pool.js";
 import { invokeClaudeCodeRound } from "./models/claude-code.js";
 import { ModelError, ModelFallbackRequiredError, ModelHardStopError, ModelUnsupportedInputError, ProviderUnavailableError, classifyModelFailure } from "./models/errors.js";
+import type { ModelCatalogSnapshot } from "./models/catalog.js";
 import type { ModelGatewayConfig } from "./models/gateway-config.js";
 import { requestStreamText } from "./models/http-transport.js";
 import { isNetworkFailure } from "./models/network-retry.js";
 import {
   anthropicMessagesEndpoint,
-  buildProtocolRequest,
   responseEndpoint
-} from "./models/protocol-adapters.js";
+} from "./models/endpoints.js";
 import { streamReaderFor } from "./models/stream-reader.js";
 import type { StreamUpdate } from "./models/stream-types.js";
 import { SupplierHealthRegistry, type SupplierFailure } from "./models/supplier-health.js";
 import { executeSupplierWebSearch } from "./models/web-search-service.js";
 import type {
+  NativeModelService, NativeModelWarmRequest, NativeProcessWarmTarget,
+  ModelRoundAdapter,
   ModelRoundRequest,
   ModelRoundResult,
   ModelRoundUpdate,
@@ -34,7 +37,7 @@ import type { RequestRecorder, UsageRecorder } from "./usage/types.js";
 import { ModelContextManager } from "./models/context-manager.js";
 import { compactNative } from "./models/context-native.js";
 import { contextPolicy } from "./models/context-policy.js";
-import { addTokenUsage, SUMMARY_INSTRUCTION, summarizeTranscript } from "./models/context-summary.js";
+import { addTokenUsage, summarizeWithDeepSeekHarness } from "./models/context-summary.js";
 import { ModelContextOverflowError } from "./models/errors.js";
 
 function inferredBrand(name: string): string {
@@ -79,6 +82,10 @@ function configuredModelOrder(config: ModelGatewayConfig): Provider[] {
   return config.modelOrder ?? config.providerOrder;
 }
 
+export function isPrewarmableModel(protocol?: ModelDeployment["protocol"]): boolean {
+  return protocol === "codex-app-server" || protocol === "antigravity-acp" || protocol === "cursor-acp";
+}
+
 function configuredDeployments(config: ModelGatewayConfig): ModelDeployment[] {
   const deployments = config.models ?? configuredModelOrder(config)
     .map((name) => legacyDeployment(config, name))
@@ -110,17 +117,28 @@ async function invokeModelRoundFromDeployment(
   signal?: AbortSignal,
   executeTool?: ModelToolExecutor,
   record?: RequestRecorder,
-  codexWarmPool?: CodexWarmPool
+  codexModel?: ModelRoundAdapter,
+  protocolAdapter?: ModelRoundRequest["protocolAdapter"],
+  cursorModel?: ModelRoundAdapter,
+  antigravityModel?: ModelRoundAdapter
 ): Promise<ModelRoundResult> {
   const wantsUpdates = Boolean(onUpdate);
   const outputStarted = performance.now();
   let firstOutput = false;
   let firstToolArguments = false, firstReasoning = false;
+  const trace = currentPerformance();
+  if (trace && isPrewarmableModel(route.protocol)) request = { ...request, measureNative: (metric, ms, outcome) => {
+    trace.store.record(metric, ms, route.name, outcome, trace.trace);
+  } };
   const publish = onUpdate;
   onUpdate = update => {
     if (!firstOutput && update.type === "assistant_text.delta" && update.text.trim()) {
       firstOutput = true;
       currentPerformance()?.store.record("model.first_output", performance.now() - outputStarted, route.name);
+    }
+    if (!firstReasoning && isPrewarmableModel(route.protocol) && update.type === "thought.delta" && update.text.trim()) {
+      firstReasoning = true;
+      trace?.store.record("model.first_reasoning", performance.now() - outputStarted, route.name);
     }
     publish?.(update);
   };
@@ -131,6 +149,25 @@ async function invokeModelRoundFromDeployment(
     throw new ModelUnsupportedInputError(
       `${route.apiModel} does not support required capabilities: ${missingCapabilities(route, request).join(", ")}`
     );
+  }
+  if (route.protocol === "cursor-acp" || route.protocol === "antigravity-acp") {
+    const antigravity = route.protocol === "antigravity-acp";
+    const label = antigravity ? "Antigravity" : "Cursor";
+    const invoke = antigravity ? request.antigravityModel ?? antigravityModel : request.cursorModel ?? cursorModel;
+    if (!invoke) throw new ModelError(`${label} 模型组件尚未就绪。`, 503);
+    try { return await invoke(config, route, request, onUpdate, signal, record, executeTool); }
+    catch (error) {
+      // Component bundles use their own Error subclasses. Only map the public
+      // failure discriminator, and never expose raw process output.
+      if (error instanceof Error && "acpFailure" in error) {
+        if (error.acpFailure === "unknown") throw new ModelHardStopError("result-unknown", error.message);
+        if (error.acpFailure === "configuration") throw new ModelHardStopError("boundary-violation", error.message);
+        throw new ModelError(error.message, error.acpFailure === "authentication" ? 401
+          : error.acpFailure === "model" ? 422 : 503);
+      }
+      if (signal?.aborted) signal.throwIfAborted();
+      throw new ModelError(`${label} CLI 无法启动，请检查服务端安装。`, 503);
+    }
   }
   const preparingVisuals = new Set<string>();
   const observe = (update: StreamUpdate): void => {
@@ -178,10 +215,15 @@ async function invokeModelRoundFromDeployment(
   };
 
   if (route.protocol === "codex-app-server") {
-    try {
-      return await invokeCodexAppServerRound(config, route, request, onUpdate, signal, executeTool, record, undefined, codexWarmPool);
-    } catch (error) {
-      if (!(error instanceof CodexAppServerError)) throw error;
+    const invoke = request.codexModel ?? codexModel;
+    if (!invoke) throw new ModelError("Codex 模型组件尚未就绪。", 503);
+    try { return await invoke(config, route, request, onUpdate, signal, record, executeTool); }
+    catch (error) {
+      if (error instanceof Error && error.name === "ModelContextOverflowError") {
+        throw new ModelContextOverflowError();
+      }
+      if (!isCodexAppServerError(error)) throw error;
+      if (error.kind === "result-unknown") throw new ModelHardStopError("result-unknown", error.message);
       if (error.kind === "unavailable" || error.kind === "rate-limit" || error.kind === "invalid-response") {
         throw new ProviderUnavailableError(error.message, error.status);
       }
@@ -189,7 +231,9 @@ async function invokeModelRoundFromDeployment(
     }
   }
 
-  const transport = buildProtocolRequest(route, request, wantsUpdates);
+  const buildRequest = request.protocolAdapter ?? protocolAdapter;
+  if (!buildRequest) throw new ModelError("HTTP model component is not ready");
+  const transport = buildRequest(route, request, wantsUpdates);
   const result = await requestStreamText(
     config,
     transport.url,
@@ -227,14 +271,6 @@ export type ModelInvocation<T> = {
   route: ModelRouteMetadata;
 };
 
-export type GeneratedSessionSummary = {
-  text: string;
-  usage: TokenUsage;
-  provider: Provider;
-  model: string;
-  route: ModelRouteMetadata;
-};
-
 export type WebSearchExecutionResult = {
   result: {
     query: string;
@@ -242,6 +278,8 @@ export type WebSearchExecutionResult = {
     sources: readonly { type: "url"; url: string; title?: string }[];
     searchModel?: Provider;
     searchSupplier?: string;
+    images?: readonly import("./models/search-images.js").SearchImage[];
+    imageRetrieval?: string;
   };
   usage?: TokenUsage;
   webSearchCalls: readonly ModelWebSearchCall[];
@@ -277,38 +315,121 @@ function uniqueSearchSources(
 
 export class ModelGateway {
   private readonly contextManager: ModelContextManager;
-  private readonly codexWarmPool = new CodexWarmPool();
-  private codexWarmupEnabled = false;
+  private warmTimer?: ReturnType<typeof setInterval>;
+  private selectedWarmRoute?: { provider: Provider; expiresAt: number };
+  private readonly installedWarmTargets = new Map<NativeModelService, readonly NativeProcessWarmTarget[]>();
+  nativeModelService?: (protocol: ModelDeployment["protocol"]) => NativeModelService | undefined;
+  codexModel?: ModelRoundAdapter;
   performance?: PerformanceStore;
-  private readonly deployments: ModelDeployment[];
-  private readonly modelOrder: Provider[];
+  protocolAdapter?: ModelRoundRequest["protocolAdapter"];
+  cursorModel?: ModelRoundAdapter;
+  antigravityModel?: ModelRoundAdapter;
+  private readonly bootstrapDeployments: ModelDeployment[];
+  private readonly catalogScope = new AsyncLocalStorage<ModelCatalogSnapshot>();
+  private catalogSource?: () => ModelCatalogSnapshot;
+
+  connectCatalog(source: () => ModelCatalogSnapshot): void {
+    this.catalogSource = source;
+  }
+
+  get catalog(): ModelCatalogSnapshot | undefined {
+    return this.catalogScope.getStore() ?? this.catalogSource?.();
+  }
+
+  withCatalog<T>(snapshot: ModelCatalogSnapshot, work: () => T): T {
+    return this.catalogScope.run(snapshot, work);
+  }
+
+  private get deployments(): ModelDeployment[] {
+    return this.catalog?.models ?? this.bootstrapDeployments;
+  }
+
+  private get modelOrder(): Provider[] {
+    return this.catalog?.providerOrder ?? configuredModelOrder(this.config);
+  }
 
   constructor(
     private readonly config: ModelGatewayConfig,
     private readonly supplierHealth = new SupplierHealthRegistry(),
     private readonly recordUsage?: UsageRecorder
   ) {
-    this.deployments = configuredDeployments(config);
+    this.bootstrapDeployments = configuredDeployments(config);
     if (new Set(this.deployments.map((route) => route.name)).size !== this.deployments.length) {
       throw new ModelError(`Agent ${config.id} has duplicate canonical model identities`);
     }
-    this.modelOrder = configuredModelOrder(config);
     this.contextManager = new ModelContextManager(config,
-      (route, transcript, previous, signal, reasoningEfforts, policy) => this.generateContextSummary(route, transcript, previous, signal, reasoningEfforts, policy),
-      (route, request, signal) => compactNative(config, route, request, contextPolicy(route, config).summary, signal, this.meter(route)));
+      (route, request, policy, scale, signal) => summarizeWithDeepSeekHarness(request, policy, scale, (input) =>
+        invokeModelRoundFromDeployment(this.config, route, input, undefined, signal, undefined,
+          this.meter(route), this.codexModel, request.protocolAdapter ?? this.protocolAdapter,
+          request.cursorModel ?? this.cursorModel, request.antigravityModel ?? this.antigravityModel), signal),
+      (route, request, signal) => compactNative(config, route, request, contextPolicy(route, config).summary, signal, this.meter(route), this.protocolAdapter));
     this.warmContextPolicy(this.defaultProvider);
   }
 
-  /** Start optional catalogue discovery early; actual requests still await the same validated policy. */
+  /** Browser activity renews only the most recently selected non-default route. */
   warmContextPolicy(provider: Provider): void {
     const selected = this.deployments.find(candidate => candidate.name === provider);
-    if (this.codexWarmupEnabled && selected?.protocol === "codex-app-server") this.codexWarmPool.warm(this.config, selected);
-    const route = this.deployments.find(candidate => candidate.name === provider && candidate.context?.discoveryUrl);
-    if (route) void this.contextManager.policy(route).catch(() => undefined);
+    if (!selected) return;
+    this.selectedWarmRoute = { provider, expiresAt: Date.now() + NATIVE_PROCESS_IDLE_MS };
+    this.refreshNativeTargets();
+    if (selected.context?.discoveryUrl) void this.contextManager.policy(selected).catch(() => undefined);
   }
 
-  enableCodexWarmup(): void { this.codexWarmupEnabled = true; this.warmContextPolicy(this.defaultProvider); }
-  async close(): Promise<void> { this.codexWarmupEnabled = false; await this.codexWarmPool.close(); }
+  private refreshNativeTargets(): void {
+    if (!this.warmTimer) return;
+    // Background warming always follows the live catalogue. An old leased turn
+    // may request work using its snapshot but must not promote its idle targets.
+    const catalog = this.catalogSource?.();
+    const deployments = catalog?.models ?? this.bootstrapDeployments;
+    const order = catalog?.providerOrder ?? configuredModelOrder(this.config);
+    const defaultProvider = this.preferredDefault && order.includes(this.preferredDefault) ? this.preferredDefault : order[0];
+    const targets = new Map<NativeModelService, NativeProcessWarmTarget[]>();
+    const add = (provider: Provider | undefined, expiresAt?: number) => {
+      if (!provider || !order.includes(provider)) return;
+      const route = deployments.find(candidate => candidate.name === provider);
+      const service = route && this.nativeModelService?.(route.protocol);
+      if (!route || !service?.keepWarm) return;
+      const list = targets.get(service) ?? [];
+      list.push({ route, expiresAt });
+      targets.set(service, list);
+    };
+    add(defaultProvider);
+    if (this.selectedWarmRoute && this.selectedWarmRoute.expiresAt > Date.now() && this.selectedWarmRoute.provider !== defaultProvider) {
+      add(this.selectedWarmRoute.provider, this.selectedWarmRoute.expiresAt);
+    }
+    for (const service of this.installedWarmTargets.keys()) if (!targets.has(service)) {
+      service.keepWarm?.(this.config, []);
+      this.installedWarmTargets.delete(service);
+    }
+    for (const [service, selected] of targets) {
+      const previous = this.installedWarmTargets.get(service);
+      if (selected.length === previous?.length
+        && selected.every((entry, index) => entry.route === previous[index]?.route && entry.expiresAt === previous[index]?.expiresAt)) continue;
+      service.keepWarm?.(this.config, selected);
+      this.installedWarmTargets.set(service, selected);
+    }
+  }
+
+  startNativeWarmup(): void {
+    this.warmTimer = setInterval(() => this.refreshNativeTargets(), 1000);
+    this.warmTimer.unref();
+    this.refreshNativeTargets();
+  }
+
+  async warmConversation(provider: Provider, request: NativeModelWarmRequest, signal: AbortSignal): Promise<void> {
+    if (!this.warmTimer || signal.aborted) return;
+    const route = (this.catalogSource?.()?.models ?? this.bootstrapDeployments).find(candidate => candidate.name === provider);
+    const service = route && this.nativeModelService?.(route.protocol);
+    if (!route || !service?.prepare) return;
+    await service.prepare(this.config, route, request, signal);
+  }
+
+  async close(): Promise<void> {
+    clearInterval(this.warmTimer);
+    this.warmTimer = undefined;
+    for (const service of this.installedWarmTargets.keys()) service.keepWarm?.(this.config, []);
+    this.installedWarmTargets.clear();
+  }
 
   async contextPolicy(provider: Provider = this.defaultProvider, signal?: AbortSignal) {
     const route = this.deployments.find(route => route.name === provider);
@@ -324,54 +445,31 @@ export class ModelGateway {
       sources: route.context?.sources ?? [], checkedAt: route.context?.checkedAt };
   }
 
-  private async generateContextSummary(route: ModelDeployment, transcript: string, previous?: string,
-    signal?: AbortSignal, reasoningEfforts?: ModelRoundRequest["reasoningEfforts"], preparedPolicy?: Awaited<ReturnType<ModelContextManager["policy"]>>
-  ): Promise<{ text: string; usage: TokenUsage }> {
-    const policy = preparedPolicy ?? await this.contextManager.policy(route, signal);
-    const outputReserve = Math.min(policy.output, policy.summary * 4);
-    return summarizeTranscript(transcript, previous, policy.inputLimit, policy.summary, (text, maxOutputTokens) =>
-      invokeModelRoundFromDeployment(this.config, route, { systemPrompt: `${SUMMARY_INSTRUCTION} Keep the checkpoint below ${policy.summary} tokens.`,
-        messages: [{ role: "user", text }], tools: [], toolChoice: "none", maxOutputTokens, reasoningEfforts },
-      undefined, signal, undefined, this.meter(route)), signal, outputReserve);
-  }
-
   private meter(route: ModelDeployment): RequestRecorder | undefined {
     return this.recordUsage ? meter => this.recordUsage!({ ...meter, model: route.name,
       supplier: route.supplier, apiModel: route.apiModel, cost: route.cost, kind: "text" }) : undefined;
   }
 
   private preferredDefault?: Provider;
-  setDefaultProvider(model: Provider): void {
-    if (!this.modelOrder.includes(model)) throw new Error("Unknown default model");
+  setDefaultProvider(model: Provider, restoring = false): void {
+    if (!restoring && !this.modelOrder.includes(model)) throw new Error("Unknown default model");
     this.preferredDefault = model;
-    this.warmContextPolicy(model);
+    this.refreshNativeTargets();
   }
   get defaultProvider(): Provider {
-    return this.preferredDefault ?? this.modelOrder[0]!;
+    const order = this.modelOrder;
+    return this.preferredDefault && order.includes(this.preferredDefault) ? this.preferredDefault : order[0]!;
   }
 
-  resetCircuit(provider?: Provider): void {
+  get availableModels(): readonly Provider[] {
+    return this.modelOrder.filter(provider => this.isProviderConfigured(provider));
+  }
+
+  resetCircuit(provider?: Provider, catalog?: Pick<ModelCatalogSnapshot, "models">): void {
     if (!provider) this.supplierHealth.reset();
-    else for (const route of this.deployments.filter(route => route.name === provider)) this.supplierHealth.reset(route.supplier);
-  }
-
-  async generateSessionSummary(
-    input: { previousSummary?: string; messages: ChatMessage[] },
-    provider: Provider = this.defaultProvider,
-    options: { automaticFallback?: boolean; signal?: AbortSignal; reasoningEfforts?: ModelRoundRequest["reasoningEfforts"] } = {}
-  ): Promise<GeneratedSessionSummary> {
-    const result = await this.invokeModel(
-      (route) => this.generateContextSummary(route, input.messages.map(renderMessageForSummary).join("\n\n"), input.previousSummary, options.signal, options.reasoningEfforts),
-      provider,
-      options
-    );
-    return {
-      text: result.value.text,
-      usage: result.value.usage,
-      provider: result.provider,
-      model: result.route.apiModel,
-      route: result.route
-    };
+    else for (const route of (catalog?.models ?? this.deployments).filter(route => route.name === provider)) {
+      this.supplierHealth.reset(route.supplier);
+    }
   }
 
   modelId(provider: Provider): string {
@@ -385,6 +483,9 @@ export class ModelGateway {
     input: unknown,
     signal?: AbortSignal
   ): Promise<WebSearchExecutionResult> {
+    const catalog = this.catalog;
+    if (catalog && !this.catalogScope.getStore())
+      return this.withCatalog(catalog, () => this.executeWebSearch(sourceProvider, input, signal));
     const sourceRoute = this.deployments.find(route => route.name === sourceProvider);
     if (sourceRoute?.capabilities?.serviceTools?.includes("web_search")) {
       const query = input && typeof input === "object" && !Array.isArray(input)
@@ -424,7 +525,8 @@ export class ModelGateway {
         "You are a web-search retrieval worker for another model.",
         "Use the native web_search tool for the supplied query.",
         "When the supplied query contains one or more URLs, use each exact URL as a direct retrieval target together with the surrounding information need and keywords; when it contains no URL, search by the supplied keywords.",
-        "Return a compact factual digest with direct source citations; do not discuss the delegation mechanism."
+        "Return a compact factual digest with direct source citations; do not discuss the delegation mechanism.",
+        "When the request needs figures/images, include actual original image URLs and their source-page URLs if the search interface supplies them. Never invent URLs or claim that page URLs are image files. Source pages can be inspected by the caller with image_assets webpage."
       ].join(" "),
       messages: [{ role: "user", text: query.trim() }],
       tools: [webSearchToolFromConfig(settings)],
@@ -452,7 +554,8 @@ export class ModelGateway {
         query: query.trim(),
         answer: invocation.value.text,
         sources,
-        searchModel: invocation.provider
+        searchModel: invocation.provider,
+        imageRetrieval:"For images use actual structured image URLs when present; otherwise call image_assets webpage on cited source pages, then present selected images under their corresponding paragraphs."
       },
       usage: invocation.value.usage,
       webSearchCalls: calls,
@@ -470,6 +573,9 @@ export class ModelGateway {
       executeTool?: ModelToolExecutor;
     } = {}
   ): Promise<ModelInvocation<ModelRoundResult>> {
+    const catalog = this.catalog;
+    if (catalog && !this.catalogScope.getStore())
+      return this.withCatalog(catalog, () => this.invokeRound(provider, request, options));
     if (!this.isProviderConfigured(provider)) {
       throw new ModelError(`${provider} is not configured for agent ${this.config.id}`);
     }
@@ -477,8 +583,7 @@ export class ModelGateway {
     if (this.deployments.some(route => route.name === provider && route.protocol === "claude-code" && !acceptsRoute(route))) {
       throw new ModelHardStopError("boundary-violation", "Claude 当前接入不支持此任务所需能力");
     }
-    const providerIndex = this.modelOrder.indexOf(provider);
-    const eligibleProviders = providerIndex >= 0 ? this.modelOrder.slice(providerIndex) : [];
+    const eligibleProviders = [provider, ...this.configuredFallbackOrder(provider)];
     const required = requestedCapabilities(request);
     if (!this.deployments.some((route) =>
       eligibleProviders.includes(route.name) && acceptsRoute(route)
@@ -499,7 +604,7 @@ export class ModelGateway {
         let result: ModelRoundResult;
         try {
           result = await invokeModelRoundFromDeployment(this.config, route, prepared.request,
-            options.onUpdate, options.signal, options.executeTool, this.meter(route), this.codexWarmupEnabled ? this.codexWarmPool : undefined);
+            options.onUpdate, options.signal, options.executeTool, this.meter(route), this.codexModel, this.protocolAdapter, this.cursorModel, this.antigravityModel);
         } catch (error) {
           const nativeReplayRejected = Boolean(prepared.request.nativeContext && error instanceof ModelError
             && [400, 409, 422].includes(error.status ?? 0));
@@ -511,7 +616,7 @@ export class ModelGateway {
           });
           compactionUsage = addTokenUsage(compactionUsage, prepared.usage);
           result = await invokeModelRoundFromDeployment(this.config, route, prepared.request,
-            options.onUpdate, options.signal, options.executeTool, this.meter(route), this.codexWarmupEnabled ? this.codexWarmPool : undefined);
+            options.onUpdate, options.signal, options.executeTool, this.meter(route), this.codexModel, this.protocolAdapter, this.cursorModel, this.antigravityModel);
         }
         this.contextManager.observe(route, prepared, result);
         return { ...result, usage: addTokenUsage(result.usage, compactionUsage) };
@@ -530,7 +635,11 @@ export class ModelGateway {
 
   private configuredFallbackOrder(provider: Provider): Provider[] {
     const index = this.modelOrder.indexOf(provider);
-    return index >= 0 ? this.modelOrder.slice(index + 1) : [];
+    if (index < 0) return [];
+    // ACP subscription quotas are only used when that supplier was selected.
+    const protocol = this.deployments.find(route => route.name === provider)?.protocol;
+    return this.modelOrder.slice(index + 1).filter(name => !this.deployments.some(route => route.name === name
+      && (route.protocol === "cursor-acp" || route.protocol === "antigravity-acp") && route.protocol !== protocol));
   }
 
   private async invokeModel<T>(

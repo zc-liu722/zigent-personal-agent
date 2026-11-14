@@ -11,6 +11,8 @@ import type { UserQuestionAction, UserQuestionNotice } from "./user-questions.js
 import type { SupplierFailure } from "../models/supplier-health.js";
 
 export type InboundMessage = {
+  /** Trusted durable queue recovery, never a model argument. */
+  resume?: boolean;
   messageId: string;
   conversationId: string;
   userId: string;
@@ -51,7 +53,7 @@ export interface CommunicationAdapter {
   sendUserQuestion?(notice: UserQuestionNotice): Promise<{ messageId: string }>;
   sendOperationConfirmation?(notice: OperationNotice): Promise<{ messageId: string }>;
   /** Independent durable job notices; idempotencyKey must be reused on retry. */
-  sendBackgroundResult?(notice: { agentId?: string; userId?: string; conversationKind?: "p2p" | "group"; conversationId: string; idempotencyKey: string; title: string; text: string; replyDurationMs?: number; scheduleReminder?: import("./change-preview.js").CalendarPreviewState; snapshot?: import("../agent/transcript.js").AgentRunSnapshot; session?: Session }): Promise<{ messageId: string }>;
+  sendBackgroundResult?(notice: { agentId?: string; userId?: string; conversationKind?: "p2p" | "group"; conversationId: string; idempotencyKey: string; title: string; text: string; replyDurationMs?: number; attachments?: import("./attachments.js").MessageAttachment[]; scheduleReminder?: import("./change-preview.js").CalendarPreviewState; snapshot?: import("../agent/transcript.js").AgentRunSnapshot; session?: Session }): Promise<{ messageId: string }>;
   createRunChannel(conversationId: string): AgentRunChannel;
   sendSessionEnded(session: SessionMetadata, agentName: string, inactivityMinutes: number): Promise<void>;
   sendModelFallback(notice: ModelFallbackNotice): Promise<void>;

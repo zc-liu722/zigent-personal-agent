@@ -7,7 +7,9 @@ export function proxyWebUpgrade(req: IncomingMessage, socket: Duplex, head: Buff
   const url = new URL(req.url ?? "/", "http://localhost");
   const speech = url.pathname === speechPath && !url.search;
   const browser = url.pathname === speechPath.replace(/api\/speech$/, "api/browser/stream");
-  if (!speech && !browser || req.method !== "GET") { socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"); return; }
+  const meeting = url.pathname === speechPath.replace(/api\/speech$/, "api/meeting/stream");
+  const rtcSignal = url.pathname.startsWith(speechPath.replace(/api\/speech$/, "api/meeting/rtc/"));
+  if (!speech && !browser && !meeting && !rtcSignal || req.method !== "GET") { socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"); return; }
   req.socket.setNoDelay(true);
   const headers = { ...req.headers }; delete headers.authorization; delete headers["proxy-authorization"];
   const request = httpRequest({ hostname: "127.0.0.1", port, method: "GET", path: req.url, headers });
@@ -32,7 +34,8 @@ export function proxyWebUpgrade(req: IncomingMessage, socket: Duplex, head: Buff
 export function proxyWebRequest(req: IncomingMessage, res: ServerResponse, port: number): void {
   const headers = { ...req.headers };
   // Only device-event endpoints (including the old URL) accept the independent source credential.
-  if (!/^\/[a-z][a-z0-9-]{0,63}\/api\/(external-events|task-events)$/.test(new URL(req.url ?? "/", "http://localhost").pathname)) delete headers.authorization;
+  if (!/^\/[a-z][a-z0-9-]{0,63}\/api\/(external-events|task-events)$/.test(new URL(req.url ?? "/", "http://localhost").pathname)
+    && !/^\/[a-z][a-z0-9-]{0,63}\/api\/meeting\/rtc\//.test(new URL(req.url ?? "/", "http://localhost").pathname)) delete headers.authorization;
   delete headers["proxy-authorization"];
   delete headers.connection;
   const upstream = httpRequest({ hostname: "127.0.0.1", port, method: req.method, path: req.url, headers }, reply => {

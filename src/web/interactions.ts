@@ -1,5 +1,6 @@
 import type { CodexEdits } from "../codex/confirmation.js";
 import { safeFeishuAuthorizationUrl } from "../productivity/feishu-user-authorization.js";
+import type { FeishuAuthorizationPrompt } from "../productivity/feishu-authorization-protocol.js";
 import type { MemoryChangePreview } from "../memory/changes.js";
 import type { ConversationOutput } from "../channels/output.js";
 import type { AgentConfig } from "../config.js";
@@ -14,6 +15,7 @@ import type { DiagramNode } from "../tasks/trigger-diagram.js";
 
 export const AUTHORIZATION_SERVICES = {
   google_calendar: { label: "Google Calendar", description: "连接后可以查看日程、安排和修改日历事件。" },
+  gmail: { label: "Gmail", description: "连接邮箱" },
   google_drive: { label: "Google Drive", description: "连接后可以查找、读取、新建和编辑云盘文件。" },
   todoist: { label: "Todoist", description: "连接后可以查看、创建和修改待办事项。" },
   notion: { label: "Notion", description: "连接后可以使用你授权的笔记和工作区。" },
@@ -22,18 +24,20 @@ export const AUTHORIZATION_SERVICES = {
 } as const;
 export type WebAuthorizationService = keyof typeof AUTHORIZATION_SERVICES;
 export function authorizationSetupRequiredText(service: WebAuthorizationService): string {
-  return service === "google_calendar" || service === "google_drive"
+  return service === "google_calendar" || service === "google_drive" || service === "gmail"
     ? "Google 的应用连接尚未配置，请管理员完成一次性设置后重试。刚才的操作尚未执行。"
     : "此服务的授权入口尚未配置，请先完成服务端设置后重试。刚才的操作尚未执行。";
 }
 export type WebInteractionStatus = "pending" | "completed" | "failed" | "expired" | "cancelled";
 export type WebInteractionValue =
+  | { type: "meeting"; id: string; action: "join" | "end" | "accept" }
+  | { type: "deployment-retry"; watchId: string }
   | { type: "file-delivery-retry"; deliveryId: string }
   | { type: "audio-transcription"; messageId: string }
   | { type: "browser-control"; browserId: string; revision: number; action: "view" | "resume" | "pause" | "stop" | "confirm_submission" | "cancel_submission"; pendingId?: string }
   | { type: "codex-task"; taskId: string; revision: number; action: "interrupt" }
   | { type: "question-answer"; requestId: string; cancel?: boolean }
-  | { type: "authorization-retry"; service: WebAuthorizationService }
+  | { type: "authorization-retry"; service: WebAuthorizationService; switchAccount?: boolean }
   | { type: "model-fallback"; requestId: string; confirm: boolean; model?: string; retry?: boolean }
   | { type: "model-picker"; requestId: string }
   | { type: "task-proposal"; proposalId: string; confirm: boolean }
@@ -47,9 +51,10 @@ export type WebInteractionAction =
 /** A transport-only UI contract. Never include credentials or expose arbitrary tool execution. */
 export type WebInteraction = {
   id: string;
-  kind: "schedule-reminder" | "browser" | "authorization" | "actions" | "output" | "task-proposal" | "memory-proposal" | "operation-confirmation" | "user-question";
+  kind: "meeting" | "schedule-reminder" | "browser" | "authorization" | "actions" | "output" | "task-proposal" | "memory-proposal" | "operation-confirmation" | "user-question";
   /** Durable position of a question within its originating assistant turn. */
   placement?: { messageId: string; activityId: string };
+  meeting?: import("../meetings/types.js").MeetingView;
   questions?: UserQuestion[];
   questionPurpose?: "workspace";
   answers?: UserQuestionAnswers;
@@ -66,6 +71,8 @@ export type WebInteraction = {
   operationView?: OperationNotice["view"];
   browserSession?: { id: string };
   codexTask?: { id: string; project: string; directory?: string };
+  deployment?: { stage: "queued" | "building" | "promoting" | "finalizing" | "verifying" | "completed";
+    mode?: "host" | "components" | "unchanged" };
   /** Server-recorded user saves only; generated blocks do not enter the reference context. */
   documentEdits?: Record<string, number>;
   title: string;
@@ -156,7 +163,7 @@ export function safeWebAuthorizationUrl(service: WebAuthorizationService, value:
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" || url.username || url.password) return false;
-    if (service === "google_calendar" || service === "google_drive") return url.hostname === "accounts.google.com";
+    if (service === "google_calendar" || service === "google_drive" || service === "gmail") return url.hostname === "accounts.google.com";
     if (service === "todoist") return url.hostname === "todoist.com";
     if (service === "feishu") return safeFeishuAuthorizationUrl(value);
     return true; // Notion and XMind return their OAuth endpoint through the configured MCP server.
@@ -164,20 +171,34 @@ export function safeWebAuthorizationUrl(service: WebAuthorizationService, value:
 }
 
 export function authorizationInteraction(id: string, service: WebAuthorizationService, status: WebInteractionStatus,
-  prompt?: { authorizationUrl: string; expiresAt: number }, statusMessage?: string): WebInteraction {
+  prompt?: FeishuAuthorizationPrompt, statusMessage?: string,
+  { revision, busy, choosing, choiceExpiresAt, retryRead }: {
+    revision?: string; busy?: boolean; choosing?: boolean; choiceExpiresAt?: number; retryRead?: boolean;
+  } = {}): WebInteraction {
   const details = AUTHORIZATION_SERVICES[service];
   if (prompt && (!safeWebAuthorizationUrl(service, prompt.authorizationUrl) || !Number.isFinite(prompt.expiresAt))) throw new Error("Invalid authorization prompt");
+  const expiresAt = prompt?.expiresAt ?? choiceExpiresAt;
+  const actionId = (action: string) => service === "feishu" && revision ? `${action}:${revision}:${status}` : action;
+  const selecting = service === "feishu" && choosing && status === "pending";
   return {
-    id, kind: "authorization", title: `连接 ${details.label}`, service, status,
-    ...(status === "pending" && prompt ? { description: details.description } : {}),
-    ...(prompt && status === "pending" ? { expiresAt: prompt.expiresAt } : {}),
+    id, kind: "authorization", title: service === "feishu" && prompt?.stage ? prompt.stage === "application" ? "连接飞书应用" : "授权飞书文档" : `连接 ${details.label}`, service, status,
+    ...(status === "pending" && prompt ? { description: prompt.message ?? details.description } : {}),
+    ...(expiresAt !== undefined && status === "pending" ? { expiresAt } : {}),
     statusMessage: statusMessage ?? (status === "completed" ? `${details.label} 已连接。`
       : status === "failed" ? "授权未完成，刚才的操作未执行。"
       : status === "expired" ? "授权已过期，刚才的操作未执行。"
-      : prompt ? "" : "正在准备授权链接…"),
-    actions: status === "completed" || status === "cancelled" ? [] : [
-      ...(status === "pending" && prompt ? [{ id: "open", label: "前往授权", kind: "link" as const, url: prompt.authorizationUrl }] : []),
-      { id: "retry", label: "重新连接", kind: "submit", value: { type: "authorization-retry", service } }
+      : selecting && !prompt ? "正在准备账号选择…" : selecting && prompt?.stage === "application" ? "等待选择飞书账号。"
+      : service === "feishu" && prompt?.stage === "user" ? "等待飞书文档授权。"
+      : service === "feishu" && prompt ? "等待连接飞书应用。" : prompt ? "" : "正在准备授权链接…"),
+    actions: busy || status === "cancelled" || status === "completed" && service !== "feishu" ? [] : [
+      ...(status === "pending" && prompt ? [{ id: "open", label: selecting && prompt.stage === "application" ? "选择飞书账号" : prompt.actionLabel ?? "前往授权", kind: "link" as const, url: prompt.authorizationUrl }] : []),
+      ...(service !== "feishu" || status !== "pending" || choiceExpiresAt || prompt ? [
+        { id: actionId("retry"), label: status === "completed" ? "检查连接" : status === "pending" && retryRead ? "重试读取"
+          : service === "feishu" && status === "pending" && prompt ? "检查授权" : "重新连接",
+          kind: "submit" as const, value: { type: "authorization-retry" as const, service, switchAccount: false } }
+      ] : []),
+      ...(service === "feishu" && !selecting ? [{ id: actionId("switch"), label: "切换账号", kind: "submit" as const,
+        value: { type: "authorization-retry" as const, service, switchAccount: true } }] : [])
     ]
   };
 }

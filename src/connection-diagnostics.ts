@@ -4,6 +4,7 @@ import { ProductivityAuthorizationRequiredError, readGrant } from "./productivit
 import type { GoogleOAuthConfig } from "./productivity/config.js";
 import { GoogleOAuthClient } from "./productivity/google-auth.js";
 import { GOOGLE_CALENDAR_SCOPES } from "./productivity/google-calendar.js";
+import { GMAIL_SCOPES } from "./productivity/gmail.js";
 import { GOOGLE_DRIVE_SCOPES } from "./productivity/google-drive.js";
 import { networkFailure, productivityFetch, record, requestResponse, ProductivityRequestError } from "./productivity/http.js";
 
@@ -38,15 +39,16 @@ export async function diagnoseZenmux(config: Pick<AgentConfig, "zenmuxProxyUrl" 
 }
 
 class GoogleConnectionProbe extends GoogleOAuthClient {
-  async verify(integration: "google_calendar" | "google_drive") {
+  async verify(integration: "google_calendar" | "google_drive" | "gmail") {
     const signal = AbortSignal.timeout(30_000);
     if (!await this.configured()) return { ready: false, status: "authorization_required" };
     const grant = await readGrant(this.config);
-    const scopes = integration === "google_calendar" ? GOOGLE_CALENDAR_SCOPES : GOOGLE_DRIVE_SCOPES;
+    const scopes = integration === "google_calendar" ? GOOGLE_CALENDAR_SCOPES : integration === "gmail" ? GMAIL_SCOPES : GOOGLE_DRIVE_SCOPES;
     if (grant?.scopes && !scopes.every(scope => grant.scopes!.includes(scope))) return { ready: false, status: "scope_upgrade_required" };
     const token = await this.accessToken(signal);
     const response = await requestResponse(this.request, this.service, integration === "google_calendar"
       ? "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=1&fields=items(id)"
+      : integration === "gmail" ? "https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress"
       : "https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id)", {
       method: "GET", signal, headers: { Authorization: `Bearer ${token}` }
     });
@@ -57,8 +59,8 @@ class GoogleConnectionProbe extends GoogleOAuthClient {
 
 /** Explicit account verification only: refresh an existing grant and discard one minimal read.
  * Never starts authorization, writes a grant, replays an operation or emits account data. */
-export async function verifyGoogleConnection(integration: "google_calendar" | "google_drive", config: GoogleOAuthConfig, request = productivityFetch(config.proxyUrl)) {
-  try { return { integration, ...await new GoogleConnectionProbe(config, request, integration === "google_calendar" ? "Google Calendar" : "Google Drive").verify(integration) }; }
+export async function verifyGoogleConnection(integration: "google_calendar" | "google_drive" | "gmail", config: GoogleOAuthConfig, request = productivityFetch(config.proxyUrl)) {
+  try { return { integration, ...await new GoogleConnectionProbe(config, request, integration === "google_calendar" ? "Google Calendar" : integration === "gmail" ? "Google Gmail" : "Google Drive").verify(integration) }; }
   catch (error) {
     return { integration, ready: false, status: error instanceof ProductivityAuthorizationRequiredError ? "authorization_required" : "verification_failed",
       ...(error instanceof ProductivityRequestError ? { httpStatus: error.status, failure: error.failure } : {}) };

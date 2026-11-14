@@ -34,17 +34,43 @@ export class ReusableTriggerReads {
       .get(id, scope.agentId, scope.userId, scope.principalId ?? "") as Row | undefined;
     return row && this.decode(row);
   }
-  evaluation(): TriggerEvaluationReads { return new TriggerEvaluationReads(this.db, this.agentId, this.tasks); }
+  evaluation(): TriggerEvaluationReads { return new TriggerEvaluationReads(this.db, this.agentId, this.tasks, () => this.active()); }
 }
 
 /** One synchronous evaluation only. Enqueue changes runs, not these facts or subscriptions.
- * Never retain this across polls, events, awaits, or the execution/delivery freshness checks.
+ * A location receipt shares this view across its scope discovery, shared rules and direct tasks
+ * inside the existing write transaction. Never retain it across receipts, polls, awaits,
+ * or the execution/delivery freshness checks.
  * Trigger state and occurrence deduplication remain live transactional reads in the writer. */
 export class TriggerEvaluationReads {
   private tasksByScope?: Map<string, ActiveTask[]>;
   private readonly subscribersByTrigger = new Map<string, ActiveTask[]>();
   private readonly factsByScope = new Map<string, TriggerFacts>();
-  constructor(private readonly db: DatabaseSync, private readonly agentId: string, private readonly tasks: () => ActiveTask[]) {}
+  private taskRows?: ActiveTask[];
+  private activeRecords?: RuntimeTrigger[];
+  private recordsByScope?: Map<string, RuntimeTrigger[]>;
+  constructor(private readonly db: DatabaseSync, private readonly agentId: string, private readonly loadTasks: () => ActiveTask[],
+    private readonly loadActive: () => RuntimeTrigger[]) {}
+  tasks(): readonly ActiveTask[] { return this.taskRows ??= this.loadTasks(); }
+  active(): readonly RuntimeTrigger[] { return this.activeRecords ??= this.loadActive(); }
+  inScope(scope: Scope): readonly RuntimeTrigger[] {
+    if (!this.recordsByScope) {
+      this.recordsByScope = new Map();
+      for (const record of this.active()) {
+        const key = scopeKey(record), group = this.recordsByScope.get(key) ?? [];
+        group.push(record); this.recordsByScope.set(key, group);
+      }
+    }
+    return this.recordsByScope.get(scopeKey(scope)) ?? [];
+  }
+  locationScopes(): Scope[] {
+    const scopes = new Map<string, Scope>();
+    for (const record of this.active()) if (record.spec?.source.type === "location") {
+      const key = scopeKey(record);
+      if (!scopes.has(key)) scopes.set(key, { userId: record.userId, principalId: record.principalId });
+    }
+    return [...scopes.values()];
+  }
   private indexTasks(): void {
     if (this.tasksByScope) return;
     this.tasksByScope = new Map();

@@ -1,110 +1,107 @@
-import { SQLiteSkillService, skillSectionsSchema, skillTarget } from "../skills/service.js";
-import { SQLiteAgentSkillService, agentSkillName } from "../skills/agent-skills.js";
-import type { ToolActivityPresenter } from "./activity-presentation.js";
-import type { AgentToolRegistration } from "./registry.js";
-import type { ProjectSpaceFiles } from "../project-spaces/files.js";
+import { SQLiteSkillService } from "../skills/service.js";
+import { SQLiteAgentSkillService, agentSkillName, parseAgentSkillMutation } from "../skills/agent-skills.js";
+import type { AgentToolRegistration, ToolExecutionContext } from "./tool-contracts.js";
+import type { FileWorkbench } from "../file-workbench/service.js";
+import { isConfirmationRead, isConfirmedOperation } from "./confirmed-operation.js";
+import { z } from "zod";
 
-/** Deliberately excludes private arguments, document bodies and raw errors from activity. */
-export const loadSkillActivity: ToolActivityPresenter = {
-  started: input => ({ message: object(input).name === "health" ? "我正在读取这个私人的健康项目。" : "我正在读取技能记录。" }),
-  completed: input => ({ message: object(input).name === "health" ? "我已经读取健康项目和当前状态。" : "我已经读取技能记录。" }),
-  failed: input => ({ message: object(input).name === "health" ? "这次未能读取健康项目。" : "这次未能读取技能记录。" })
-};
-export const updateSkillActivity: ToolActivityPresenter = {
-  started: () => ({ message: "我正在维护技能记录。" }),
-  completed: () => ({ message: "我已经完成技能记录的维护。" }),
-  failed: () => ({ message: "这次未能完成技能记录的维护。" })
-};
-function object(input: unknown): Record<string, unknown> {
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Skill input must be an object");
-  return input as Record<string, unknown>;
+/** Historical confirmation drafts retain their original tool and payload. */
+export const isSkillTool = (name: string) => name === "skills" || name === "update_skill";
+export const canonicalSkillTool = (name: string) => name === "update_skill" ? "skills" : name;
+const mutations = new Set(["create", "replace", "delete", "replace_section", "replace_sections"]);
+
+export class SkillDocuments {
+  constructor(private readonly health?: SQLiteSkillService, private readonly instructions?: SQLiteAgentSkillService) {}
+  list(context: ToolExecutionContext) {
+    return [
+      ...(this.instructions?.canAccessSession(context, context.sessionId) ? this.instructions.list(context, context.sessionId) : []),
+      ...(this.health?.canAccessSession(context, context.sessionId) ? this.health.catalogFor(context) : [])
+    ];
+  }
+  private service(context: ToolExecutionContext, name: string) {
+    const service = name === "health" ? this.health : this.instructions;
+    if (!service?.canAccessSession(context, context.sessionId)) throw new Error("技能对当前会话不可用。");
+    return service;
+  }
+  current(context: ToolExecutionContext, name: string) {
+    return this.service(context, name).current(context, context.sessionId, name);
+  }
+  catalog(context: ToolExecutionContext) { return this.instructions?.catalog(context); }
+  resources(context: ToolExecutionContext, name: string) {
+    const catalog = this.catalog(context);
+    const entry = catalog?.entries.find(skill => skill.name === name);
+    return entry && { catalog: catalog!, files: entry.files, paths: Object.keys(entry.files).filter(path => path !== "SKILL.md") };
+  }
+  async resource(context: ToolExecutionContext, name: string, path: string) {
+    if (!(await this.current(context, name)).exists) throw new Error("技能不可用。");
+    const resources = this.resources(context, name);
+    if (!resources || path === "SKILL.md" || !Object.hasOwn(resources.files, path)) throw new Error("技能资源不可用。");
+    const content = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(resources.files[path]!, "base64"));
+    if (content.length > 100_000 || content.includes("\0")) throw new Error("该资源需要通过技能文件读取。");
+    return { name, resource: path, revision: resources.catalog.version, content };
+  }
+  load(context: ToolExecutionContext, name: string) { return this.service(context, name).load(context, context.sessionId, name); }
+  updates(context: ToolExecutionContext, name: string, limit?: number) { return this.service(context, name).updates(context, context.sessionId, name, limit); }
+  mutate(context: ToolExecutionContext, raw: unknown) {
+    const input = parseAgentSkillMutation(raw);
+    return this.service(context, input.name).mutate({ ...context, skillCatalog: undefined }, context.sessionId, input,
+      `${context.sessionId}:${context.turnId}:${input.source_request_id}`);
+  }
 }
-function string(input: Record<string, unknown>, key: string): string {
-  if (typeof input[key] !== "string") throw new Error(`${key} must be a string`);
-  return input[key] as string;
+
+const inputs = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("list") }).strict(),
+  z.object({ action: z.literal("load"), name: agentSkillName }).strict(),
+  z.object({ action: z.literal("updates"), name: agentSkillName, limit: z.number().int().min(1).max(20).optional() }).strict(),
+  z.object({ action: z.literal("read_resource"), name: agentSkillName, resource: z.string().min(1).max(1024) }).strict(),
+  z.object({ action: z.literal("files"), name: agentSkillName, environment_id: z.string().uuid().optional() }).strict()
+]);
+
+function skillActivity(input: unknown) {
+  const value = input as { action?: string; name?: string };
+  const verb = value?.action === "load" ? "加载技能" : value?.action === "updates" ? "查看技能修订"
+    : value?.action === "files" ? "准备技能文件" : "查看技能";
+  return value?.name && agentSkillName.safeParse(value.name).success ? `${verb} ${value.name}` : verb;
 }
-export function createLoadSkillTool(service?: SQLiteSkillService, agentSkills?: SQLiteAgentSkillService, projectFiles?: ProjectSpaceFiles): AgentToolRegistration {
+export function createSkillsTool(service: SkillDocuments, workbench?: FileWorkbench): AgentToolRegistration {
   return {
     definition: {
-      type: "function", name: "load_skill",
-      description: "Load an instruction skill owned by this Agent and user. Discover skills with update_skill action=list. Loaded instructions refresh each turn and do not grant permissions. Registered project entries contain business background, the user's role and source-document entrypoints; tool usage belongs to capability definitions, not project entries. The reserved health project requires separate health-owner authorization; loading health returns rules, private state and today's/yesterday's Asia/Shanghai projectDiary, and enables only its authorized project tools next round. No separate diary query is needed for that supplied range.",
-      input_schema: { type: "object", properties: { name: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,63}$" } }, required: ["name"], additionalProperties: false }
+      type: "function", name: "skills",
+      description: "Discover or activate authorized instruction skills. load activates the current instructions for this conversation and lists packaged resources. Use markdown for skill Markdown, read_resource for other packaged text, and files only when a program needs the packaged scripts or templates on disk. updates lists revisions. Loaded text grants no permissions.",
+      input_schema: { type: "object", properties: {
+        action: { type: "string", enum: ["list", "load", "updates", "read_resource", ...(workbench ? ["files"] : [])] },
+        name: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,63}$" },
+        resource: { type: "string", description: "Exact resource path returned by load." },
+        environment_id: { type: "string", format: "uuid" }, limit: { type: "integer", minimum: 1, maximum: 20 }
+      }, required: ["action"], additionalProperties: false }
     },
     executionMode: "sequential",
-    activity: loadSkillActivity,
-    execute: async (input, context) => {
-      const name = agentSkillName.parse(string(object(input), "name"));
-      if (name !== "health") {
-        if (projectFiles?.canAccess(context) && await projectFiles.current(context, name)) return projectFiles.load(context, name);
-        if (!agentSkills) throw new Error("Agent skills are not configured");
-        return agentSkills.load(context, context.sessionId, name);
-      }
-      if (!service) throw new Error("Private project skills are not configured");
-      return service.load(context, context.sessionId, name);
-    }
-  };
-}
-export function createUpdateSkillTool(service?: SQLiteSkillService, agentSkills?: SQLiteAgentSkillService, projectFiles?: ProjectSpaceFiles): AgentToolRegistration {
-  return {
-    definition: {
-      type: "function", name: "update_skill",
-      description: "Manage instruction skills belonging to this Agent and private user. list discovers names/descriptions, read returns current body/rules and revision (exists=false for an absent ordinary skill), updates returns lightweight metadata. create requires name, description, body and optional rules; first read the name and copy expected_revision, including 0 for a never-created name. replace edits a whole body/rules document via content and optionally description. delete removes an ordinary skill and unloads it from every session. Every create/edit/delete requires the existing user confirmation component; never claim pending changes saved. Skills persist across restart/deployment and cannot grant tools, execute code, or change permissions. health is reserved: separate owner authorization applies, only read/updates/replace_section/replace_sections are allowed, and health cannot be created, replaced wholesale or deleted here. target=rules edits persistent rules; target=body (default) edits state. For section edits use replace_sections with ALL distinct non-overlapping existing headings in one batch; replace_section remains compatible. First read latest and use the SAME expected_revision for pending edits; never increment before confirmation. source_request_id must be stable. On conflict reread. Replays return current state without reverting. For health, save confirmed baselines, preferences, goals/plans and concise status; keep daily facts in health_data, query rules in rules, and recent state dated with an exit condition. Maintenance does not require loading or activate tools.",
-      input_schema: {
-        type: "object", properties: {
-          name: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,63}$" },
-          description: { type: "string", maxLength: 500 }, body: { type: "string", maxLength: 100000 }, rules: { type: "string", maxLength: 100000 },
-          target: { type: "string", enum: ["body", "rules"], description: "Editable document: body (default) or persistent project rules. One target per batch." },
-          action: { type: "string", enum: ["list", "read", "updates", "create", "replace", "delete", "replace_sections", "replace_section"] },
-          sections: { type: "array", minItems: 1, maxItems: 20, description: "All changes to this file, based on the same read revision.", items: {
-            type: "object", properties: { heading: { type: "string" }, content: { type: "string", maxLength: 100000 } },
-            required: ["heading", "content"], additionalProperties: false
-          } },
-          heading: { type: "string", description: "Exact existing heading, e.g. ## 当前计划" },
-          content: { type: "string", description: "Replacement section contents, excluding its heading" },
-          expected_revision: { type: "integer", minimum: 0 }, source_request_id: { type: "string" },
-          limit: { type: "integer", minimum: 1, maximum: 20 }
-        }, required: ["action"], additionalProperties: false
-      }
+    activity: {
+      started: input => ({ title: skillActivity(input), message: `我正在${skillActivity(input)}。` }),
+      completed: input => ({ title: skillActivity(input), message: `已完成${skillActivity(input)}。` }),
+      failed: input => ({ title: skillActivity(input), message: `${skillActivity(input)}未完成。` })
     },
-    executionMode: "sequential", activity: updateSkillActivity,
-    execute: async (input, context) => {
-      const value = object(input);
-      if (value.action === "list") return { skills: [
-        ...(projectFiles?.canAccess(context) ? await projectFiles.catalog(context) : []),
-        ...(agentSkills?.list(context, context.sessionId) ?? []),
-        ...(service?.canAccessSession(context, context.sessionId) ? service.catalogFor(context) : [])
-      ] };
-      const name = agentSkillName.parse(string(value, "name"));
-      if (name !== "health") {
-        const synced = projectFiles?.canAccess(context) ? await projectFiles.current(context, name) : undefined;
-        if (synced) {
-          if (value.action === "read") return synced;
-          if (value.action === "updates") return { updates: [{ revision: synced.revision, action: "space" }] };
-          throw new Error("Registered project guidance is managed with the project-space release; ordinary skills cannot replace it");
-        }
-        if (!agentSkills) throw new Error("Agent skills are not configured");
-        if (value.action === "read") return agentSkills.current(context, context.sessionId, name);
-        if (value.action === "updates") return { updates: agentSkills.updates(context, context.sessionId, name, typeof value.limit === "number" ? value.limit : 5) };
-        return agentSkills.mutate(context, context.sessionId, value, `${context.sessionId}:${context.turnId}:${string(value, "source_request_id")}`);
+    async execute(raw, context) {
+      const value = raw as { action?: string; name?: string };
+      if (value?.action === "read" && isConfirmationRead(context)) return service.current({ ...context, skillCatalog: undefined }, agentSkillName.parse(value.name));
+      if (value?.action && mutations.has(value.action)) {
+        if (!isConfirmedOperation(context, "skills", raw)) throw new Error("请通过 markdown 提议技能文档变更。");
+        return service.mutate(context, raw);
       }
-      if (!service) throw new Error("Private project skills are not configured");
-      const target = skillTarget(value.target);
-      switch (value.action) {
-        case "read": return service.current(context, context.sessionId, name);
-        case "history": // Compatibility for old tool traces: only metadata is returned.
-        case "updates": return { updates: await service.updates(context, context.sessionId, name,
-          typeof value.limit === "number" ? value.limit : 5) };
-        case "replace_section": return service.updateSection(context, context.sessionId, {
-          name, target, heading: string(value, "heading"), content: string(value, "content"),
-          expectedRevision: value.expected_revision as number,
-          sourceRequestId: `${context.taskRunId ?? `${context.sessionId}:${context.turnId}`}:${string(value, "source_request_id")}`
-        });
-        case "replace_sections": return service.updateSections(context, context.sessionId, {
-          name, target, sections: skillSectionsSchema.parse(value.sections), expectedRevision: value.expected_revision as number,
-          sourceRequestId: `${context.taskRunId ?? `${context.sessionId}:${context.turnId}`}:${string(value, "source_request_id")}`
-        });
-        default: throw new Error("Unsupported skill operation");
+      const input = inputs.parse(raw);
+      if (input.action === "list") return { skills: service.list(context) };
+      if (input.action === "updates") return { updates: await service.updates(context, input.name, input.limit) };
+      if (input.action === "read_resource") {
+        if (/\.(?:md|mdown|markdown)$/i.test(input.resource)) throw new Error("Markdown 引用请通过 markdown 读取。");
+        return service.resource(context, input.name, input.resource);
       }
+      const resources = service.resources(context, input.name);
+      if (input.action === "load") return { ...await service.load(context, input.name), exists: true, resources: resources?.paths ?? [],
+        documents: [`skill:${input.name}:body`, `skill:${input.name}:rules`] };
+      if (!workbench || !resources || input.name === "health") throw new Error("该技能没有可导出的资源。");
+      const skill = await service.current(context, input.name);
+      if (!skill.exists) throw new Error("技能不可用。");
+      return workbench.skillResources(context, resources.catalog, input.name, skill.body, input.environment_id);
     }
   };
 }

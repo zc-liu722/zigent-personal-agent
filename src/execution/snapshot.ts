@@ -96,7 +96,7 @@ async function dependencyDirectory(parent: string, name: string): Promise<boolea
   return false;
 }
 
-export async function makeSnapshot(workspaces: WorkspaceService, id: string, maxBytes: number) {
+export async function makeSnapshot(workspaces: Pick<WorkspaceService,"workspaceDirectory"|"resolvePath">, id: string, maxBytes: number) {
   const root = await workspaces.workspaceDirectory(id), archive: Record<string, Uint8Array> = Object.create(null);
   const manifest: SnapshotManifest = { version: 1, archivePrefix: "payload/", files: [], regenerable: [], links: [], directories: [] };
   let metadata: { modes?: Array<{ path: string; mode: number }>; links?: SnapshotManifest["links"] } = {};
@@ -141,6 +141,12 @@ export async function makeSnapshot(workspaces: WorkspaceService, id: string, max
   if (encoded.length > METADATA_LIMIT) throw new Error("Project metadata exceeds its limit");
   archive[SNAPSHOT_MANIFEST] = encoded;
   return { manifest, revision: snapshotRevision(manifest), bytes: Buffer.from(zipSync(archive, { level: 1 })) };
+}
+
+/** Explicit migration/export only; never used on the shared command path. */
+export async function snapshotDirectory(root: string, maxBytes: number) {
+  return makeSnapshot({workspaceDirectory:async()=>ordinaryPath(root),
+    resolvePath:async(_id,path,options)=>ordinaryPath(root,path,options?.allowMissing)},"directory",maxBytes);
 }
 
 export function decodeSnapshot(bytes: Buffer, maxBytes: number) {

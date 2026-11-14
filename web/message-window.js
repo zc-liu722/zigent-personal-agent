@@ -1,10 +1,11 @@
 /** Keep lightweight row anchors, but release offscreen message bodies and their resources. */
 export function createMessageWindow({ readingScroller, capturePosition, restorePosition, render, dispose }) {
+  const initialBodyCount = 8;
   let root = readingScroller();
   const rows = new Map();
   const supported = typeof IntersectionObserver !== 'undefined' && typeof ResizeObserver !== 'undefined';
   let enabled = false, selectionVersion, frame, position, width = root.clientWidth;
-  let initialEnd = false, count = 0;
+  let initialStart = 0, initialEnd = 0;
   const pending = new Set();
   function schedule(id) {
     if (id) pending.add(id);
@@ -80,15 +81,17 @@ export function createMessageWindow({ readingScroller, capturePosition, restoreP
     if (frame !== undefined) cancelAnimationFrame(frame);
     frame = undefined;
   }
-  function prepare(messages, existing, version, atEnd) {
+  function prepare(messages, existing, version, atEnd, anchorId) {
     syncRoot();
     if (selectionVersion !== version) { reset(); selectionVersion = version; }
     const ids = new Set(messages.map(message => message.id));
     for (const [id, row] of rows) if (!ids.has(id)) { forget(row); rows.delete(id); }
-    count = messages.length;
+    const count = messages.length;
     const wasEnabled = enabled;
-    enabled = supported && count >= 160;
-    initialEnd = atEnd;
+    enabled = supported && count > initialBodyCount;
+    const anchor = anchorId ? messages.findIndex(message => message.id === anchorId) : -1;
+    initialStart = anchor >= 0 ? Math.max(0, anchor - 3) : atEnd ? Math.max(0, count - initialBodyCount) : count;
+    initialEnd = anchor >= 0 ? initialStart + initialBodyCount : count;
     // Seed the observer window synchronously when a previously short list becomes long.
     if (enabled && !wasEnabled) {
       const bounds = root === document.scrollingElement ? { top: 0, bottom: window.innerHeight } : root.getBoundingClientRect();
@@ -112,7 +115,7 @@ export function createMessageWindow({ readingScroller, capturePosition, restoreP
       row = { node, near: !enabled, suspended: false, height: 0 };
       rows.set(message.id, row);
     }
-    return !enabled || pinned || row.near || initialEnd && index >= count - 16 || node.isConnected && keepMounted(node);
+    return !enabled || pinned || row.near || (index >= initialStart && index < initialEnd) || node.isConnected && keepMounted(node);
   }
   function suspend(message, node) {
     const row = rows.get(message.id);

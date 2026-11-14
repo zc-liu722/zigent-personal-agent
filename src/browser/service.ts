@@ -21,7 +21,7 @@ const SUBMISSION_APPROVED = Symbol("trusted-browser-submission");
 const WIDTH = 1280, HEIGHT = 800;
 const IDLE_TIMEOUT = 10 * 60_000;
 type Viewport = { width: number; height: number };
-const interactive = 'a[href],button,input,textarea,select,[role="button"],[role="link"],[role="textbox"],[role="checkbox"],[role="combobox"],[contenteditable="true"],[onclick]';
+const interactive = 'a[href],button,input,textarea,select,[role="button"],[role="link"],[role="textbox"],[role="checkbox"],[role="combobox"],[contenteditable="true"],[onclick],img,canvas,svg,figure';
 type BrowserEventDetails = { commandId?: string; durationMs?: number; frameIndex?: number; mainFrame?: boolean;
   visible?: boolean; elementCount?: number; resourceType?: string; httpStatus?: number; failureKind?: string; actionCompleted?: boolean; traffic?: BrowserTrafficBatch;
   diagnostic?: BrowserDiagnostic; source?: string };
@@ -693,6 +693,7 @@ export class BrowserService extends EventEmitter {
         for (const node of document.querySelectorAll<HTMLElement>(selector)) {
           const box = node.getBoundingClientRect();
           if (!box.width || !box.height || getComputedStyle(node).visibility === "hidden") continue;
+          if (node.matches('img,canvas,svg,figure') && (box.width<48 || box.height<48)) continue;
           // A long station list must expose the controls currently on screen,
           // even when hundreds of earlier links remain rendered above it.
           const distance = Math.max(0, -box.bottom, box.top - innerHeight)
@@ -704,8 +705,10 @@ export class BrowserService extends EventEmitter {
       try {
         const items = await wait(() => captured.evaluate(nodes => nodes.map(element => {
           const input = element as HTMLInputElement, rect = element.getBoundingClientRect();
-          const label = element.getAttribute("aria-label") || input.labels?.[0]?.innerText || element.getAttribute("placeholder") || element.innerText || element.getAttribute("title") || "";
+          const label = element.getAttribute("aria-label") || element.getAttribute("alt") || input.labels?.[0]?.innerText || element.getAttribute("placeholder") || element.innerText || element.getAttribute("title") || "";
           return { role: element.getAttribute("role") || element.tagName.toLowerCase(), name: label.trim().slice(0, 180), type: input.type || undefined,
+            ...(element.tagName === "IMG" ? {imageUrl:/^https?:\/\//i.test((element as HTMLImageElement).currentSrc || (element as HTMLImageElement).src)?((element as HTMLImageElement).currentSrc || (element as HTMLImageElement).src).slice(0,4096):undefined,
+              imageWidth:(element as HTMLImageElement).naturalWidth,imageHeight:(element as HTMLImageElement).naturalHeight} : {}),
             value: input.type !== "password" && input.type !== "hidden" && typeof input.value === "string" ? input.value.slice(0, 400) : undefined,
             disabled: Boolean(input.disabled) || element.getAttribute("aria-disabled") === "true" || undefined,
             bounds: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
@@ -841,6 +844,8 @@ export class BrowserService extends EventEmitter {
         if (activation && (policy.submits || policy.confirm)) live.tabs.get(live.active)!.restore = false;
       }
       let actionCompleted = false;
+      let capturedImage: Buffer | undefined;
+      let capturedUrl: string | undefined;
       const commandStarted = Date.now();
       const id = randomUUID(); this.db.prepare("INSERT INTO commands VALUES(?,?,?,?,?,?)").run(id, session.id, session.revision, input.action, "running", Date.now());
       if (["open", "navigate", "new_tab", "click", "press", "select"].includes(input.action)) live.diagnostics.intent(this.page(live), "agent", input.action, id);
@@ -867,6 +872,13 @@ export class BrowserService extends EventEmitter {
           else if (input.action === "press") { if (!input.key) throw new Error("请指定按键"); await wait(() => (target ?? page.keyboard).press(input.key!)); }
           else if (input.action === "scroll") await wait(() => page.mouse.wheel(0, input.delta ?? 600));
           else { if (!target || !input.file) throw new Error("请指定上传字段和文件编号"); const file = await wait(() => this.file(scope, session.id, input.file!, "upload")); await wait(() => target.setInputFiles({ name: file.name, mimeType: "application/octet-stream", buffer: file.data })); }
+        } else if (input.action === "capture_image") {
+          const target = this.target(live,input);
+          if (!target) throw new Error("请提供最新观察中的图片元素引用。");
+          capturedUrl=this.page(live).url();
+          const box = await wait(() => target.boundingBox());
+          if (!box || box.width * box.height > 40_000_000) throw new Error("图片区域不可见或过大。");
+          capturedImage = await wait(() => target.screenshot({type:"png",timeout:this.readTimeout}),this.readTimeout);
         } else if (input.action === "dialog") {
           if (!live.dialog) throw new Error("没有待处理的对话框");
           if (input.accept) await wait(() => live.dialog!.accept(input.text)); else await wait(() => live.dialog!.dismiss()); live.dialog = undefined;
@@ -920,6 +932,10 @@ export class BrowserService extends EventEmitter {
         }
         if (session.restrictions?.some(item => item.kind === "verification" && item.origin === new URL(observation.url).origin))
           this.update(this.row(session.id)!, { restrictions: this.row(session.id)!.restrictions?.filter(item => item.kind !== "verification" || item.origin !== new URL(observation.url).origin) });
+        if (capturedImage) {
+          if(capturedUrl!==observation.url)throw new Error("截图时网页发生跳转，请重新观察后获取图片。");
+          return {kind:"visual_observation",id:observation.observation,metadata:{browser:session.id,sourceUrl:observation.url,sourceKind:"screenshot",...observation},images:[{data:capturedImage,mimeType:"image/png",observationId:observation.observation}]};
+        }
         if (input.action !== "screenshot" && !input.visual) return { browser: session.id, network: session.network ?? "direct", ...observation };
         return { kind: "visual_observation", id: observation.observation, metadata: { browser: session.id, network: session.network ?? "direct", ...observation },
           images: [{ data: await wait(() => this.screenshot(scope, session.id), this.readTimeout), mimeType: "image/jpeg", observationId: observation.observation }] };

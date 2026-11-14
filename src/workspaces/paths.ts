@@ -1,5 +1,6 @@
-import { constants } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { constants, type BigIntStats, type Stats } from "node:fs";
+import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
 const reserved = /^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(?:\.|$)/i;
@@ -44,23 +45,84 @@ export async function ordinaryPath(root: string, child = ".", allowMissing = fal
   return target;
 }
 
+const readChanged = () => new Error("文件读取期间发生变化，请重试。");
+function unstable(before: Stats, after: Stats, current: Stats): boolean {
+  return before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || after.nlink !== 1
+    || current.ino !== after.ino || current.dev !== after.dev || current.size !== after.size || current.mtimeMs !== after.mtimeMs;
+}
+async function assertStable(root: string, path: string, target: string, handle: FileHandle, before: Stats): Promise<Stats> {
+  const after = await handle.stat();
+  await ordinaryPath(root, path);
+  if (unstable(before, after, await lstat(target))) throw readChanged();
+  return after;
+}
+export type FileIdentity = { dev: bigint; ino: bigint; size: bigint; nlink: bigint; mtimeNs: bigint; ctimeNs: bigint };
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.nlink === right.nlink && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+const wholeSecond = 1_000_000_000n;
+/** FAT stores both stamps in 2-second units. exFAT mtime is 10 ms, so those files still reuse the digest. A copied file often keeps a whole-second mtime and a fine ctime. */
+export function coarseFileIdentity(identity: FileIdentity): boolean {
+  return identity.mtimeNs % wholeSecond === 0n && identity.ctimeNs % wholeSecond === 0n;
+}
+function fileIdentity(stat: BigIntStats): FileIdentity {
+  return { dev: stat.dev, ino: stat.ino, size: stat.size, nlink: stat.nlink, mtimeNs: stat.mtimeNs, ctimeNs: stat.ctimeNs };
+}
+async function readExact(handle: FileHandle, position: number, length: number): Promise<Buffer> {
+  const bytes = Buffer.alloc(length);
+  let written = 0;
+  while (written < length) {
+    const read = await handle.read(bytes, written, length - written, position + written);
+    if (!read.bytesRead) throw readChanged();
+    written += read.bytesRead;
+  }
+  return bytes;
+}
+
 export async function snapshotFile(root: string, path: string, maxBytes: number): Promise<{ bytes: Buffer; modifiedAt: number }> {
   const target = await ordinaryPath(root, path);
   const handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const before = await handle.stat();
     if (!before.isFile() || before.nlink !== 1 || before.size > maxBytes) throw new Error(`请选择不超过 ${Math.floor(maxBytes / 1024 / 1024)} MB 的普通文件。`);
-    const bytes = Buffer.alloc(before.size);
+    const bytes = await readExact(handle, 0, before.size);
+    const after = await assertStable(root, path, target, handle, before);
+    return { bytes, modifiedAt: after.mtimeMs };
+  } finally { await handle.close(); }
+}
+
+/** Read one byte range. A cached digest is reused only while the file identity is unchanged; otherwise the whole file is hashed once. */
+export async function snapshotFileRange(root: string, path: string, maxBytes: number, offset: number, length: number, cached?: { identity: FileIdentity; sha256: string }): Promise<{ bytes: Buffer; size: number; sha256: string; identity: FileIdentity; examined: number }> {
+  const target = await ordinaryPath(root, path);
+  const handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const before = await handle.stat();
+    if (!before.isFile() || before.nlink !== 1 || before.size > maxBytes) throw new Error(`请选择不超过 ${Math.floor(maxBytes / 1024 / 1024)} MB 的普通文件。`);
+    // Number stats omit mtimeNs, so a same-size rewrite would look unchanged. Nanosecond identity comes from the bigint stat.
+    const identity = fileIdentity(await handle.stat({ bigint: true }));
+    if (identity.size !== BigInt(before.size) || identity.nlink !== 1n) throw readChanged();
+    const start = Number.isSafeInteger(offset) && offset >= 0 ? Math.min(offset, before.size) : 0;
+    const span = Number.isSafeInteger(length) && length > 0 ? length : 0;
+    const end = Math.min(before.size, start + span);
+    if (cached && sameFileIdentity(cached.identity, identity) && !coarseFileIdentity(identity)) {
+      const bytes = await readExact(handle, start, end - start);
+      await assertStable(root, path, target, handle, before);
+      return { bytes, size: before.size, sha256: cached.sha256, identity, examined: end - start };
+    }
+    const hash = createHash("sha256");
+    const bytes = Buffer.alloc(end - start);
+    const chunk = Buffer.alloc(before.size === 0 ? 0 : Math.min(64 * 1024, before.size));
     let position = 0;
-    while (position < bytes.length) {
-      const read = await handle.read(bytes, position, bytes.length - position, position);
-      if (!read.bytesRead) throw new Error("文件读取期间发生变化，请重试。");
+    while (position < before.size) {
+      const read = await handle.read(chunk, 0, Math.min(chunk.length, before.size - position), position);
+      if (!read.bytesRead) throw readChanged();
+      hash.update(chunk.subarray(0, read.bytesRead));
+      const from = Math.max(position, start);
+      const to = Math.min(position + read.bytesRead, end);
+      if (to > from) chunk.copy(bytes, from - start, from - position, to - position);
       position += read.bytesRead;
     }
-    const after = await handle.stat();
-    await ordinaryPath(root, path);
-    const current = await lstat(target);
-    if (before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || after.nlink !== 1 || current.ino !== after.ino || current.dev !== after.dev || current.size !== after.size || current.mtimeMs !== after.mtimeMs) throw new Error("文件读取期间发生变化，请重试。");
-    return { bytes, modifiedAt: after.mtimeMs };
+    await assertStable(root, path, target, handle, before);
+    return { bytes, size: before.size, sha256: hash.digest("hex"), identity, examined: position };
   } finally { await handle.close(); }
 }

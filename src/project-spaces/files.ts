@@ -1,10 +1,12 @@
+import { readDocumentText } from "../capabilities/documents/text.js";
 import { readFile } from "node:fs/promises";
 import sharp from "sharp";
 import type { ToolExecutionContext } from "../tools/tool-contracts.js";
 import type { ModelGateway } from "../llm.js";
 import type { AgentConfig } from "../config.js";
+import type { SQLiteAgentSkillService } from "../skills/agent-skills.js";
 import { inventory, safeFile, selected, sha256, spaces, version, type ProjectSpace } from "./policy.js";
-import { projectSpace, spaceReadiness } from "./service.js";
+import { projectSpace, spaceReadiness, syncDescription } from "./service.js";
 import { decodeDocument, isDocument, DocumentReader, searchable, type DocumentContent } from "../capabilities/documents/reader.js";
 import { passages, rankPassages, SemanticSearch, type Passage, type SearchCoverage, type SearchMode } from "../capabilities/documents/search.js";
 
@@ -14,40 +16,33 @@ export class ProjectSpaceFiles {
   private readonly documents = new DocumentReader();
   private readonly semantic: SemanticSearch;
   private readonly semanticResults = new Map<string, { at: number; items: Passage[]; coverage: SearchCoverage; expandedQueries: string[]; candidateCount: number }>();
-  constructor(readonly options: { agentId: string; ownerUserId: string; workbenchMode?: boolean }, model?: ModelGateway) { this.semantic = new SemanticSearch(model); }
-  static fromConfig(config: AgentConfig, model: ModelGateway) {
-    if (!config.allowedTools.includes("project_files") && !config.allowedTools.includes("documents")) return undefined;
+  constructor(readonly options: { agentId: string; ownerUserId: string; workbenchMode?: boolean },
+    private readonly skillSessions: SQLiteAgentSkillService, model?: ModelGateway) { this.semantic = new SemanticSearch(model); }
+  static fromConfig(config: AgentConfig, skillSessions: SQLiteAgentSkillService, model: ModelGateway) {
+    if (!config.fileWorkbench && !config.allowedTools.includes("documents")) return undefined;
     const ownerUserId = config.web?.ownerUserId ?? config.notifications?.ownerUserId ?? config.toolSettings?.google_drive?.ownerUserId;
-    return ownerUserId ? new ProjectSpaceFiles({ agentId: config.id, ownerUserId, workbenchMode: Boolean(config.fileWorkbench && config.fileWorkbench.enabled !== false && config.channel === "web" && config.web?.ownerUserId && config.web.ownerPrincipalId) }, model) : undefined;
+    return ownerUserId ? new ProjectSpaceFiles({ agentId: config.id, ownerUserId, workbenchMode: Boolean(config.fileWorkbench && config.fileWorkbench.enabled !== false && config.channel === "web" && config.web?.ownerUserId && config.web.ownerPrincipalId) }, skillSessions, model) : undefined;
   }
   canAccess(scope: Scope): boolean {
     return scope.agentId === this.options.agentId && scope.userId === this.options.ownerUserId && scope.conversationKind === "p2p"
-      && Boolean(scope.conversationId && scope.sessionId) && !scope.signal?.aborted && !scope.taskRunId && !scope.backgroundTaskKind;
+      && Boolean(scope.conversationId && scope.sessionId) && !scope.signal?.aborted && !scope.taskRunId && !scope.backgroundTaskKind
+      && this.skillSessions.canAccessSession(scope, scope.sessionId);
   }
   private assertScope(scope: Scope) { if (!this.canAccess(scope)) throw new Error("Project files require the owner's private session"); }
+  async initializeSkills(principalId?: string): Promise<void> {
+    const registered = await spaces(this.options.agentId);
+    this.skillSessions.seedSkills({ userId: this.options.ownerUserId, principalId }, registered.map(space => ({
+      name: space.id, description: space.description ?? space.name, body: space.introduction ?? space.name
+    })));
+  }
   async catalog(scope: Scope) {
     this.assertScope(scope);
-    return (await spaces(scope.agentId)).map(s => ({ name: s.id, description: s.name, source: "project_space", readOnly: true,
-      filesWritable: !this.options.workbenchMode, fileTool: this.options.workbenchMode ? "project_files" : "documents" }));
-  }
-  async current(scope: Scope, id: string) {
-    this.assertScope(scope);
-    const space = (await spaces(scope.agentId)).find(s => s.id === id);
-    return space ? { name: id, exists: true, description: space.name, body: space.introduction ?? space.name, rules: "", revision: 1, readOnly: true, source: "project_space" } : undefined;
-  }
-  async load(scope: Scope, id: string) {
-    const result = await this.current(scope, id); if (!result) throw new Error("Project unavailable"); return result;
-  }
-  async contextFor(scope: Scope) {
-    if (!this.canAccess(scope)) return "";
-    const registered = await spaces(scope.agentId);
-    return registered.filter(s => s.introduction).map(s => `${s.name} 项目（${s.id}）：${s.introduction}`).join("\n\n");
+    return (await spaces(scope.agentId)).map(s => ({ name: s.id, description: s.description ?? s.name,
+      filesWritable: Boolean(s.workspaceId), workspaceId: s.workspaceId, fileTool: "exec_command" }));
   }
   private mapping(space: ProjectSpace) {
-    return { machines: { mac: space.mac, windows: space.windows, linux: space.linux }, selection: space.include,
-      sync: { direction: "bidirectional", macWindows: space.mac ? { transport: "syncthing", scheduling: "continuous", watcherDelaySeconds: 2, fallbackScanSeconds: 600 } : undefined,
-        windowsLinux: space.linux ? { transport: "unison", intervalSeconds: 60 } : undefined,
-        offline: "catch_up_on_reconnect", conflicts: "preserve_both", dailySnapshot: false } };
+    return { machines: { mac: space.mac, windows: space.windows }, selection: space.include,
+      sync: syncDescription(space) };
   }
   async query(scope: ToolExecutionContext, input: { action: "status" | "list" | "search" | "read" | "view"; project: string; snapshot?: string; path?: string;
     paths?: string[]; query?: string; offset: number; limit: number; heading?: string; mode?: SearchMode;
@@ -179,26 +174,12 @@ export class ProjectSpaceFiles {
         message: /\.doc$/i.test(input.path) ? "Convert legacy .doc to .docx or PDF before reading."
           : "Document could not be decoded; check format, encryption and size. Retry a smaller PDF page range where applicable." };
     }
-    const lines = document.units.map(unit => unit.text).join("\n\n").split("\n"); let start = 0, end = lines.length;
-    if (input.heading) {
-      start = lines.findIndex(line => line.trim() === input.heading!.trim());
-      if (start < 0 || !/^#{1,6} /.test(lines[start]!)) throw new Error("Exact Markdown heading not found");
-      const level = /^#+/.exec(lines[start]!)![0].length;
-      const next = lines.findIndex((line, i) => i > start && /^#{1,6} /.test(line) && /^#+/.exec(line)![0].length <= level); if (next >= 0) end = next;
-    }
-    const characters = Array.from(lines.slice(start, end).join("\n")); const next = Math.min(characters.length, input.offset + input.limit);
+    const textPage = readDocumentText(document, { offset: input.offset, limit: input.limit, heading: input.heading, sectionSeparators: false });
+    if (!textPage) throw new Error("Exact Markdown heading not found");
     await unchanged(input.path);
-    let sectionOffset = 0;
-    const sectionStart = Array.from(lines.slice(0, start).join("\n")).length + (start ? 1 : 0) + input.offset;
-    const sections = document.units.flatMap(unit => {
-      const from = sectionOffset, to = from + Array.from(unit.text).length;
-      sectionOffset = to + 2;
-      return to >= sectionStart && from < sectionStart + input.limit ? [{ page: unit.page, paragraph: unit.paragraph,
-        offset: from, needsImage: unit.needsImage }] : [];
-    });
-    return { ...meta, path: input.path, sha256: file.sha256, format: document.format, startLine: start + 1,
-      content: characters.slice(input.offset, next).join(""), total: characters.length, has_more: next < characters.length,
-      next_offset: next < characters.length ? next : null,
+    const sections = textPage.sections();
+    return { ...meta, path: input.path, sha256: file.sha256, format: document.format, startLine: textPage.startLine,
+      content: textPage.content, total: textPage.total, has_more: textPage.has_more, next_offset: textPage.next_offset,
       totalPages: document.totalPages, pageStart: range?.from, pageEnd: document.indexedTo,
       next_page: document.totalPages && document.indexedTo! < document.totalPages ? document.indexedTo! + 1 : null,
       sections: isDocument(input.path) ? sections : undefined,

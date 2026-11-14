@@ -2,7 +2,7 @@ import type { AgentEvent } from "./events.js";
 import type { ToolActivityPresentation } from "../tools/activity-presentation.js";
 import type { ModelThoughtSource } from "../models/types.js";
 
-export type AgentActivityItem =
+export type AgentActivityItem = { startedAt?: number } & (
   | SubagentActivityItem
   | {
       id: string;
@@ -32,7 +32,7 @@ export type AgentActivityItem =
       operationKey?: string;
       presentation: ToolActivityPresentation;
       durationMs?: number;
-    };
+    });
 
 /** A child owns its process and result; neither is part of the coordinator's answer. */
 export type SubagentActivityItem = {
@@ -53,6 +53,8 @@ export type SubagentActivityItem = {
 
 export type AgentRunSnapshot = {
   status: "running" | "completed" | "failed" | "cancelled";
+  startedAt?: number;
+  endedAt?: number;
   items: readonly AgentActivityItem[];
   answerDraft: string;
   failureMessage?: string;
@@ -65,7 +67,7 @@ export type AgentActivityOperation =
   | { type: "append_text"; id: string; text: string }
   | { type: "set_answer"; text: string }
   | { type: "append_answer"; text: string }
-  | { type: "run_state"; status: AgentRunSnapshot["status"]; failureMessage?: string };
+  | { type: "run_state"; status: AgentRunSnapshot["status"]; endedAt: number; failureMessage?: string };
 
 /** Internal live view: consumers materialize the latest state at delivery/checkpoint time. */
 export type AgentActivityUpdate = {
@@ -123,6 +125,8 @@ function mergePresentation(
 
 export class AgentTranscript {
   private status: AgentRunSnapshot["status"] = "running";
+  private readonly startedAt: number | undefined;
+  private endedAt: number | undefined;
   private readonly items = new Map<string, AgentActivityItem>();
   private readonly open = new Set<string>();
   private readonly responses = new Map<string, string>();
@@ -134,7 +138,15 @@ export class AgentTranscript {
   private operations: AgentActivityOperation[] = [];
   private checkpoint = false;
 
-  constructor(private readonly recordOperations = false) {}
+  constructor(private readonly recordOperations = false, initial?: AgentRunSnapshot, private readonly preserveCommentary = false) {
+    this.startedAt = initial ? initial.startedAt : Date.now();
+    if (initial) {
+      for (const item of initial.items) { this.items.set(item.id, { ...item }); if (item.status === "running") this.open.add(item.id);
+        if (item.type === "response") this.responses.set(item.id, item.text); }
+      this.streamedAnswer = [...this.responses.values()].join("\n\n"); this.answerDraft = initial.answerDraft;
+      this.lastResponseId = [...this.responses.keys()].at(-1);
+    }
+  }
 
   apply(event: AgentEvent): AgentRunSnapshot { this.advance(event); return this.snapshot(); }
 
@@ -147,6 +159,10 @@ export class AgentTranscript {
   /** Item replacement also covers supplier reclassification and bounded commentary. */
   private put(item: AgentActivityItem, appendText?: string): void {
     const previous = this.items.get(item.id), beforeAnswer = this.answer();
+    if (item.startedAt === undefined) {
+      const startedAt = previous ? previous.startedAt : Date.now();
+      if (startedAt !== undefined) item = { ...item, startedAt };
+    }
     this.items.set(item.id, item);
     if (item.status === "running") this.open.add(item.id); else this.open.delete(item.id);
     const structural = !previous || previous.type !== item.type || previous.status !== item.status || item.type === "tool" || item.type === "subagent";
@@ -226,7 +242,7 @@ export class AgentTranscript {
         const previous = found?.type === "response" || found?.type === "commentary" ? found : undefined;
         const type = event.role === "commentary" ? "commentary" : event.role === "answer" ? "response" : previous?.type === "commentary" ? "commentary" : "response";
         const text = event.type === "response.delta" ? (previous?.text ?? "") + event.text : event.text;
-        const visible = type === "commentary" ? truncate(text) : text;
+        const visible = type === "commentary" && !this.preserveCommentary ? truncate(text) : text;
         const append = event.type === "response.delta" && previous?.type === type && visible === text ? event.text : undefined;
         this.put({ id: event.itemId, type, status: event.type === "response.completed" ? "completed" : "running", text: visible }, append);
         break;
@@ -268,27 +284,29 @@ export class AgentTranscript {
     const before = this.answer();
     this.answerDraft = answer;
     if (before !== this.answer()) this.record({ type: "set_answer", text: this.answer() });
-    this.status = "completed";
-    this.record({ type: "run_state", status: this.status });
-    return this.snapshot();
+    return this.finish("completed");
   }
 
   fail(message: string): AgentRunSnapshot {
     this.finishOpen(item => item.type !== "tool" && item.type !== "subagent");
-    this.status = "failed"; this.failureMessage = message;
-    this.record({ type: "run_state", status: this.status, failureMessage: message });
-    return this.snapshot();
+    return this.finish("failed", message);
   }
 
   cancel(): AgentRunSnapshot {
     this.finishOpen(item => item.type !== "tool" && item.type !== "subagent");
-    this.status = "cancelled";
-    this.record({ type: "run_state", status: this.status });
+    return this.finish("cancelled");
+  }
+
+  private finish(status: Exclude<AgentRunSnapshot["status"], "running">, failureMessage?: string): AgentRunSnapshot {
+    this.status = status;
+    this.endedAt = Date.now();
+    this.failureMessage = failureMessage;
+    this.record({ type: "run_state", status, endedAt: this.endedAt, failureMessage });
     return this.snapshot();
   }
 
   snapshot(): AgentRunSnapshot {
-    return { status: this.status, items: Array.from(this.items.values(), item => ({ ...item })),
+    return { status: this.status, startedAt: this.startedAt, endedAt: this.endedAt, items: Array.from(this.items.values(), item => ({ ...item })),
       answerDraft: this.answer(), failureMessage: this.failureMessage };
   }
 }

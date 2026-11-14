@@ -3,6 +3,8 @@ import { z } from "zod";
 import { notificationSettingsSchema } from "../notifications/config.js";
 import { REASONING_EFFORTS } from "./types.js";
 import { validateManifest } from "./validation.js";
+import { MAX_HEALTH_BODY_BYTES } from "../health/limits.js";
+import { paletteIds } from "../web/palette.js";
 
 const providerSchema = z.enum(["claude", "gpt", "deepseek"]);
 const modelNameSchema = z.string().trim().min(1).regex(/^[a-z][a-z0-9._-]*$/);
@@ -66,7 +68,7 @@ const modelDeploymentSchema = z.object({
   apiKeyEnv: apiKeyEnvSchema.optional(),
   optional: z.boolean().default(false),
   baseUrl: z.string().trim().url().optional(),
-  protocol: z.enum(["anthropic-messages", "openai-responses", "codex-app-server", "claude-code"]),
+  protocol: z.enum(["anthropic-messages", "openai-responses", "codex-app-server", "claude-code", "cursor-acp", "antigravity-acp"]),
   network: z.enum(["direct", "proxy"]).optional(),
   cost: costPolicySchema.optional(),
   maxTokens: z.number().int().positive().optional(),
@@ -93,7 +95,7 @@ const modelDeploymentSchema = z.object({
   }, "a tool must have exactly one execution path on a model route").default({})
 });
 const supplierSchema = z.object({
-  transport: z.enum(["http", "codex-app-server", "claude-code"]).default("http"),
+  transport: z.enum(["http", "codex-app-server", "claude-code", "cursor-acp", "antigravity-acp"]).default("http"),
   apiKeyEnv: z.union([
     apiKeyEnvSchema,
     z.array(apiKeyEnvSchema).min(1)
@@ -111,6 +113,13 @@ const supplierSchema = z.object({
   imageModel: z.string().trim().min(1).optional(),
   command: z.string().trim().min(1).optional(),
   codexHome: z.string().trim().min(1).refine(path => path.startsWith("/") || win32.isAbsolute(path), "codexHome must be absolute").optional(),
+  antigravityDataDir: z.string().trim().min(1).refine(path => path.startsWith("/") || win32.isAbsolute(path),
+    "antigravityDataDir must be absolute").optional(),
+  antigravityProxyUrl: z.string().trim().url().refine(value => {
+    const url = URL.canParse(value) ? new URL(value) : undefined;
+    return url?.protocol === "socks5:" && Boolean(url.hostname && url.port)
+      && !url.username && !url.password && !url.pathname && !url.search && !url.hash;
+  }, "antigravityProxyUrl must be a SOCKS5 proxy URL with a port").optional(),
   args: z.array(z.string()).default([])
 }).superRefine((supplier, context) => {
   if (supplier.transport === "http" && !supplier.apiKeyEnv) {
@@ -122,6 +131,18 @@ const supplierSchema = z.object({
   }
   if (supplier.transport === "claude-code" && (!supplier.command || !supplier.args.length || supplier.apiKeyEnv || Object.keys(supplier.endpoints).length)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Claude Code requires an explicit restricted SSH command and no HTTP credentials/endpoints" });
+  }
+  if (supplier.transport === "cursor-acp" && (!supplier.command || !supplier.apiKeyEnv || !supplier.optional
+    || supplier.args.length || Object.keys(supplier.endpoints).length)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Cursor ACP requires a CLI command and an optional server-side user API key without launch overrides or HTTP endpoints" });
+  }
+  if (supplier.transport === "antigravity-acp" && (!supplier.command || supplier.apiKeyEnv || supplier.args.length
+    || supplier.codexHome || Object.keys(supplier.endpoints).length)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Antigravity ACP requires the official CLI with a Google login profile and no API key, endpoints or launch overrides" });
+  }
+  if (supplier.antigravityProxyUrl && (supplier.transport !== "antigravity-acp" || supplier.network !== "proxy")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["antigravityProxyUrl"],
+      message: "antigravityProxyUrl requires Antigravity ACP with proxy networking" });
   }
   if (supplier.transport !== "http" && supplier.cost.type !== "subscription") {
     context.addIssue({
@@ -149,16 +170,28 @@ const modelCatalogSchema = z.object({
 });
 const runtimeSettingsSchema = z.object({
   zenmuxProxyUrl: z.string().trim().url().optional(),
+  modelProxyFallbackUrls: z.array(z.string().trim().url().refine(value => {
+    if (!URL.canParse(value)) return false;
+    const url = new URL(value);
+    return ["http:", "https:", "socks5:"].includes(url.protocol) && Boolean(url.hostname)
+      && (url.protocol !== "socks5:" || Boolean(url.port))
+      && !url.username && !url.password && (url.pathname === "/" || !url.pathname) && !url.search && !url.hash;
+  }, "native model proxies must be HTTP(S) or SOCKS5 URLs without credentials")).min(1).optional(),
   modelConnectTimeoutMs: z.number().int().positive(),
   modelFirstProgressTimeoutMs: z.number().int().positive(),
   modelProgressIdleTimeoutMs: z.number().int().positive(),
   imageGenerationTimeoutMs: z.number().int().positive().optional(),
+  imageGenerationRetryAttempts: z.number().int().min(0).max(3).optional(),
   modelCircuitBreakerMs: z.number().int().positive(),
   modelRetryAttempts: z.number().int().positive().default(2),
   modelNetworkRetryAttempts: z.number().int().min(0).max(10).default(5),
   modelRetryDelayMs: z.number().int().nonnegative().default(1000)
 });
 const integrationsSchema = z.object({
+  projectMcp: z.object({
+    agents: z.array(z.string().regex(/^[a-z][a-z0-9-]*$/)).min(1),
+    credentialFile: z.string().trim().min(1)
+  }).strict().optional(),
   dashboard: z.object({
     publicUrl: z.string().url().refine(value => { try { const url = new URL(value); return url.protocol === 'https:' && url.pathname === '/dashboard/' && !url.username && !url.password && !url.search && !url.hash; } catch { return false; } }, 'Dashboard must use HTTPS and /dashboard/'),
     storage: z.string().trim().min(1),
@@ -172,14 +205,21 @@ const integrationsSchema = z.object({
     }).optional()
   }).optional(),
   health: z.object({
+    // Legacy primary account stays Deepmind; additional accounts never share its storage or seed.
     agents: z.array(z.literal("deepmind")).length(1),
+    additionalAccounts: z.array(z.object({
+      agentId: z.string().regex(/^[a-z][a-z0-9_-]*$/),
+      storage: z.string().trim().min(1),
+      tokenEnv: z.string().regex(/^[A-Z][A-Z0-9_]*_HEALTH_INGEST_TOKEN$/),
+      initialSkillPath: z.string().trim().min(1).optional()
+    })).default([]),
     storage: z.string().trim().min(1),
     listenHost: z.literal("127.0.0.1").default("127.0.0.1"),
     listenPort: z.number().int().min(1024).max(65535).default(8789),
     tokenEnv: z.literal("HEALTH_INGEST_TOKEN").default("HEALTH_INGEST_TOKEN"),
     initialSkillPath: z.string().trim().min(1).optional(),
     publicUrl: z.string().trim().url().startsWith("https://").optional(),
-    maxBodyBytes: z.number().int().min(1024).max(4 * 1024 * 1024).default(4 * 1024 * 1024)
+    maxBodyBytes: z.number().int().min(1024).max(MAX_HEALTH_BODY_BYTES).default(MAX_HEALTH_BODY_BYTES)
   }).optional(),
   notion: z.object({
     serverUrl: z.literal("https://mcp.notion.com/mcp").default("https://mcp.notion.com/mcp"),
@@ -229,6 +269,7 @@ const profileSchema = z.object({
   envPrefix: z.string().trim().regex(/^[A-Z][A-Z0-9_]*$/),
   channel: z.literal("web").default("web"),
   web: z.object({
+    themePalette: z.enum(paletteIds).optional(),
     listenHost: z.literal("127.0.0.1").default("127.0.0.1"),
     listenPort: z.number().int().min(1024).max(65535),
     publicUrl: z.string().url().refine(value => { try { const url = new URL(value); return url.protocol === "https:" && /^\/[a-z][a-z0-9-]{0,63}\/$/.test(url.pathname) && !url.username && !url.password && !url.search && !url.hash; } catch { return false; } }, "Web URL must use HTTPS and an Agent base path"),
@@ -238,6 +279,11 @@ const profileSchema = z.object({
       apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*_API_KEY$/),
       tos: z.object({ accessKeyEnv: z.string().min(1), secretKeyEnv: z.string().min(1),
         endpoint: z.string().regex(/^tos-[a-z0-9-]+\.volces\.com$/), region: z.string().min(1), bucket: z.string().min(1) }).strict()
+    }).strict().optional(),
+    meeting: z.object({ model: z.literal("doubao-seeduplex3.0-official"), apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*_API_KEY$/),
+      rtc: z.object({ enabled:z.boolean().default(false), url:z.string().url().refine(v=>/^wss:\/\//.test(v)||/^ws:\/\/(localhost|127\.0\.0\.1)(:|\/)/.test(v)),
+        serverUrl:z.string().url().refine(v=>/^https?:\/\//.test(v)), apiKeyEnv:z.string().regex(/^[A-Z][A-Z0-9_]*_API_KEY$/),
+        secretEnv:z.string().regex(/^[A-Z][A-Z0-9_]*_API_KEY$/) }).strict().optional()
     }).strict().optional(),
     speech: z.object({
       model: z.literal("doubao-seedasr2.0-official"),
@@ -275,12 +321,15 @@ const profileSchema = z.object({
     brand: identityPartSchema,
     supplier: identityPartSchema
   }).optional(),
-  modelRuntime: runtimeSettingsSchema.partial().optional(),
+  modelRuntime: runtimeSettingsSchema.omit({ modelProxyFallbackUrls: true }).partial().optional(),
   fileWorkbench: z.object({
     enabled: z.boolean().default(true),
     stateDirectory: z.string().trim().min(1),
     executionEndpoint: z.string().url().optional(),
     executionPreviousEndpoint: z.string().url().optional(),
+    gitTransport: z.enum(['ssh', 'https']).optional(),
+    gitProxyUrl: z.string().url().refine(value => { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; }, 'Git proxy must be HTTP(S) without embedded credentials').optional(),
+    nativeStateDirectory: z.string().trim().min(1).optional(),
     executionTokenEnv: apiKeyEnvSchema.optional(),
     executionTokenFile: z.string().trim().min(1).optional()
   }).strict().optional(),
@@ -366,13 +415,13 @@ const profileSchema = z.object({
             path: ["models"],
             message: `model ${model.name} references unknown supplier ${model.supplier}`
           });
-        } else if ((model.protocol === "codex-app-server" || model.protocol === "claude-code") && supplier.transport !== model.protocol) {
+        } else if ((model.protocol === "codex-app-server" || model.protocol === "claude-code" || model.protocol === "cursor-acp" || model.protocol === "antigravity-acp") && supplier.transport !== model.protocol) {
           context.addIssue({
             code: z.ZodIssueCode.custom,
             path: ["suppliers", model.supplier, "transport"],
             message: `${model.supplier} is not a ${model.protocol} supplier for model ${model.name}`
           });
-        } else if (model.protocol !== "codex-app-server" && model.protocol !== "claude-code" && !supplier.endpoints[model.protocol]) {
+        } else if (model.protocol !== "codex-app-server" && model.protocol !== "claude-code" && model.protocol !== "cursor-acp" && model.protocol !== "antigravity-acp" && !supplier.endpoints[model.protocol]) {
           context.addIssue({
             code: z.ZodIssueCode.custom,
             path: ["suppliers", model.supplier, "endpoints", model.protocol],

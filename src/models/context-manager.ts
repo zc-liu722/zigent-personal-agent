@@ -3,8 +3,8 @@ import type { ModelDeployment } from "../config.js";
 import type { TokenUsage } from "../memory/types.js";
 import type { ModelGatewayConfig } from "./gateway-config.js";
 import { contextPolicy, type ContextPolicy } from "./context-policy.js";
-import { estimateMessageTokens, estimateNativeTokens, estimateRequestTokens, estimateTextTokens, messageFingerprint, renderContextTranscript, safeCut } from "./context-projection.js";
-import { addTokenUsage, ContextSummaryError } from "./context-summary.js";
+import { ContextAnalysis, estimateNativeTokens, estimateTextTokens } from "./context-projection.js";
+import { addTokenUsage, ContextSummaryError, harnessCheckpoint, harnessRequest } from "./context-summary.js";
 import { contextEvidence, renderContextEvidence, type ContextEvidence } from "./context-evidence.js";
 import { modelRequestDispatcher } from "./http-transport.js";
 import { ModelContextOverflowError } from "./errors.js";
@@ -32,8 +32,8 @@ export type ContextRunState = {
 };
 export const createContextRunState = (): ContextRunState => ({ checkpoints: new Map(), calibration: new Map(), nativeUnavailable: new Set(), prunedResults: new Map(), reportedWindows: new Map() });
 export type ContextPreparation = { request: ModelRoundRequest; estimated: number; usage: TokenUsage; policy: ContextPolicy };
-type SummaryGenerator = (route: ModelDeployment, transcript: string, previous?: string,
-  signal?: AbortSignal, reasoningEfforts?: ModelRoundRequest["reasoningEfforts"], policy?: ContextPolicy) => Promise<{ text: string; usage: TokenUsage }>;
+type SummaryGenerator = (route: ModelDeployment, prefix: ModelRoundRequest, policy: ContextPolicy, scale: number,
+  signal?: AbortSignal) => Promise<{ text: string; usage: TokenUsage }>;
 type NativeGenerator = (route: ModelDeployment, request: ModelRoundRequest,
   signal?: AbortSignal) => Promise<{ items: Record<string, unknown>[]; usage: TokenUsage }>;
 
@@ -64,10 +64,10 @@ function missingNativeAnchors(anchors: readonly ModelConversationMessage[], nati
 }
 
 export class ModelContextManager {
-  private readonly discoveries = new Map<string, { until: number; value: Promise<ModelDeployment> }>();
+  private readonly discoveries = new WeakMap<ModelDeployment, { until: number; value: Promise<ModelDeployment> }>();
   private readonly catalogues = new Map<string, { until: number; value: Promise<Array<Record<string, unknown>>> }>();
-  private readonly runtimeWindows = new Map<string, number>();
-  private readonly nativeDeniedUntil = new Map<string, number>();
+  private readonly runtimeWindows = new WeakMap<ModelDeployment, number>();
+  private readonly nativeDeniedUntil = new WeakMap<ModelDeployment, number>();
   constructor(private readonly config: ModelGatewayConfig, private readonly summarize: SummaryGenerator,
     private readonly native: NativeGenerator) {}
 
@@ -83,7 +83,7 @@ export class ModelContextManager {
         error => { signal.removeEventListener("abort", abort); reject(error); });
       if (signal.aborted) abort();
     }) : await discovery;
-    const runtime = this.runtimeWindows.get(route.name);
+    const runtime = this.runtimeWindows.get(route);
     const window = runtime ?? resolved.context?.windowTokens ?? 32_768;
     const policy = contextPolicy({ ...resolved, ...(resolved.context ? { context: { ...resolved.context, windowTokens: window } } : {}) }, this.config);
     return { ...policy, hardLimit: policy.hardLimit || runtime !== undefined,
@@ -93,7 +93,7 @@ export class ModelContextManager {
   private async discover(route: ModelDeployment): Promise<ModelDeployment> {
     const url = route.context?.discoveryUrl;
     if (!url) return route;
-    const existing = this.discoveries.get(route.name);
+    const existing = this.discoveries.get(route);
     if (existing && existing.until > Date.now()) return existing.value;
     const value = (async () => {
       try {
@@ -126,14 +126,14 @@ export class ModelContextManager {
         return route;
       }
     })();
-    this.discoveries.set(route.name, { until: Date.now() + 15 * 60_000, value });
-    try { return await value; } catch (error) { this.discoveries.delete(route.name); throw error; }
+    this.discoveries.set(route, { until: Date.now() + 15 * 60_000, value });
+    try { return await value; } catch (error) { this.discoveries.delete(route); throw error; }
   }
 
   observe(route: ModelDeployment, prepared: ContextPreparation, result: ModelRoundResult): void {
-    if (result.contextWindowTokens && result.contextWindowTokens >= 4096) this.runtimeWindows.set(route.name, result.contextWindowTokens);
+    if (result.contextWindowTokens && result.contextWindowTokens >= 4096) this.runtimeWindows.set(route, result.contextWindowTokens);
     const state = prepared.request.contextState;
-    if (state && route.protocol !== "codex-app-server" && route.protocol !== "claude-code"
+    if (state && route.protocol !== "codex-app-server" && route.protocol !== "claude-code" && route.protocol !== "antigravity-acp"
       && !result.webSearchCalls.length && result.usage.inputTokens > 0 && prepared.estimated > 0) {
       // prepared.estimated already includes the previous calibration; recover
       // the absolute factor so a second under-estimate can increase it again.
@@ -149,7 +149,12 @@ export class ModelContextManager {
     const force = recovery !== undefined;
     const state = original.contextState ?? createContextRunState();
     const scale = state.calibration.get(route.name) ?? 1;
-    const estimate = (request: ModelRoundRequest) => Math.ceil(estimateRequestTokens(request) * scale);
+    const analysis = new ContextAnalysis();
+    // External code may mutate input objects, including on a rejected call.
+    const callExternal = async <T>(call: () => Promise<T>): Promise<T> => {
+      try { return await call(); } finally { analysis.clear(); }
+    };
+    const estimate = (request: ModelRoundRequest) => Math.ceil(analysis.requestTokens(request) * scale);
     const emptyUsage = (): TokenUsage => ({ inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 });
     let usage = emptyUsage();
     if (recovery?.reason === "overflow" && recovery.window !== undefined && recovery.window >= 4096) {
@@ -161,10 +166,20 @@ export class ModelContextManager {
       // fictitious model window. An exact numeric rejection applies to this run.
       policy = contextPolicy({ ...route, context: { ...route.context!, windowTokens: reportedWindow, confidence: "verified", limitSource: "supplier" } }, this.config);
     }
-    if (force) {
+    if (policy.strategy === "runtime") {
+      // The native runtime owns its history and auto-compaction. Admission only
+      // checks the new input and host context that it must consume in one step.
+      const current = original.messages.findIndex(message => message.role === "user" && message.contextRole === "current");
+      const input = current < 0 || !original.codexChat ? original.messages : original.messages.filter((message, index) => index >= current ||
+        message.role === "user" && (message.contextRole === "pinned" || message.contextRole === "volatile"));
+      const estimated = estimate({ ...original, messages: input });
+      if (force || policy.hardLimit && estimated > policy.inputLimit) throw new ModelContextOverflowError();
+      return { request: original, estimated, usage, policy };
+    }
+    if (recovery?.reason === "native-replay") {
       state.checkpoints.delete(route.name);
       state.nativeUnavailable.add(route.name);
-      this.nativeDeniedUntil.set(route.name, Date.now() + 60 * 60_000);
+      this.nativeDeniedUntil.set(route, Date.now() + 60 * 60_000);
     }
     const pinned = original.messages.filter(message => message.role === "user" && message.contextRole === "pinned");
     const volatile = original.messages.filter(message => message.role === "user" && message.contextRole === "volatile");
@@ -173,27 +188,28 @@ export class ModelContextManager {
       const lastUser = source.map(message => message.role).lastIndexOf("user");
       source = source.map((message, index) => index === lastUser && message.role === "user" ? { ...message, contextRole: "current" } : message);
     }
-    const hashes = source.map(messageFingerprint);
+    const hashes = source.map(analysis.fingerprint);
     const credentialScope = createHash("sha256").update(route.apiKey ?? route.codexHome ?? route.supplier).digest("hex");
     const binding = `${route.name}:${route.protocol}:${route.supplier}:${route.apiModel}:${credentialScope}`;
     const promptHash = createHash("sha256").update(original.systemPrompt ?? "").update(JSON.stringify(original.tools)).digest("hex");
     let checkpoint = state.checkpoints.get(route.name);
-    if (checkpoint && (checkpoint.binding !== binding || checkpoint.native && checkpoint.promptHash !== promptHash
+    if (checkpoint && (checkpoint.binding !== (checkpoint.native ? binding : `harness-v1:${binding}`)
+      || checkpoint.native && checkpoint.promptHash !== promptHash
       || checkpoint.evidence && (checkpoint.evidence.messageCount !== checkpoint.hashes.length
         || checkpoint.evidence.sourceHash !== createHash("sha256").update(checkpoint.hashes.join("\n")).digest("hex"))
       || !checkpoint.hashes.every((hash, index) => hashes[index] === hash))) {
       state.checkpoints.delete(route.name); checkpoint = undefined;
     }
     if (checkpoint) {
-      const current = new Set(source.filter(message => message.role === "user" && message.contextRole === "current").map(messageFingerprint));
+      const current = new Set(source.filter(message => message.role === "user" && message.contextRole === "current").map(analysis.fingerprint));
       checkpoint = { ...checkpoint, anchors: checkpoint.anchors.filter(message => message.role !== "user"
-        || message.contextRole !== "current" || current.has(messageFingerprint(message))) };
+        || message.contextRole !== "current" || current.has(analysis.fingerprint(message))) };
     }
     const startedAt = Date.now();
     const liveRecall = original.tools.some(tool => tool.type === "function" && tool.name === "conversation_history");
     const ambiguousCalls = new Set<string>(), resultHashes = new Map<string, string>();
     for (const message of source) if (message.role === "tool") {
-      const hash = messageFingerprint(message), previousHash = resultHashes.get(message.toolCallId);
+      const hash = analysis.fingerprint(message), previousHash = resultHashes.get(message.toolCallId);
       if (previousHash && previousHash !== hash) ambiguousCalls.add(message.toolCallId);
       resultHashes.set(message.toolCallId, hash);
     }
@@ -205,14 +221,17 @@ export class ModelContextManager {
         expected_hash: createHash("sha256").update(message.value).digest("hex") })}. Do not infer omitted details or repeat the original action.]` });
     let messages = source.slice(checkpoint?.hashes.length ?? 0);
     if (liveRecall && pruned.size) messages = withoutReasoning(messages.map(message => message.role === "tool"
-      && !ambiguousCalls.has(message.toolCallId) && pruned.has(messageFingerprint(message)) ? omission(message) : message));
+      && !ambiguousCalls.has(message.toolCallId) && pruned.has(analysis.fingerprint(message)) ? omission(message) : message));
     const format = (history: readonly ModelConversationMessage[]) => route.protocol === "openai-responses"
       ? openAiConversation(withoutReasoning(history), { ...route, capabilities: route.capabilities! })
       : anthropicConversation(withoutReasoning(history), { ...route, capabilities: route.capabilities! });
     const build = (history: readonly ModelConversationMessage[], summary = checkpoint?.summary): ModelRoundRequest => {
       const projected: ModelRoundRequest = {
         ...original, contextState: state, maxOutputTokens: Math.min(original.maxOutputTokens ?? policy.output, policy.output),
-        messages: [...pinned, ...(summary ? [{ role: "user" as const, text: `<session_checkpoint trust="derived">\n${summary}\n</session_checkpoint>` }] : []),
+        contextRevision: original.acpChat && checkpoint ? createHash("sha256").update(JSON.stringify([
+          checkpoint.binding, checkpoint.generation, checkpoint.hashes, checkpoint.summary
+        ])).digest("hex") : undefined,
+        messages: [...pinned, ...(summary ? [harnessCheckpoint(summary)] : []),
           ...(checkpoint?.evidence ? [{ role: "user" as const,
             text: renderContextEvidence(checkpoint.evidence, liveRecall, Math.min(1024, Math.max(256, policy.summary / 4))) }] : []),
           ...missingNativeAnchors(checkpoint?.anchors ?? [], checkpoint?.native), ...history, ...volatile], nativeContext: undefined
@@ -223,8 +242,8 @@ export class ModelContextManager {
     };
     let request = build(messages);
     const measured = () => checkpoint?.native && request.nativeContext
-      ? Math.ceil(Math.max(estimateRequestTokens(request), (checkpoint.nativeTokens ?? policy.target)
-        + estimateRequestTokens({ ...request, nativeContext: undefined })) * scale)
+      ? Math.ceil(Math.max(analysis.requestTokens(request), (checkpoint.nativeTokens ?? policy.target)
+        + analysis.requestTokens({ ...request, nativeContext: undefined })) * scale)
       : estimate(request);
     const irreducible = estimate({ ...original, nativeContext: undefined, messages: [...pinned, ...volatile,
       ...source.filter(message => message.role === "user" && message.contextRole === "current"),
@@ -243,7 +262,7 @@ export class ModelContextManager {
     const diagnostic = (reason: string, after = before) => ({ agent: this.config.id, model: route.name, reason,
       hardLimit: policy.hardLimit, window: policy.window, inputLimit: policy.inputLimit, trigger, irreducible, before, after,
       systemTokens: estimateTextTokens(original.systemPrompt ?? ""), toolTokens: estimateTextTokens(JSON.stringify(original.tools)),
-      pinnedTokens: pinned.reduce((sum, message) => sum + estimateMessageTokens(message), 0),
+      pinnedTokens: pinned.reduce((sum, message) => sum + analysis.messageTokens(message), 0),
       sourceMessages: source.length, sourceImages: source.reduce((sum, message) => sum + (message.role === "user" ? message.images?.length ?? 0 : 0), 0),
       calibration: scale, recovery: recovery?.reason });
     const unchanged = (reason: string): ContextPreparation => {
@@ -258,27 +277,27 @@ export class ModelContextManager {
     const edited = [...messages];
     for (let index = edited.length - 1; index >= 0; index--) {
       const message = edited[index]!;
-      recent += estimateMessageTokens(message);
+      recent += analysis.messageTokens(message);
       if (!liveRecall || recent <= policy.keepRecent || message.role !== "tool" || ambiguousCalls.has(message.toolCallId)
         || policy.protectedTools.includes(calls.get(message.toolCallId) ?? "")
         || /pending_confirmation|requires_confirmation|"status"\s*:\s*"pending"/.test(message.value)) continue;
-      if (estimateMessageTokens(message) < 512) continue;
+      if (analysis.messageTokens(message) < 512) continue;
       const replacement = omission(message);
-      reclaimed += estimateMessageTokens(message) - estimateMessageTokens(replacement);
+      reclaimed += analysis.messageTokens(message) - analysis.messageTokens(replacement);
       edited[index] = replacement;
-      newlyPruned.push(messageFingerprint(message));
+      newlyPruned.push(analysis.fingerprint(message));
     }
     if (reclaimed >= Math.max(1024, policy.window * 0.01)) {
       for (const hash of newlyPruned) pruned.add(hash);
       messages = withoutReasoning(edited); request = build(messages);
-      if (measured() < trigger && canContinue(measured())) {
+      if (policy.strategy === "summary" && measured() < trigger && canContinue(measured())) {
         console.info("MODEL_CONTEXT_PRUNED", { agent: this.config.id, model: route.name, before, after: measured(), reclaimed });
         return { request, estimated: measured(), usage, policy };
       }
     }
-    let cut = safeCut(messages, Math.min(policy.keepRecent, force ? policy.target * 0.5 : policy.keepRecent));
+    let cut = analysis.cut(messages, Math.min(policy.keepRecent, force ? policy.target * 0.5 : policy.keepRecent));
     if ((policy.hardLimit || recovery?.reason === "overflow")
-      && estimate(build(messages.slice(cut))) + policy.summary >= policy.inputLimit) cut = safeCut(messages, 0);
+      && estimate(build(messages.slice(cut))) + policy.summary >= policy.inputLimit) cut = analysis.cut(messages, 0);
     if (!cut) return unchanged("no_closed_prefix");
     // A current-only prefix cannot shrink: the user input must be restored as
     // an anchor, so adding its summary would only make the request larger.
@@ -289,16 +308,16 @@ export class ModelContextManager {
       console.warn("MODEL_CONTEXT_IRREDUCIBLE", diagnostic("fixed_context_exceeds_verified_limit", irreducible));
       throw new ModelContextOverflowError();
     }
-    original.onContextProgress?.();
-    // Projection edits must never become the evidence used to generate a checkpoint.
+    if (original.onContextProgress) {
+      try { original.onContextProgress(); } finally { analysis.clear(); }
+    }
+    // A checkpoint must identify its original source even when request projection
+    // replaced a large tool result with a reference.
     const prefixStart = checkpoint?.hashes.length ?? 0;
     const prefix = source.slice(prefixStart, prefixStart + cut), tail = messages.slice(cut);
     const fullPrefix = source.slice(0, prefixStart + cut);
-    const evidence = contextEvidence(fullPrefix);
+    const evidence = contextEvidence(fullPrefix, analysis.fingerprint);
     const generation = (checkpoint?.generation ?? 0) + 1;
-    // Periodically rebuild from all source still available to this run. This cannot
-    // restore session history already archived before the run; its references remain.
-    const rebuild = Boolean(checkpoint && (checkpoint.native || !checkpoint.evidence || generation % 4 === 0));
     const previous = checkpoint;
     // Successful reversible tool offloading remains a valid fallback even if
     // summarization fails. Keep this complete projection before staging a new
@@ -308,43 +327,55 @@ export class ModelContextManager {
     let checkpointEstimate: number | undefined;
     try {
       let native: Record<string, unknown>[] | undefined, nativeTokens: number | undefined;
-      let sourceRebuilt = false;
-      let summary = rebuild ? undefined : checkpoint?.summary;
+      let summary: string | undefined;
+      const compactWithHarness = (history: readonly ModelConversationMessage[], prior?: string) => {
+        const makeRequest = (input: readonly ModelConversationMessage[]): ModelRoundRequest => ({
+          ...original, nativeContext: undefined,
+          messages: [...pinned, ...(prior ? [harnessCheckpoint(prior)] : []), ...input]
+        });
+        const exact = makeRequest(history);
+        // Reuse the original request prefix where possible. On a tighter window,
+        // the Harness-style tool pruning may make the same balanced span fit.
+        const input = pruned.size > 0 && !harnessRequest(exact, policy, scale)
+          ? makeRequest(history.map(message => message.role === "tool" && pruned.has(analysis.fingerprint(message)) ? omission(message) : message))
+          : exact;
+        return callExternal(() => this.summarize(route, input, policy, scale, signal));
+      };
       if (["openai-native", "anthropic-native"].includes(policy.strategy) && !state.nativeUnavailable.has(route.name)
-        && (this.nativeDeniedUntil.get(route.name) ?? 0) < Date.now()) {
+        && (this.nativeDeniedUntil.get(route) ?? 0) < Date.now()) {
         const nativeMessages: ModelConversationMessage[] = [
-          ...(checkpoint?.summary ? [{ role: "user" as const, text: `<session_checkpoint trust="derived">${checkpoint.summary}</session_checkpoint>` }] : []),
+          ...(checkpoint?.summary ? [harnessCheckpoint(checkpoint.summary)] : []),
           ...missingNativeAnchors(checkpoint?.anchors ?? [], checkpoint?.native), ...prefix];
         const nativeRequest: ModelRoundRequest = { ...build(prefix), messages: nativeMessages, nativeContext: undefined };
         if (checkpoint?.native) nativeRequest.nativeContext = { route: route.name, protocol: route.protocol,
           items: [...checkpoint.native, ...format(nativeMessages)] };
-        // Native compact inputs must themselves fit. Oversized prefixes use the portable chunked summarizer.
-        const nativeEstimate = checkpoint?.native ? Math.ceil(Math.max(estimateRequestTokens(nativeRequest),
-          (checkpoint.nativeTokens ?? policy.target) + estimateRequestTokens({ ...nativeRequest, nativeContext: undefined })) * scale) : estimate(nativeRequest);
+        // Native compact inputs must themselves fit the supplier's window.
+        const nativeEstimate = checkpoint?.native ? Math.ceil(Math.max(analysis.requestTokens(nativeRequest),
+          (checkpoint.nativeTokens ?? policy.target) + analysis.requestTokens({ ...nativeRequest, nativeContext: undefined })) * scale) : estimate(nativeRequest);
         if (nativeEstimate < policy.inputLimit) {
           try {
-            const compacted = await this.native(route, nativeRequest, signal);
+            const compacted = await callExternal(() => this.native(route, nativeRequest, signal));
             usage = addTokenUsage(usage, compacted.usage); native = compacted.items;
             nativeTokens = estimateNativeTokens(compacted.items, compacted.usage.outputTokens);
           } catch (error) {
             if (signal?.aborted) throw error;
             state.nativeUnavailable.add(route.name);
-            this.nativeDeniedUntil.set(route.name, Date.now() + 60 * 60_000);
+            this.nativeDeniedUntil.set(route, Date.now() + 60 * 60_000);
             console.warn("MODEL_CONTEXT_NATIVE_UNAVAILABLE", { agent: this.config.id, model: route.name, kind: error instanceof Error ? error.name : "unknown" });
           }
         }
       }
       if (!native) {
-        const generated = await this.summarize(route, renderContextTranscript(rebuild ? fullPrefix : prefix), summary, signal, original.reasoningEfforts, policy);
+        const generated = checkpoint?.native ? await compactWithHarness(fullPrefix) : await compactWithHarness(prefix, checkpoint?.summary);
         usage = addTokenUsage(usage, generated.usage); summary = generated.text;
-        sourceRebuilt = rebuild;
       }
       // Keep original image bytes independently from a lossy text summary.
       const imageMemory = prefix.flatMap(message => message.role === "user" && message.images?.length
         && message.contextRole !== "current"
         ? [{ ...message, text: `[Images from compressed history${message.sourceTurnId ? ` turn ${message.sourceTurnId}` : ""}]`, contextRole: "pinned" as const }] : []);
       const currentInput = prefix.filter(message => message.role === "user" && message.contextRole === "current");
-      let next: Checkpoint = { hashes: hashes.slice(0, prefixStart + cut), promptHash, binding, evidence, generation,
+      let next: Checkpoint = { hashes: hashes.slice(0, prefixStart + cut), promptHash, evidence, generation,
+        binding: native ? binding : `harness-v1:${binding}`,
         anchors: [...(checkpoint?.anchors ?? []), ...imageMemory, ...currentInput],
         ...(native ? { native, nativeTokens } : { summary }) };
       checkpoint = next;
@@ -355,11 +386,10 @@ export class ModelContextManager {
         // Some native endpoints retain all user messages. A large user document
         // can therefore need portable compression even after a valid native pass.
         checkpoint = previous;
-        const generated = await this.summarize(route, renderContextTranscript(fullPrefix), undefined, signal, original.reasoningEfforts, policy);
+        const generated = checkpoint?.native ? await compactWithHarness(fullPrefix) : await compactWithHarness(prefix, previous?.summary);
         usage = addTokenUsage(usage, generated.usage);
-        sourceRebuilt = true;
         native = undefined;
-        next = { ...next, native: undefined, nativeTokens: undefined, summary: generated.text };
+        next = { ...next, binding: `harness-v1:${binding}`, native: undefined, nativeTokens: undefined, summary: generated.text };
         checkpoint = next;
         request = build(withoutReasoning(tail));
         after = measured();
@@ -368,18 +398,18 @@ export class ModelContextManager {
       checkpointEstimate = after;
       if (after >= before || !canContinue(after)) { checkpoint = previous; throw new ModelContextOverflowError(); }
       signal?.throwIfAborted();
-      next.stats = { createdAt: Date.now(), before, after, reason: force ? "overflow" : sourceRebuilt ? "source_rebuild" : "threshold",
+      next.stats = { createdAt: Date.now(), before, after, reason: force ? "overflow" : "threshold",
         durationMs: Date.now() - startedAt, strategy: native ? policy.strategy : "summary", generation };
       state.checkpoints.set(route.name, next);
       if (state.persistence) {
         const serializable = [...state.checkpoints].filter(([, entry]) => !entry.anchors.some(message => message.role === "user" && message.images?.length))
           .map(([model, checkpoint]) => ({ model, checkpoint }));
-        try { await state.persistence.save(serializable); }
+        try { await callExternal(() => state.persistence!.save(serializable)); }
         catch (error) { console.warn("MODEL_CONTEXT_CHECKPOINT_SAVE_FAILED", { agent: this.config.id, kind: error instanceof Error ? error.name : "unknown" }); }
       }
       console.info("MODEL_CONTEXT_COMPACTED", { agent: this.config.id, model: route.name, strategy: native ? policy.strategy : "summary",
         window: policy.window, trigger, before, after, keptMessages: tail.length, recovery: force,
-        sourceMessages: evidence.messageCount, generation, sourceRebuilt, durationMs: next.stats.durationMs });
+        sourceMessages: evidence.messageCount, generation, durationMs: next.stats.durationMs });
       return { request, estimated: after, usage, policy };
     } catch (error) {
       checkpoint = previous;

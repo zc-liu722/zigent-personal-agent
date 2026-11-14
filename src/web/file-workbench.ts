@@ -37,13 +37,14 @@ export function createFileWorkbenchRoutes(service: FileWorkbench | undefined, st
     try {
       const suffix = route.slice("api/workbench".length);
       if (!suffix && req.method === "GET") {
-        const defaultWorkspaceId=await service.defaultWorkspace();
+        await service.registeredWorkspaces();
+        const workspaces=service.files.listWorkspaces(),defaultWorkspaceId=workspaces[0]?.id;
         const shares = service.files.listShares().map(share => {
           let name: string | undefined;
           try { if (share.kind === "version") name = service.files.artifactVersion(share.resourceId).name; } catch { /* Revocation can race a list. */ }
           return {...share,direction:share.targetAgentId === service.config.id ? "incoming":"outgoing",name};
         });
-        json(res,200,{agentId:service.config.id,currentAgentId:service.config.id,workspaces:service.files.listWorkspaces(),artifacts:service.files.listArtifacts(undefined,"artifact",0,20),originals:service.originals(),
+        json(res,200,{agentId:service.config.id,currentAgentId:service.config.id,workspaces,artifacts:service.files.listArtifacts(undefined,"artifact",0,20),originals:service.originals(),
           jobs:service.execution.list(),shares,peers:await service.peers(),defaultWorkspaceId,storage:await service.storage()}); return true;
       }
       if (suffix === "/artifacts" && req.method === "GET") {
@@ -55,18 +56,19 @@ export function createFileWorkbenchRoutes(service: FileWorkbench | undefined, st
       if (suffix === "/runtime" && req.method === "GET") { json(res,200,await service.describe()); return true; }
       if (suffix === "/workspaces" && req.method === "POST") {
         const input=z.object({name:z.string().trim().min(1).max(160)}).strict().parse(await data(req,2048));
-        json(res,201,await service.files.createWorkspace(input)); return true;
+        json(res,201,await service.files.createWorkspace({...input,lifetime:"persistent"})); return true;
       }
       const workspaceRoute=/^\/workspaces\/([^/]+)\/(files|file|download|select)$/.exec(suffix);
       if (workspaceRoute) {
         const workspaceId=id.parse(workspaceRoute[1]), action=workspaceRoute[2];
         service.files.workspace(workspaceId);
+        if (action !== "select") service.files.assertSessionAccess(workspaceId);
         if (action === "files" && req.method === "GET") { json(res,200,await service.execution.listWorkingFiles(workspaceId,url.searchParams.get("path")??".",integer(url.searchParams.get("offset"),0,1_000_000),100)); return true; }
         if (action === "file" && req.method === "GET") { json(res,200,await service.workingText(workspaceId,relativePath.parse(url.searchParams.get("path")),integer(url.searchParams.get("offset"),0,100_000_000),integer(url.searchParams.get("limit"),64000,64000))); return true; }
         if (action === "download" && ["GET","HEAD"].includes(req.method??"")) { bytes(req,res,await service.workingFile(workspaceId,relativePath.parse(url.searchParams.get("path")))); return true; }
         if (action === "file" && req.method === "PUT") {
           const input=z.object({path:relativePath,text:z.string().max(1_000_000),expectedHash:z.string().regex(/^[a-f0-9]{64}$/).optional()}).strict().parse(await data(req,4_100_000));
-          service.assertIdle(workspaceId); json(res,200,await service.files.writeFile(workspaceId,input.path,Buffer.from(input.text),input.expectedHash)); return true;
+          await service.assertEditable(workspaceId); json(res,200,await service.files.writeFile(workspaceId,input.path,Buffer.from(input.text),input.expectedHash)); return true;
         }
         if (action === "select" && req.method === "POST") {
           const input=z.object({conversationId:z.string().regex(/^[a-f0-9]{64}$/)}).strict().parse(await data(req,1024));
@@ -79,7 +81,7 @@ export function createFileWorkbenchRoutes(service: FileWorkbench | undefined, st
         const input=z.object({versionId:id.optional(),workspaceId:id.optional(),path:relativePath.optional(),uploadId:id.optional(),retry:z.boolean().optional()}).strict()
           .refine(value=>Number(Boolean(value.versionId))+Number(Boolean(value.workspaceId&&value.path))+Number(Boolean(value.uploadId))===1).parse(await data(req,4096));
         let versionId=input.versionId;
-        if(input.workspaceId&&input.path) versionId=(await service.snapshotWorkingFile(input.workspaceId,input.path)).versionId;
+        if(input.workspaceId&&input.path) {service.files.assertSessionAccess(input.workspaceId);versionId=(await service.snapshotWorkingFile(input.workspaceId,input.path)).versionId;}
         if(input.uploadId) {
           const metadata=store.documentMetadata([input.uploadId])[input.uploadId];
           if(!metadata)throw new Error("附件不存在。");
@@ -118,7 +120,7 @@ export function createFileWorkbenchRoutes(service: FileWorkbench | undefined, st
         if(!sharing[2] && req.method==="DELETE"){service.files.revokeShare(grantId,store.owner);json(res,200,{ok:true});return true;}
         if(sharing[2]==="files" && req.method==="GET"){json(res,200,await service.files.sharedWorkspaceFiles(grantId,url.searchParams.get("path")??".",integer(url.searchParams.get("offset"),0,1_000_000),100));return true;}
         if(sharing[2]==="copy" && req.method==="POST"){
-          const input=z.object({workspaceId:id,path:relativePath.optional()}).strict().parse(await data(req,4096));service.assertIdle(input.workspaceId);
+          const input=z.object({workspaceId:id,path:relativePath.optional()}).strict().parse(await data(req,4096));service.files.assertSessionAccess(input.workspaceId);await service.assertEditable(input.workspaceId);
           json(res,201,input.path?await service.files.copySharedWorkspaceFile(grantId,input.path,input.workspaceId):await service.files.copySharedVersion(grantId,input.workspaceId));return true;
         }
       }

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { mkdir, open, readFile, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import type { RecoveryIdentity } from "./auth.js";
+type RecoveryIdentity = { key: string; passwordVersion: string };
 
 const sha = /^[a-f0-9]{40}$/;
 export type RecoveryConfig = { root: string; listenHost: "127.0.0.1"; listenPort: number; backendPort: number; publicOrigin: string; basePath: string; webDatabasePath: string };
@@ -43,6 +43,7 @@ export class RecoveryService {
   private constructor(readonly config: RecoveryConfig, readonly db: DatabaseSync, run?: RecoveryService["run"]) {
     this.directory = join(config.root, "shared", "recovery");
     this.run = run ?? ((input, operationId) => executeRollback(config, input, operationId));
+    db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000");
     db.exec(`CREATE TABLE IF NOT EXISTS recovery_tickets(id TEXT PRIMARY KEY,device TEXT NOT NULL,password_version TEXT NOT NULL,current_version TEXT NOT NULL,target_version TEXT NOT NULL,expires_at INTEGER NOT NULL,operation_id TEXT);
       CREATE TABLE IF NOT EXISTS recovery_operations(id TEXT PRIMARY KEY,status TEXT NOT NULL,created_at INTEGER NOT NULL,ended_at INTEGER);`);
     // Never rerun a persisted request. A live external lock or the fixed script's
@@ -89,7 +90,7 @@ export class RecoveryService {
   async report(identity: RecoveryIdentity) {
     await this.reconcileResult();
     const versions = await this.versions(), busy = Boolean(this.running) || await this.externallyBusy();
-    if (!busy) this.db.prepare("UPDATE recovery_operations SET status='failed',ended_at=? WHERE status='running'").run(Date.now());
+    if (!busy) this.db.prepare("UPDATE recovery_operations SET status='failed',ended_at=? WHERE status='running' AND created_at<?").run(Date.now(), Date.now() - 30_000);
     const available = Boolean(versions.current && versions.previous);
     this.db.prepare("DELETE FROM recovery_tickets WHERE expires_at<=? AND operation_id IS NULL").run(Date.now());
     let confirmation: { id: string; expectedCurrent: string; targetVersion: string; expiresAt: number } | undefined;

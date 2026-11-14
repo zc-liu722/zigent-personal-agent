@@ -41,7 +41,7 @@
   const captureLcp = entry => {
     // Capture the category while the element is still attached (navigation can remove it).
     const element = entry.element;
-    const detail = element?.closest('#messages') ? (element.tagName === 'IMG' ? 'messages-image' : 'messages-text') : element?.closest('#welcome') ? 'welcome'
+    const detail = element?.closest('#messages') ? (element.tagName === 'IMG' ? 'messages-image' : 'messages-text')
       : element?.closest('#login') ? 'login' : element?.tagName === 'IMG' ? 'image' : 'other';
     candidateCount++;
     if (detail.startsWith('messages-')) firstMessageLcpMs ??= entry.startTime;

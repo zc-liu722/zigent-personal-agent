@@ -180,7 +180,7 @@ export class TaskStore {
       return this.create(scope, input, now, creationKey, initialHealthCursor);
     });
   }
-  sharedLocationScopes(): Array<Pick<TaskScope, "agentId" | "userId" | "principalId">> { return this.reusable.activeLocationScopes(); }
+  sharedLocationScopes(unique = false): Array<Pick<TaskScope, "agentId" | "userId" | "principalId">> { return this.reusable.activeLocationScopes(undefined, unique); }
   /** Maintenance update: install a validated rule and change its task binding in one transaction. */
   updateWithTriggerRevision(scope: TaskScope, id: string, patch: { instruction: string; trigger: { type: "reference"; triggerId: string } },
     triggerRevision: number, expectedTaskRevision: number, now = Date.now()): ActiveTask {
@@ -296,10 +296,11 @@ export class TaskStore {
       if (notificationId !== undefined) { receipt.notificationId = notificationId; receipt.historical = !fresh; }
       // Never publish historical imports into shared recent-event conditions or subscriptions.
       if (!fresh) return receipt;
-      const sharedQueued = this.reusable.accept(source, { id: `external:${source.id}:${event.eventId}`, type: "external", occurredAt, event: event.event, source: source.source }, now);
+      const reads = this.reusable.evaluation();
+      const sharedQueued = this.reusable.accept(source, { id: `external:${source.id}:${event.eventId}`, type: "external", occurredAt, event: event.event, source: source.source }, now, reads);
       receipt.queuedTasks += sharedQueued;
       receipt.matchedTasks += sharedQueued;
-      for (const task of this.all()) {
+      for (const task of reads.tasks()) {
         if (task.status !== "active" || task.userId !== source.userId || task.principalId !== source.principalId
           || task.trigger.type !== "external" || task.trigger.event !== event.event || task.trigger.source && task.trigger.source !== source.source) continue;
         receipt.matchedTasks++;
@@ -656,11 +657,13 @@ export class TaskStore {
         "INSERT OR IGNORE INTO task_location_events VALUES(?,?,?)")
         .run(this.options.ownerUserId === undefined ? `${event.userId}:${event.id}` : event.id, JSON.stringify(event), now);
       if (!inserted.changes) return;
+      // This receipt owns one read view; mutable trigger state and deduplication stay live.
+      const reads = this.reusable.evaluation();
       // Region events carry an owner identity; principal scope is resolved from authorized subscriptions.
-      for (const scope of this.reusable.activeLocationScopes()) if (scope.userId === event.userId)
+      for (const scope of this.reusable.activeLocationScopes(reads, true)) if (scope.userId === event.userId)
         this.reusable.accept(scope, { id: `location:${event.id}`, type: "location", occurredAt: event.occurredAt, event: event.event, regionId: event.regionId, regionName: event.regionName,
-          ...(event.velocityKph === undefined ? {} : { velocityKph: event.velocityKph }) }, now);
-      for (const task of this.all())
+          ...(event.velocityKph === undefined ? {} : { velocityKph: event.velocityKph }) }, now, reads);
+      for (const task of reads.tasks())
         if (
           task.userId === event.userId &&
           task.status === "active" &&
@@ -921,18 +924,24 @@ export class TaskStore {
         return true;
       }
       if (!this.heartbeat(id, token, 1, now)) return false;
+      const failed = result.outcome === "failed";
       const day = (run.payload as { dayKey?: string }).dayKey;
       if (result.text?.trim() && task.trigger.type === "health_change" && task.trigger.oncePerDay && day
         && this.dailyNotificationState(task.id, day)) result = { ...result, text: undefined };
       prepareSql(this.db,
-          "UPDATE task_runs SET state='succeeded',ended_at=?,result_json=?,notification_status=?,lease_token=NULL,lease_until=NULL WHERE id=?",
+          "UPDATE task_runs SET state=?,ended_at=?,result_json=?,notification_status=?,error=?,lease_token=NULL,lease_until=NULL WHERE id=?",
         )
         .run(
+          failed ? "failed" : "succeeded",
           now,
           JSON.stringify(result),
           result.text?.trim() ? "pending" : "none",
+          failed ? (result.summary ?? "Task execution incomplete").slice(0, 1000) : null,
           id,
         );
+      // A reported incomplete execution is terminal: preserve its partial effects,
+      // usage and notification without replaying work or advancing a success cursor.
+      if (failed) return true;
       // Advance only the exact revision cursor included in the successful snapshot.
       const cursor =
         result.cursor ?? (run.payload as { cursor?: number })?.cursor;

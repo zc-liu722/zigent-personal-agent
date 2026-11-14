@@ -1,17 +1,22 @@
 import { z } from "zod";
 
 const text = (max: number) => z.string().trim().min(1).max(max);
-const metric = z.object({ label: text(80), value: text(100), change: text(100).optional() }).strict();
+const metricTones = ["support", "detail"] as const;
+const metric = z.object({ label: text(80), value: text(100), change: text(100).optional(), tone: z.enum(metricTones).optional() }).strict();
 const resource = z.object({ title: text(160), url: text(2048).refine(safeOutputUrl, "Only HTTPS URLs without credentials are supported"),
   description: text(300).optional(), format: text(40).optional() }).strict();
 const placement = { after: text(500).optional() };
 const block = z.discriminatedUnion("type", [
+  z.object({ type:z.literal("image"), after:text(500), assetId:z.string().uuid(), alt:text(500), caption:text(300).optional(),
+    width:z.number().int().positive().max(6000),height:z.number().int().positive().max(6000),sourceUrl:text(4096).refine(value=>{try{const url=new URL(value);return ["http:","https:"].includes(url.protocol)&&!url.username&&!url.password;}catch{return false;}}).optional(),
+    sourceKind:z.enum(["web","screenshot","workspace"]) }).strict(),
   z.object({ ...placement, type: z.literal("artifact"), versionId: z.string().uuid(), fileId: z.string().uuid(),
     previousVersions: z.array(z.object({versionId:z.string().uuid(),filename:text(240),size:z.number().int().min(0)}).strict()).max(100).optional(),
     filename: text(240), mime: text(160), size: z.number().int().min(0), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   z.object({ ...placement, type: z.literal("metrics"), items: z.array(metric).min(1).max(6) }).strict(),
   z.object({ ...placement, type: z.literal("chart"), chartType: z.enum(["bar", "line"]), title: text(120).optional(), unit: text(40).optional(),
-    labels: z.array(text(80)).min(1).max(48), series: z.array(z.object({ label: text(80), values: z.array(z.number().finite().min(-1e15).max(1e15)).min(1).max(48) }).strict()).min(1).max(4) }).strict(),
+    labels: z.array(text(80)).min(1).max(48), series: z.array(z.object({ label: text(80), values: z.array(z.number().finite().min(-1e15).max(1e15)).min(1).max(48) }).strict()).min(1).max(4),
+    highlight: z.object({ seriesIndex: z.number().int().min(0).max(3), pointIndex: z.number().int().min(0).max(47) }).strict().optional() }).strict(),
   z.object({ ...placement, type: z.literal("table"), title: text(120).optional(), columns: z.array(text(80)).min(1).max(8),
     rows: z.array(z.array(z.union([z.string().max(300), z.number().finite(), z.null()])).max(8)).max(50) }).strict(),
   z.object({ ...placement, type: z.literal("steps"), items: z.array(z.object({ title: text(160), description: text(500).optional(),
@@ -37,6 +42,10 @@ export const conversationOutputSchema = z.object({
       if (series.values.length !== item.labels.length) context.addIssue({ code: z.ZodIssueCode.custom,
         path: ["blocks", index, "series", seriesIndex, "values"], message: "Each chart series must match the labels" });
     });
+    if (item.type === "chart" && item.highlight &&
+        (item.highlight.seriesIndex >= item.series.length || item.highlight.pointIndex >= item.labels.length)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["blocks", index, "highlight"], message: "Highlight must refer to an existing chart point" });
+    }
     if (item.type === "table") item.rows.forEach((row, rowIndex) => {
       if (row.length !== item.columns.length) context.addIssue({ code: z.ZodIssueCode.custom,
         path: ["blocks", index, "rows", rowIndex], message: "Each table row must match the columns" });
@@ -49,8 +58,8 @@ export const conversationOutputSchema = z.object({
 /** New tool calls use Markdown in the reply for tables; stored artifacts stay readable. */
 export const presentOutputSchema = conversationOutputSchema.superRefine((output, context) => {
   output.blocks.forEach((item, index) => {
-    if (item.type === "artifact") context.addIssue({ code: z.ZodIssueCode.custom,
-      path: ["blocks", index, "type"], message: "Publish real files with artifact_files; attachment identities are assigned by the server" });
+    if (item.type === "artifact" || item.type === "image") context.addIssue({ code: z.ZodIssueCode.custom,
+      path: ["blocks", index, "type"], message: "Use image_assets for inline images or artifact_files for real files; attachment identities are assigned by the server" });
     if (item.type === "table") context.addIssue({ code: z.ZodIssueCode.custom,
       path: ["blocks", index, "type"], message: "Write tables directly as Markdown in your reply, not with present_output or interactive HTML" });
   });
@@ -73,19 +82,27 @@ const typeSchema = (value: string) => ({ type: "string", const: value });
 export const conversationOutputInputSchema = objectSchema({
   ...placementInput, id: { ...stringSchema(64), pattern: "^[a-zA-Z0-9_-]{1,64}$", description: "Stable reply key; reuse to update." },
   title: stringSchema(120), description: stringSchema(500), blocks: arraySchema({ anyOf: [
-    objectSchema({ ...placementInput, type: typeSchema("metrics"), items: arraySchema(objectSchema({ label: stringSchema(80), value: stringSchema(100), change: stringSchema(100) }, ["label", "value"]), 6) }, ["type", "items"]),
+    objectSchema({ ...placementInput, type: typeSchema("metrics"), items: arraySchema(objectSchema({
+      label: stringSchema(80), value: stringSchema(100), change: stringSchema(100),
+      tone: { type: "string", enum: metricTones, description: "Support for a comparison. Detail for one focal value." }
+    }, ["label", "value"]), 6) }, ["type", "items"]),
     objectSchema({ ...placementInput, type: typeSchema("chart"), chartType: { type: "string", enum: ["bar", "line"] }, title: stringSchema(120), unit: stringSchema(40),
-      labels: arraySchema(stringSchema(80), 48), series: arraySchema(objectSchema({ label: stringSchema(80), values: arraySchema({ type: "number", minimum: -1e15, maximum: 1e15 }, 48) }, ["label", "values"]), 4) }, ["type", "chartType", "labels", "series"]),
+      labels: arraySchema(stringSchema(80), 48), series: arraySchema(objectSchema({ label: stringSchema(80), values: arraySchema({ type: "number", minimum: -1e15, maximum: 1e15 }, 48) }, ["label", "values"]), 4),
+      highlight: { ...objectSchema({
+        seriesIndex: { type: "integer", minimum: 0, maximum: 3 },
+        pointIndex: { type: "integer", minimum: 0, maximum: 47 }
+      }, ["seriesIndex", "pointIndex"]), description: "Optional single meaningful point to emphasize with the theme detail color. Indices are zero-based." }
+    }, ["type", "chartType", "labels", "series"]),
     objectSchema({ ...placementInput, type: typeSchema("steps"), items: arraySchema(objectSchema({ title: stringSchema(160), description: stringSchema(500),
       status: { type: "string", enum: ["pending", "active", "completed"] } }, ["title", "status"]), 12) }, ["type", "items"]),
     objectSchema({ ...placementInput, type: typeSchema("document"), filename: { ...stringSchema(99), description: "Safe .md basename, no path/slashes." },
       title: stringSchema(120), content: { type: "string", maxLength: 32000, description: "Markdown data, not executable HTML/scripts or a server path." } }, ["type", "filename", "content"]),
     objectSchema({ ...placementInput, type: typeSchema("interactive"), title: stringSchema(120), summary: { ...stringSchema(1500), description: "Standalone conclusion, sources/assumptions, units and limitations for accessibility/fallback; not visible HTML." },
-      html: { ...stringSchema(32000), description: "Self-contained HTML/CSS/JS fragment with SVG/canvas and labeled native controls. Use --ui-text/--ui-muted for text, --ui-line for grids, --ui-bg/--ui-surface for fills and --ui-accent for data; SVG uses currentColor or var(--ui-*). Resolve Canvas colors with window.zigentTheme.color('var(--ui-text)'); never pass raw CSS variable values or hardcode black/white. Use injected .ui-* primitives. Host restores labeled input/select/textarea state on theme redraw. No network, external libraries, navigation, credentials or real actions." },
+      html: { ...stringSchema(32000), description: "Self-contained HTML/CSS/JS fragment with SVG/canvas and labeled native controls. Use --ui-text/--ui-muted for text, --ui-line for grids, --ui-bg/--ui-surface for fills, --ui-accent for emphasis, --ui-support for comparisons, --ui-detail for one focal mark, and --ui-series-1 through --ui-series-12 for categorical data. SVG uses currentColor or var(--ui-*). Resolve Canvas colors with window.zigentTheme.color('var(--ui-text)'). Use injected .ui-* primitives. Host restores labeled input/select/textarea state on theme redraw. No network, external libraries, navigation, credentials or real actions." },
       height: { type: "integer", minimum: 240, maximum: 720, description: "Initial pixels; default 400." } }, ["type", "summary", "html"]),
     objectSchema({ ...placementInput, type: typeSchema("animation"), title: stringSchema(120),
       summary: { ...stringSchema(1500), description: "Accessible motion description, units, assumptions and limitations; not visible on canvas." },
-      html: { ...stringSchema(32000), description: "Self-contained HTML/CSS/JS, SVG/canvas. All text, fills, strokes, axes and grids must use --ui-* tokens; SVG uses currentColor or var(--ui-*), Canvas resolves colors with window.zigentTheme.color('var(--ui-text)'). Never hardcode black/white or pass raw CSS variable values to Canvas. Register exactly one synchronous window.zigentAnimation.render(({time, progress, duration}) => {...}); time/duration are seconds, progress 0–1. Redraw the whole scene from absolute time without accumulated state. Host loops while visible, pauses offscreen, respects reduced motion and restores playback time on theme redraw. Make loops seamless; no playback/timeline/speed controls, timers, requestAnimationFrame, CSS/SMIL animations or autonomous Web Animations. Same isolation as interactive." },
+      html: { ...stringSchema(32000), description: "Self-contained HTML/CSS/JS, SVG/canvas. Use --ui-* tokens for all text, fills, strokes, axes and grids, including --ui-series-1 through --ui-series-12 for categorical data. Use --ui-support for comparisons and --ui-detail for one focal mark. SVG uses currentColor or var(--ui-*); Canvas resolves colors with window.zigentTheme.color('var(--ui-text)'). Register exactly one synchronous window.zigentAnimation.render(({time, progress, duration}) => {...}); time/duration are seconds, progress 0–1. Redraw the whole scene from absolute time without accumulated state. Host loops while visible, pauses offscreen, respects reduced motion and restores playback time on theme redraw. Make loops seamless; no playback/timeline/speed controls, timers, requestAnimationFrame, CSS/SMIL animations or autonomous Web Animations. Same isolation as interactive." },
       duration: { type: "number", minimum: 1, maximum: 300, description: "Loop duration in seconds." },
       height: { type: "integer", minimum: 240, maximum: 720 }
     }, ["type", "summary", "html", "duration"]),
@@ -99,6 +116,7 @@ const plain = (value: unknown) => String(value ?? "—").replace(/[\\*_`\[\]<>]/
 export function outputText(output: ConversationOutput): string {
   const lines = [`**${plain(output.title)}**`, ...(output.description ? [plain(output.description)] : [])];
   for (const item of output.blocks) {
+    if (item.type === "image") lines.push(plain(item.caption ?? item.alt),...(item.sourceUrl?[item.sourceUrl]:[]));
     if (item.type === "artifact") lines.push(`文件：${plain(item.filename)}（请在网页下载）`);
     if ("title" in item && item.title) lines.push(`\n**${plain(item.title)}**`);
     if (item.type === "metrics") lines.push(...item.items.map(metric => `${plain(metric.label)}：${plain(metric.value)}${metric.change ? `（${plain(metric.change)}）` : ""}`));
