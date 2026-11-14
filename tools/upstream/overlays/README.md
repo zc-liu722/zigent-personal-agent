@@ -10,12 +10,6 @@ Relevant proactivity starts with broad, real personal context: what your project
 
 **Big Context** means more than a model's context window. It is the data and runtime engineering needed to collect authorized context from your life and work, persist it, retrieve it on demand, and dynamically organize a concise prompt during a conversation—ultimately turning context into reliable action.
 
-## Recent updates
-
-- Live work previews show streaming progress and web search titles. Select reply text to attach an annotation to that passage.
-- Conversations open with recent messages first and load older history on demand. Chat supports custom backgrounds and additional themes.
-- The runtime packages capability plugins and web assets as versioned components. Conversation storage keeps message bodies and large activity records in separate objects.
-
 ## Why shouldn't a personal agent be a generic product?
 
 A personal agent needs to be personal. People's lives, workflows, and important signals differ: a researcher's project documents, a frequent traveler's itinerary, and the sleep and HRV data of someone monitoring their health call for different triggers and handling. A one-size-fits-all product can struggle to serve all of them well.
@@ -23,7 +17,7 @@ A personal agent needs to be personal. People's lives, workflows, and important 
 With AI coding, a better approach is a solid open-source foundation that nontechnical users can run, while leaving customization and iteration in their hands:
 
 - **Don't rely on users manually feeding every detail.** Asking someone to restate their background every day creates friction. Conversation is an entry point; authorized data pipelines can collect context in the background.
-- **Grow your own capabilities with AI coding.** Zigent provides a reusable runtime, conversation layer, and permission foundation. Use AI coding to connect your own data sources, tools, and behavioral rules without waiting for a commercial product roadmap.
+- **Grow your own capabilities with AI coding.** Zigent provides a reusable runtime, conversation layer, and permission foundation. Capability plugins extend that foundation with tools and services such as scheduling, document handling, and model adapters. Use AI coding to connect your own data sources and shape the agent’s behavior. See the [architecture guide](docs/ARCHITECTURE.md) for plugin boundaries.
 - **A personal agent need not do every task itself.** Coding and complex analysis can be delegated to specialized environments such as Codex and Claude. Zigent keeps the broader context, decides when to delegate, supplies relevant background, tracks progress, and brings the result back to your ongoing conversation.
 
 ## Ground proactivity in context and algorithms
@@ -114,7 +108,8 @@ For Windows PowerShell, custom configuration, startup verification, and troubles
 
 The repository is organized for development with AI coding tools:
 
-- `src/`: Core runtime, context management, task scheduling, and data-source integrations.
+- `src/`: Core runtime, context management, and data services.
+- `src/plugins/`: Capability plugin host and component implementations.
 - `web/`: Frontend and conversation components.
 - `skills/`: Reusable instruction skills.
 - `ops/`: Deployment configuration, document processing, editor, and independent execution sources.
@@ -122,10 +117,9 @@ The repository is organized for development with AI coding tools:
 Common commands:
 
 ```bash
-npm run build
-npm run dev -- assistant
 npm run check
 npm run build
+npm run dev -- assistant
 npm run build:web
 ```
 
