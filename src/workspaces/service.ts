@@ -1,3 +1,4 @@
+import { CodePointText } from "../text/code-points.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
 import { lstat, mkdir, open, readdir, rename, rm, stat } from "node:fs/promises";
@@ -5,11 +6,12 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ArtifactBlobStore, contentHash } from "../artifacts/blob-store.js";
 import { closeSqlite, prepareSql, sqliteTransaction } from "../sqlite.js";
-import { ordinaryPath, snapshotFile, workspaceName, workspacePath } from "./paths.js";
-import type { ArtifactVersion, FileInput, FilePage, PublishOptions, ShareAuthorization, ShareGrant, ShareTarget, TextEdit, Workspace, WorkspaceEvent, WorkspaceFile, WorkspaceOptions, WorkspaceRead } from "./types.js";
+import { ordinaryPath, snapshotFile, snapshotFileRange, workspaceName, workspacePath, type FileIdentity } from "./paths.js";
+import type { ArtifactVersion, FileInput, FilePage, PublishOptions, ShareAuthorization, ShareGrant, ShareTarget, TextEdit, Workspace, WorkspaceEvent, WorkspaceFile, WorkspaceOptions, WorkspaceRead, WorkspaceLifetime } from "./types.js";
 export type * from "./types.js";
 
 type WorkspaceRow = { id: string; name: string; created_at: number; updated_at: number; scope: string };
+type Lifecycle = { kind: WorkspaceLifetime; session_id: string | null; expires_at: number | null; state: "active" | "deleting" | "deleted" };
 type VersionRow = { id: string; file_id: string; workspace_id: string; name: string; title: string; mime: string; size: number; sha256: string; created_at: number; parent_version_id: string | null; kind: "original" | "artifact"; source_path: string; scope: string };
 type FileRow = { id: string; current_version: string; workspace_id: string; scope: string; source_path: string; kind: string };
 type GrantRow = { id: string; kind: "version" | "workspace"; resource_id: string; target_agent: string; target_scope: string; scope: string; created_at: number; revoked_at: number | null };
@@ -33,6 +35,11 @@ export class WorkspaceService {
   private readonly scope: string;
   private readonly blobStore: ArtifactBlobStore;
   private readonly maxBytes: number;
+  private initializeDirectory?: (workspaceId: string) => Promise<unknown>;
+  private assertWritable?: (workspaceId: string) => void;
+  private initializeSharedDirectory?: (workspaceId: string,scope: string) => Promise<unknown>;
+  /** Full-file digests reused for range reads while inode, size and timestamps still match. */
+  private readonly rangeHashes = new Map<string, { identity: FileIdentity; sha256: string }>();
 
   constructor(options: WorkspaceOptions) {
     if (!options.agentId || !options.ownerUserId) throw new Error("工作区需要明确的 Agent 和所有者。");
@@ -63,46 +70,199 @@ export class WorkspaceService {
       CREATE TABLE IF NOT EXISTS workspace_leases(id TEXT PRIMARY KEY,scope TEXT NOT NULL,workspace_id TEXT NOT NULL,job_id TEXT NOT NULL,expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS workspace_write_locks(scope TEXT NOT NULL,workspace_id TEXT NOT NULL,token TEXT NOT NULL,pid INTEGER NOT NULL,PRIMARY KEY(scope,workspace_id));
       CREATE TABLE IF NOT EXISTS workspace_replacements(scope TEXT NOT NULL,workspace_id TEXT NOT NULL,stage TEXT NOT NULL,backup TEXT NOT NULL,PRIMARY KEY(scope,workspace_id));
-      CREATE TABLE IF NOT EXISTS workspace_derived(scope TEXT NOT NULL,workspace_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,source_version TEXT NOT NULL,recipe TEXT NOT NULL,expires_at INTEGER NOT NULL,PRIMARY KEY(scope,workspace_id,path));`);
+      CREATE TABLE IF NOT EXISTS workspace_directories(scope TEXT NOT NULL,workspace_id TEXT NOT NULL,path TEXT NOT NULL,kind TEXT NOT NULL,PRIMARY KEY(scope,workspace_id));
+      CREATE TABLE IF NOT EXISTS workspace_derived(scope TEXT NOT NULL,workspace_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,source_version TEXT NOT NULL,recipe TEXT NOT NULL,expires_at INTEGER NOT NULL,PRIMARY KEY(scope,workspace_id,path));
+      CREATE TABLE IF NOT EXISTS workspace_lifecycles(scope TEXT NOT NULL,workspace_id TEXT NOT NULL,kind TEXT NOT NULL,session_id TEXT,expires_at INTEGER,state TEXT NOT NULL DEFAULT 'active',PRIMARY KEY(scope,workspace_id));
+      CREATE INDEX IF NOT EXISTS workspace_expiry ON workspace_lifecycles(scope,kind,state,expires_at);
+      CREATE TABLE IF NOT EXISTS session_directories(scope TEXT NOT NULL,session_id TEXT NOT NULL,workspace_id TEXT NOT NULL,PRIMARY KEY(scope,session_id));`);
+    if (!this.db.prepare("PRAGMA table_info(workspace_lifecycles)").all().some(column => column.name === "reclaim_after"))
+      this.db.exec("ALTER TABLE workspace_lifecycles ADD COLUMN reclaim_after INTEGER");
+    // Ad-hoc session directories are temporary. A directory already past its old
+    // deadline stays available for 24 hours after this startup.
+    const grace = Date.now() + 86_400_000;
+    prepareSql(this.db, `UPDATE workspace_lifecycles SET kind='temporary',
+      expires_at=MAX(COALESCE(expires_at,(SELECT created_at+86400000 FROM workspace_projects p
+        WHERE p.scope=workspace_lifecycles.scope AND p.id=workspace_lifecycles.workspace_id),?),?)
+      WHERE scope=? AND kind='session' AND state!='deleted'`).run(grace, grace, this.scope);
+    // Pre-upgrade provenance is incomplete. Hide unclassified directories without
+    // guessing which user data can be deleted; registered projects are adopted below.
+    prepareSql(this.db, "INSERT OR IGNORE INTO workspace_lifecycles(scope,workspace_id,kind) SELECT scope,id,'legacy' FROM workspace_projects WHERE scope=?").run(this.scope);
   }
 
   close(): void { closeSqlite(this.db); }
   private row(workspaceId: string): WorkspaceRow {
     const row = prepareSql(this.db, "SELECT * FROM workspace_projects WHERE id=? AND scope=?").get(id(workspaceId), this.scope) as WorkspaceRow | undefined;
-    if (!row) throw new Error("工作区不存在或无权访问。");
+    if (!row || this.lifecycle(workspaceId).state === "deleted") throw new Error("工作区不存在、已清理或无权访问。");
     return row;
   }
-  private directory(row: WorkspaceRow) { return join(this.stateDirectory, "workspaces", row.scope, row.id); }
+  private lifecycle(workspaceId: string): Lifecycle {
+    const row = prepareSql(this.db, "SELECT kind,session_id,expires_at,state FROM workspace_lifecycles WHERE scope=? AND workspace_id=?").get(this.scope, workspaceId) as Lifecycle | undefined;
+    if (!row) throw new Error("工作区生命周期记录不存在。");
+    return row;
+  }
+  private describeWorkspace(row: WorkspaceRow): Workspace {
+    const life = this.lifecycle(row.id);
+    const historical = life.kind === "session" && life.expires_at !== null;
+    return { id: row.id, name: row.name, createdAt: row.created_at, updatedAt: row.updated_at, lifetime: historical ? "temporary" : life.kind,
+      ...(life.session_id ? { sessionId: life.session_id } : {}), ...(life.expires_at !== null ? { expiresAt: life.expires_at } : {}) };
+  }
+  private directorySessionOwned(owner: string | null, sessionId?: string): boolean {
+    return Boolean(owner && sessionId === owner);
+  }
+  assertSessionAccess(workspaceId: string, sessionId?: string) {
+    this.row(workspaceId);
+    const life = this.lifecycle(workspaceId);
+    if (life.state !== "active" || (life.kind === "session" || life.kind === "temporary") && !this.directorySessionOwned(life.session_id, sessionId))
+      throw new Error("此文件目录只供所属会话使用。");
+    if (life.kind === "temporary" && !(typeof life.expires_at === "number" && life.expires_at > Date.now()))
+      throw new Error("临时工作区已超过 24 小时。需要保留时请转为持久项目，否则请使用新的临时目录。");
+  }
+  assertPersistentProject(workspaceId: string) {
+    this.row(workspaceId);
+    const life = this.lifecycle(workspaceId);
+    if (life.kind !== "persistent" || life.state !== "active") throw new Error("只允许访问持久项目。");
+  }
+  /** Trusted upload/default storage is never a visible project or an expiring task. */
+  markSystem(workspaceId: string) {
+    this.row(workspaceId);
+    prepareSql(this.db, "UPDATE workspace_lifecycles SET kind='system',session_id=NULL,expires_at=NULL WHERE scope=? AND workspace_id=? AND state='active' AND kind='legacy'").run(this.scope, workspaceId);
+  }
+  promoteWorkspace(workspaceId: string, sessionId: string): Workspace {
+    this.assertSessionAccess(workspaceId, sessionId);
+    const life = this.lifecycle(workspaceId);
+    if (life.kind === "system") throw new Error("原件存储不能转为项目。");
+    if (life.kind === "temporary" && life.session_id !== sessionId) throw new Error("临时工作区只能由原会话转为项目。");
+    if (life.kind !== "legacy" && life.kind !== "temporary") throw new Error("只有原会话可以保留此历史目录。");
+    const changed = prepareSql(this.db, "UPDATE workspace_lifecycles SET kind='persistent',session_id=NULL,expires_at=NULL WHERE scope=? AND workspace_id=? AND state='active' AND (kind='legacy' OR (kind='temporary' AND session_id=? AND expires_at>?))")
+      .run(this.scope, workspaceId, sessionId, Date.now());
+    if (!changed.changes) throw new Error("工作区已到期或状态已变化，请重新核对。");
+    this.emit(workspaceId, "workspace.promoted", {});
+    return this.workspace(workspaceId);
+  }
+  private directory(row: WorkspaceRow) {
+    return (prepareSql(this.db,"SELECT path FROM workspace_directories WHERE scope=? AND workspace_id=?").get(row.scope,row.id) as {path:string}|undefined)?.path
+      ?? join(this.stateDirectory, "workspaces", row.scope, row.id);
+  }
+  configureWorkingDirectory(initialize: (workspaceId: string)=>Promise<unknown>, writable: (workspaceId: string)=>void) {
+    this.initializeDirectory=initialize; this.assertWritable=writable;
+  }
+  configureSharedDirectory(initialize: (workspaceId: string,scope: string)=>Promise<unknown>) { this.initializeSharedDirectory=initialize; }
+  executionDirectory(workspaceId: string): string | undefined {
+    this.row(workspaceId);
+    return (prepareSql(this.db,"SELECT path FROM workspace_directories WHERE scope=? AND workspace_id=? AND kind='execution'").get(this.scope,workspaceId) as {path:string}|undefined)?.path;
+  }
+  /** Called only by the trusted same-host migration, while holding the directory lock. */
+  bindExecutionDirectory(workspaceId: string, path: string) {
+    this.row(workspaceId);
+    prepareSql(this.db,"INSERT OR REPLACE INTO workspace_directories VALUES (?,?,?,'execution')").run(this.scope,workspaceId,resolve(path));
+    this.emit(workspaceId,"workspace.execution_attached",{});
+  }
+  async withMigrationLock<T>(workspaceId: string, action: (directory: string)=>Promise<T>) {
+    return this.locked(workspaceId,()=>action(this.directory(this.row(workspaceId))),false);
+  }
+  async retainLegacyDirectory(workspaceId: string): Promise<Workspace> {
+    const source=this.row(workspaceId),path=this.directory(source);
+    const recovered=await this.createWorkspace({name:`${source.name.slice(0,100)} · 迁移恢复`, lifetime: "system"});
+    prepareSql(this.db,"INSERT INTO workspace_directories VALUES (?,?,?,'legacy')").run(this.scope,recovered.id,path);
+    this.emit(workspaceId,"workspace.migration_recovery",{workspaceId:recovered.id});
+    return recovered;
+  }
   private emit(workspaceId: string, type: string, data: Record<string, unknown>): void {
     prepareSql(this.db, "INSERT INTO workspace_events(scope,workspace_id,type,data,created_at) VALUES (?,?,?,?,?)").run(this.scope, workspaceId, type, JSON.stringify(data), Date.now());
   }
   private touch(workspaceId: string): void { prepareSql(this.db, "UPDATE workspace_projects SET updated_at=? WHERE id=? AND scope=?").run(Date.now(), workspaceId, this.scope); }
 
-  async createWorkspace(input: { name?: string } = {}): Promise<Workspace> {
-    const name = label(input.name ?? "新项目", "项目名称"), workspaceId = randomUUID(), now = Date.now();
+  async createWorkspace(input: { name?: string; lifetime?: "persistent" | "system" } = {}): Promise<Workspace> {
+    const name = label(input.name ?? "新项目", "项目名称"), workspaceId = randomUUID();
     await mkdir(this.directory({ id: workspaceId, scope: this.scope } as WorkspaceRow), { recursive: false, mode: 0o700 });
-    sqliteTransaction(this.db, () => {
-      prepareSql(this.db, "INSERT INTO workspace_projects VALUES (?,?,?,?,?)").run(workspaceId, this.scope, name, now, now);
-      this.emit(workspaceId, "workspace.created", { name });
+    sqliteTransaction(this.db, () => this.insertDirectory(workspaceId, name, input.lifetime ?? "persistent"));
+    return this.workspace(workspaceId);
+  }
+  private insertDirectory(workspaceId: string, name: string, kind: WorkspaceLifetime, sessionId?: string, expiresAt?: number) {
+    const now = Date.now();
+    prepareSql(this.db, "INSERT INTO workspace_projects VALUES (?,?,?,?,?)").run(workspaceId, this.scope, name, now, now);
+    prepareSql(this.db, "INSERT INTO workspace_lifecycles(scope,workspace_id,kind,session_id,expires_at) VALUES (?,?,?,?,?)")
+      .run(this.scope, workspaceId, kind, sessionId ?? null, expiresAt ?? null);
+    this.emit(workspaceId, "workspace.created", { name, lifetime: kind });
+  }
+  private reusableTemporary(workspaceId: string, sessionId: string) {
+    try {
+      this.assertSessionAccess(workspaceId, sessionId);
+      const life = this.lifecycle(workspaceId);
+      return life.kind === "temporary" && life.expires_at !== null && life.expires_at > Date.now();
+    } catch { return false; }
+  }
+  existingSessionDirectory(sessionId: string): string | undefined {
+    const saved = prepareSql(this.db, "SELECT workspace_id FROM session_directories WHERE scope=? AND session_id=?")
+      .get(this.scope, sessionId) as { workspace_id: string } | undefined;
+    if (saved && this.reusableTemporary(saved.workspace_id, sessionId)) return saved.workspace_id;
+    const legacy = prepareSql(this.db, `SELECT l.workspace_id FROM workspace_lifecycles l JOIN workspace_projects p ON p.id=l.workspace_id
+      WHERE l.scope=? AND l.session_id=? AND l.kind='temporary' AND l.state='active' AND l.expires_at>? ORDER BY p.updated_at DESC,p.id LIMIT 1`)
+      .get(this.scope, sessionId, Date.now()) as { workspace_id: string } | undefined;
+    return legacy && this.reusableTemporary(legacy.workspace_id, sessionId) ? legacy.workspace_id : undefined;
+  }
+  /** Allocate only on a file-producing or execution operation. The database
+   * serializes first use across callers and service processes. */
+  sessionDirectory(sessionId: string, historical?: string): string {
+    if (!sessionId) throw new Error("文件目录需要所属会话。");
+    return sqliteTransaction(this.db, () => {
+      if (historical) {
+        this.assertSessionAccess(historical, sessionId);
+        return historical;
+      }
+      const existing = this.existingSessionDirectory(sessionId);
+      if (existing) return existing;
+      // A crash between mkdir and COMMIT reuses the same directory on retry.
+      const key = createHash("sha256").update(JSON.stringify(["session-directory-v1", this.scope, sessionId])).digest("hex");
+      let workspaceId = `${key.slice(0, 8)}-${key.slice(8, 12)}-5${key.slice(13, 16)}-8${key.slice(17, 20)}-${key.slice(20, 32)}`;
+      if (prepareSql(this.db, "SELECT 1 FROM workspace_projects WHERE id=?").get(workspaceId)) workspaceId = randomUUID();
+      mkdirSync(this.directory({ id: workspaceId, scope: this.scope } as WorkspaceRow), { recursive: true, mode: 0o700 });
+      this.insertDirectory(workspaceId, "会话文件", "temporary", sessionId, Date.now() + 86_400_000);
+      prepareSql(this.db, `INSERT INTO session_directories VALUES (?,?,?)
+        ON CONFLICT(scope,session_id) DO UPDATE SET workspace_id=excluded.workspace_id`).run(this.scope, sessionId, workspaceId);
+      return workspaceId;
     });
-    return { id: workspaceId, name, createdAt: now, updatedAt: now };
+  }
+  /** Register an authorized live directory; never copy or replace existing project files. */
+  async registerDirectory(workspaceId: string, name: string, directory: string): Promise<Workspace> {
+    id(workspaceId); name = label(name, "项目名称");
+    await ordinaryPath(directory);
+    if (!(await stat(directory)).isDirectory()) throw new Error("已授权项目目录不可用。");
+    const existing = prepareSql(this.db, "SELECT path,kind FROM workspace_directories WHERE scope=? AND workspace_id=?").get(this.scope, workspaceId) as {path:string;kind:string}|undefined;
+    if (existing && (!["registered", "execution"].includes(existing.kind) || resolve(existing.path).toLowerCase() !== resolve(directory).toLowerCase()))
+      throw new Error("登记项目目录已变化，请先显式迁移；未移动或覆盖文件。");
+    sqliteTransaction(this.db, () => {
+      const now = Date.now();
+      prepareSql(this.db, "INSERT OR IGNORE INTO workspace_projects VALUES (?,?,?,?,?)").run(workspaceId,this.scope,name,now,now);
+      prepareSql(this.db, "INSERT INTO workspace_lifecycles(scope,workspace_id,kind) VALUES (?,?,'persistent') ON CONFLICT(scope,workspace_id) DO UPDATE SET kind='persistent',session_id=NULL,expires_at=NULL,state='active'").run(this.scope,workspaceId);
+      // Adopt an already bound execution directory in place, preserving workspace identity and bytes.
+      if (existing?.kind === "execution") prepareSql(this.db, "UPDATE workspace_directories SET kind='registered' WHERE scope=? AND workspace_id=? AND kind='execution'").run(this.scope,workspaceId);
+      else prepareSql(this.db, "INSERT OR IGNORE INTO workspace_directories VALUES (?,?,?,'registered')").run(this.scope,workspaceId,resolve(directory));
+    });
+    return this.workspace(workspaceId);
+  }
+  registeredDirectory(workspaceId: string): string | undefined {
+    this.row(workspaceId);
+    return (prepareSql(this.db,"SELECT path FROM workspace_directories WHERE scope=? AND workspace_id=? AND kind='registered'").get(this.scope,workspaceId) as {path:string}|undefined)?.path;
   }
   listWorkspaces(): Workspace[] {
-    return (prepareSql(this.db, "SELECT * FROM workspace_projects WHERE scope=? ORDER BY updated_at DESC,id LIMIT 500").all(this.scope) as WorkspaceRow[])
-      .map(row => ({ id: row.id, name: row.name, createdAt: row.created_at, updatedAt: row.updated_at }));
+    return (prepareSql(this.db, `SELECT p.* FROM workspace_projects p JOIN workspace_lifecycles l ON l.scope=p.scope AND l.workspace_id=p.id
+      WHERE p.scope=? AND l.state='active' AND l.kind='persistent' ORDER BY p.updated_at DESC,p.id`).all(this.scope) as WorkspaceRow[])
+      .map(row => this.describeWorkspace(row));
   }
-  workspace(workspaceId: string): Workspace { const row = this.row(workspaceId); return { id: row.id, name: row.name, createdAt: row.created_at, updatedAt: row.updated_at }; }
-  async workspaceDirectory(workspaceId: string): Promise<string> {
+  workspace(workspaceId: string): Workspace { return this.describeWorkspace(this.row(workspaceId)); }
+  async workspaceDirectory(workspaceId: string, initialize = true): Promise<string> {
+    if (initialize) await this.initializeDirectory?.(workspaceId);
     const root = this.directory(this.row(workspaceId));
     try { const path = await ordinaryPath(root); if (!(await stat(path)).isDirectory()) throw new Error("项目目录不可用。"); return path; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      await this.locked(workspaceId, async () => {});
+      await this.locked(workspaceId, async () => {}, initialize);
       const path = await ordinaryPath(root); if (!(await stat(path)).isDirectory()) throw new Error("项目目录不可用。"); return path;
     }
   }
-  async resolvePath(workspaceId: string, path = ".", options: { allowMissing?: boolean; directory?: boolean } = {}): Promise<string> {
-    const target = await ordinaryPath(await this.workspaceDirectory(workspaceId), path, options.allowMissing);
+  async resolvePath(workspaceId: string, path = ".", options: { allowMissing?: boolean; directory?: boolean; initialize?: boolean } = {}): Promise<string> {
+    const target = await ordinaryPath(await this.workspaceDirectory(workspaceId, options.initialize), path, options.allowMissing);
     if (options.directory) {
       try { if (!(await stat(target)).isDirectory()) throw new Error("请选择工作区目录。"); }
       catch (error) { if (!(options.allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT")) throw error; }
@@ -111,8 +271,9 @@ export class WorkspaceService {
   }
 
   /** SQLite coordinates broker writers across Agent processes; a dead holder can be reclaimed. */
-  private async locked<T>(workspaceId: string, action: () => Promise<T>): Promise<T> {
+  private async locked<T>(workspaceId: string, action: () => Promise<T>, initialize = true): Promise<T> {
     this.row(workspaceId);
+    if(initialize)await this.initializeDirectory?.(workspaceId);
     const key = `${this.stateDirectory}:${this.scope}:${workspaceId}`;
     const previous = queues.get(key) ?? Promise.resolve();
     const operation = previous.catch(() => undefined).then(async () => {
@@ -166,26 +327,47 @@ export class WorkspaceService {
     if (recovered) this.emit(workspaceId, "workspace.recovered", {});
   }
 
-  async listFiles(workspaceId: string, path = ".", offset = 0, limit = 100): Promise<FilePage> {
-    path = workspacePath(path); const directory = await this.resolvePath(workspaceId, path, { directory: true });
+  async listFiles(workspaceId: string, path = ".", offset = 0, limit = 100, allowPath?: (path: string) => boolean, initialize = true): Promise<FilePage> {
+    path = workspacePath(path); const directory = await this.resolvePath(workspaceId, path, { directory: true, initialize });
     offset = bounded(offset, 1_000_000, 0); limit = Math.max(1, bounded(limit, 200, 100));
-    const entries = (await readdir(directory, { withFileTypes: true })).filter(entry => path !== "." || !internalPath(entry.name)).sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+    const entries = (await readdir(directory, { withFileTypes: true }))
+      .filter(entry => (path !== "." || !internalPath(entry.name)) && (!allowPath || allowPath(path === "." ? entry.name : `${path}/${entry.name}`)))
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
     const files: WorkspaceFile[] = [];
     for (const entry of entries.slice(offset, offset + limit)) {
       const relative = path === "." ? entry.name : `${path}/${entry.name}`;
       // Unsafe names/links remain unavailable; they are never silently followed.
       try {
-        const target = await this.resolvePath(workspaceId, relative), info = await lstat(target);
+        const target = await this.resolvePath(workspaceId, relative, { initialize }), info = await lstat(target);
         files.push({ path: relative, name: entry.name, type: info.isDirectory() ? "directory" : "file", size: info.size, modifiedAt: info.mtimeMs });
       } catch { files.push({ path: relative, name: entry.name, type: entry.isDirectory() ? "directory" : "file", size: 0, modifiedAt: 0 }); }
     }
     return { workspaceId, path, files, ...(offset + limit < entries.length ? { nextOffset: offset + limit } : {}) };
   }
-  async readFileBytes(workspaceId: string, path: string): Promise<{ bytes: Buffer; path: string; name: string; mime: string; size: number; sha256: string }> {
+  async readFileBytes(workspaceId: string, path: string, maxBytes = this.maxBytes, initialize = true): Promise<{ bytes: Buffer; path: string; name: string; mime: string; size: number; sha256: string }> {
     path = workspacePath(path, false);
     if (internalPath(path)) throw new Error("不能直接读取执行器内部元数据。");
-    const { bytes } = await snapshotFile(await this.workspaceDirectory(workspaceId), path, this.maxBytes);
+    const { bytes } = await snapshotFile(await this.workspaceDirectory(workspaceId, initialize), path, Math.min(this.maxBytes, maxBytes));
     return { bytes, path, name: basename(path), mime: workspaceMime(path), size: bytes.length, sha256: contentHash(bytes) };
+  }
+  private rememberRange(key: string, identity: FileIdentity, sha256: string) {
+    this.rangeHashes.delete(key);
+    this.rangeHashes.set(key, { identity, sha256 });
+    while (this.rangeHashes.size > 64) {
+      const oldest = this.rangeHashes.keys().next().value;
+      if (oldest === undefined) break;
+      this.rangeHashes.delete(oldest);
+    }
+  }
+  /** Byte-range read. `sha256` is the whole file; later pages reuse it until the file identity changes. Writes keep hashing the bytes they replace. */
+  async readFileRange(workspaceId: string, path: string, offset = 0, length = 1_048_576, maxBytes = this.maxBytes): Promise<{ bytes: Buffer; path: string; name: string; mime: string; size: number; sha256: string; examined: number }> {
+    path = workspacePath(path, false);
+    if (internalPath(path)) throw new Error("不能直接读取执行器内部元数据。");
+    const limit = Math.min(this.maxBytes, maxBytes);
+    const key = `${workspaceId}\0${process.platform === "win32" ? path.toLowerCase() : path}`;
+    const snapshot = await snapshotFileRange(await this.workspaceDirectory(workspaceId), path, limit, offset, Math.min(Math.max(0, length), limit), this.rangeHashes.get(key));
+    this.rememberRange(key, snapshot.identity, snapshot.sha256);
+    return { bytes: snapshot.bytes, path, name: basename(path), mime: workspaceMime(path), size: snapshot.size, sha256: snapshot.sha256, examined: snapshot.examined };
   }
   async readFile(workspaceId: string, path: string, offset = 0, limit = 24_000): Promise<WorkspaceRead> {
     const result = await this.readFileBytes(workspaceId, path);
@@ -193,12 +375,13 @@ export class WorkspaceService {
     let text: string;
     try { text = new TextDecoder("utf-8", { fatal: true }).decode(result.bytes); } catch { throw new Error("文件是二进制内容，请使用文档或图像处理能力。"); }
     if (text.includes("\0")) throw new Error("文件是二进制内容，请使用文档或图像处理能力。");
-    const characters = Array.from(text); offset = bounded(offset, characters.length, 0); limit = Math.max(1, bounded(limit, 100_000, 24_000));
+    const characters = new CodePointText(text); offset = bounded(offset, characters.length, 0); limit = Math.max(1, bounded(limit, 100_000, 24_000));
     const { bytes: _bytes, ...metadata } = result;
-    return { ...metadata, workspaceId, text: characters.slice(offset, offset + limit).join(""), offset, ...(offset + limit < characters.length ? { nextOffset: offset + limit } : {}) };
+    return { ...metadata, workspaceId, text: characters.slice(offset, offset + limit), offset, ...(offset + limit < characters.length ? { nextOffset: offset + limit } : {}) };
   }
 
   private async writeUnlocked(workspaceId: string, path: string, bytes: Buffer, expectedHash?: string): Promise<WorkspaceFile & { sha256: string }> {
+    this.assertWritable?.(workspaceId);
     path = workspacePath(path, false);
     if (internalPath(path)) throw new Error("不能覆盖执行器内部元数据。");
     if (bytes.length > this.maxBytes) throw new Error("文件超过工作区大小限制。");
@@ -207,6 +390,9 @@ export class WorkspaceService {
     try { existing = await this.readFileBytes(workspaceId, path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     if (existing && (!expectedHash || existing.sha256 !== expectedHash) || !existing && expectedHash !== undefined) throw new Error("文件版本已变化，请重新读取后修改；创建新文件时不要传 expectedHash。");
+    // Keep immutable bytes before a destructive edit; they remain recoverable
+    // without taking a complete project snapshot for every command.
+    if(existing)await this.snapshotVersion(workspaceId,path);
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
     await ordinaryPath(this.directory(this.row(workspaceId)), path, true);
     const temporary = join(dirname(target), `.zigent-${randomUUID()}.tmp`);
@@ -225,11 +411,11 @@ export class WorkspaceService {
     return { path, name: basename(path), type: "file", size: bytes.length, modifiedAt: info.mtimeMs, sha256 };
   }
   async writeFile(workspaceId: string, path: string, bytes: Buffer, expectedHash?: string) { return this.locked(workspaceId, () => this.writeUnlocked(workspaceId, path, bytes, expectedHash)); }
-  async patchFile(workspaceId: string, path: string, edits: readonly TextEdit[], expectedHash: string) {
+  async patchFile(workspaceId: string, path: string, edits: readonly TextEdit[], expectedHash: string, maxBytes = this.maxBytes) {
     return this.locked(workspaceId, async () => {
-      const current = await this.readFileBytes(workspaceId, path);
+      const current = await this.readFileBytes(workspaceId, path, maxBytes);
       if (current.sha256 !== expectedHash) throw new Error("文件版本已变化，请重新读取后修改。");
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(current.bytes);
+      const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(current.bytes);
       if (text.includes("\0") || !edits.length || edits.length > 100) throw new Error("请选择文本文件并提供有效修改。");
       const replacements = edits.map(edit => {
         if (!edit.oldText || edit.oldText.length > 1_000_000 || edit.newText.length > 1_000_000) throw new Error("修改片段无效。");
@@ -240,7 +426,9 @@ export class WorkspaceService {
       for (let i = 1; i < replacements.length; i++) if (replacements[i]!.start < replacements[i - 1]!.end) throw new Error("修改片段不能互相重叠。");
       let next = text;
       for (const replacement of replacements.reverse()) next = next.slice(0, replacement.start) + replacement.value + next.slice(replacement.end);
-      return this.writeUnlocked(workspaceId, path, Buffer.from(next), expectedHash);
+      const bytes = Buffer.from(next);
+      if (bytes.length > maxBytes) throw new Error("文件超过工作区大小限制。");
+      return this.writeUnlocked(workspaceId, path, bytes, expectedHash);
     });
   }
   async moveFile(workspaceId: string, source: string, destination: string, expectedHash: string) {
@@ -258,7 +446,7 @@ export class WorkspaceService {
     });
   }
 
-  async searchFiles(workspaceId: string, query: string, options: { path?: string; limit?: number; includeContent?: boolean } = {}) {
+  async searchFiles(workspaceId: string, query: string, options: { path?: string; limit?: number; includeContent?: boolean; allowPath?: (path: string) => boolean; signal?: AbortSignal } = {}) {
     if (!query || query.length > 500) throw new Error("检索内容无效。");
     const start = workspacePath(options.path ?? "."), limit = Math.max(1, bounded(options.limit ?? 50, 100, 50));
     const matches: Array<{ path: string; line?: number; text?: string }> = [], queue = [start];
@@ -266,10 +454,12 @@ export class WorkspaceService {
     while (queue.length && matches.length < limit && visited < 10_000) {
       const path = queue.shift()!, directory = await this.resolvePath(workspaceId, path, { directory: true });
       for (const item of await readdir(directory, { withFileTypes: true })) {
+        options.signal?.throwIfAborted();
         if (++visited > 10_000 || matches.length >= limit) break;
         if (path === "." && internalPath(item.name)) continue;
         if (["node_modules", ".git", ".venv", "__pycache__", ".cache", ".scratch"].includes(item.name)) continue;
         const relative = path === "." ? item.name : `${path}/${item.name}`;
+        if (options.allowPath && !options.allowPath(relative)) continue;
         try {
           const target = await this.resolvePath(workspaceId, relative), info = await lstat(target);
           if (info.isDirectory()) { queue.push(relative); continue; }
@@ -291,7 +481,14 @@ export class WorkspaceService {
     return known ? this.artifactVersion(known.version_id) : undefined;
   }
 
-  async materializeInput(workspaceId: string, input: FileInput): Promise<ArtifactVersion & { path: string }> {
+  async retainInput(workspaceId: string, input: FileInput) {
+    if (this.workspace(workspaceId).lifetime !== "system") throw new Error("原件存储归属无效。");
+    return this.saveInput(workspaceId, input, false);
+  }
+  async materializeInput(workspaceId: string, input: FileInput) {
+    return this.saveInput(workspaceId, input, true);
+  }
+  private async saveInput(workspaceId: string, input: FileInput, workingCopy: boolean): Promise<ArtifactVersion & { path: string }> {
     this.row(workspaceId); const name = workspaceName(input.name);
     if (!input.id || input.id.length > 500 || contentHash(input.bytes) !== input.sha256) throw new Error("上传原件校验失败。");
     const hash = await this.blobStore.put(input.bytes);
@@ -301,10 +498,15 @@ export class WorkspaceService {
       const sourceKey = createHash("sha256").update(`${input.id}\0${hash}`).digest("hex").slice(0, 24), path = `inputs/${sourceKey}/${name}`;
       // A process can stop after writing the deterministic working copy but
       // before committing its receipt. Adopt only exactly matching bytes.
-      try {
-        const existing = await this.readFileBytes(workspaceId, path);
-        if (existing.sha256 !== hash) throw new Error("原件的工作副本已变化，请保留该文件并选择其他项目导入。");
-      } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") await this.writeUnlocked(workspaceId, path, input.bytes); else throw error; }
+      if (workingCopy) {
+        try {
+          const existing = await this.readFileBytes(workspaceId, path);
+          if (existing.sha256 !== hash) throw new Error("原件的工作副本已变化，请保留该文件。");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await this.writeUnlocked(workspaceId, path, input.bytes);
+        }
+      }
       const fileId = randomUUID(), versionId = randomUUID(), now = Date.now();
       sqliteTransaction(this.db, () => {
         prepareSql(this.db, "INSERT INTO workspace_files VALUES (?,?,?,?,?,?)").run(fileId, this.scope, workspaceId, path, "original", versionId);
@@ -313,7 +515,7 @@ export class WorkspaceService {
         this.emit(workspaceId, "input.saved", { versionId, fileId, path, sha256: hash, name });
       });
       return { ...this.artifactVersion(versionId), path };
-    });
+    }, workingCopy);
   }
 
   /** Pin bytes without modifying the live project or waiting for a long-running editor. */
@@ -401,7 +603,9 @@ export class WorkspaceService {
     return this.grant("version", versionId, metadata.workspaceId, target, authorization);
   }
   shareWorkspace(workspaceId: string, target: ShareTarget, authorization: ShareAuthorization): ShareGrant {
-    this.row(workspaceId); return this.grant("workspace", workspaceId, workspaceId, target, authorization);
+    this.row(workspaceId);
+    if (this.lifecycle(workspaceId).kind !== "persistent") throw new Error("请先确认将工作区转为持久项目，再共享项目目录。");
+    return this.grant("workspace", workspaceId, workspaceId, target, authorization);
   }
   private grant(kind: "version" | "workspace", resourceId: string, workspaceId: string, target: ShareTarget, authorization: ShareAuthorization): ShareGrant {
     if (authorization.actorUserId !== this.ownerUserId || !authorization.operationId || authorization.operationId.length > 200 || !target.agentId || !target.ownerUserId) throw new Error("分享需要当前所有者的明确授权。");
@@ -438,6 +642,7 @@ export class WorkspaceService {
     if (!grant) throw new Error("项目分享不存在、已撤销或无权访问。");
     const row = prepareSql(this.db, "SELECT * FROM workspace_projects WHERE id=? AND scope=?").get(grant.resource_id, grant.scope) as WorkspaceRow | undefined;
     if (!row) throw new Error("分享的项目不存在。");
+    await this.initializeSharedDirectory?.(row.id,row.scope);
     return { row, root: await ordinaryPath(this.directory(row)) };
   }
   async sharedWorkspaceFiles(grantId: string, path = ".", offset = 0, limit = 100): Promise<FilePage & { readOnly: true }> {
@@ -462,9 +667,9 @@ export class WorkspaceService {
     let text: string;
     try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new Error("分享文件是二进制内容，请先复制到自己的项目后处理。"); }
     if (text.includes("\0")) throw new Error("分享文件是二进制内容，请先复制到自己的项目后处理。");
-    const characters = Array.from(text); offset = bounded(offset, characters.length, 0); limit = Math.max(1, bounded(limit, 100_000, 24_000));
+    const characters = new CodePointText(text); offset = bounded(offset, characters.length, 0); limit = Math.max(1, bounded(limit, 100_000, 24_000));
     await this.sharedWorkspaceRoot(grantId);
-    return { workspaceId: row.id, path, name: basename(path), mime: workspaceMime(path), size: bytes.length, sha256: contentHash(bytes), text: characters.slice(offset, offset + limit).join(""), offset, readOnly: true, ...(offset + limit < characters.length ? { nextOffset: offset + limit } : {}) };
+    return { workspaceId: row.id, path, name: basename(path), mime: workspaceMime(path), size: bytes.length, sha256: contentHash(bytes), text: characters.slice(offset, offset + limit), offset, readOnly: true, ...(offset + limit < characters.length ? { nextOffset: offset + limit } : {}) };
   }
   async copySharedWorkspaceFile(grantId: string, path: string, workspaceId: string, destination?: string) {
     const { root } = await this.sharedWorkspaceRoot(grantId); path = workspacePath(path, false);
@@ -485,6 +690,41 @@ export class WorkspaceService {
     const leaseId = randomUUID(), ttl = Math.max(10_000, Math.min(ttlMs, 24 * 60 * 60 * 1000));
     prepareSql(this.db, "INSERT INTO workspace_leases VALUES (?,?,?,?,?)").run(leaseId, this.scope, workspaceId, jobId, Date.now() + ttl);
     return { id: leaseId, renew: () => { prepareSql(this.db, "UPDATE workspace_leases SET expires_at=? WHERE id=? AND scope=?").run(Date.now() + ttl, leaseId, this.scope); }, release: () => { prepareSql(this.db, "DELETE FROM workspace_leases WHERE id=? AND scope=?").run(leaseId, this.scope); } };
+  }
+  /** Keep a blocked directory active and out of the next sweeps until this time. */
+  private deferTemporaryReclaim(workspaceId: string, now: number) {
+    prepareSql(this.db, `UPDATE workspace_lifecycles SET state='active',reclaim_after=?
+      WHERE scope=? AND workspace_id=? AND kind='temporary' AND state!='deleted'`).run(now + 15 * 60_000, this.scope, workspaceId);
+  }
+  /** Reclaim only explicitly expiring task directories. Saved versions and
+   * originals live in the blob store and remain downloadable after reclamation. */
+  async cleanupTemporary(releaseExecution: (workspaceId: string) => Promise<void>, now = Date.now()) {
+    const rows = prepareSql(this.db, `SELECT workspace_id FROM workspace_lifecycles
+      WHERE scope=? AND kind='temporary' AND state!='deleted' AND expires_at<=? AND (reclaim_after IS NULL OR reclaim_after<=?)
+      ORDER BY expires_at LIMIT 30`).all(this.scope, now, now) as Array<{ workspace_id: string }>;
+    for (const { workspace_id: workspaceId } of rows) {
+      try {
+        await this.locked(workspaceId, async () => {
+          const life = this.lifecycle(workspaceId);
+          if (life.kind !== "temporary" || life.state === "deleted" || life.expires_at == null || life.expires_at > now) return;
+          const busy = prepareSql(this.db, "SELECT 1 FROM workspace_leases WHERE scope=? AND workspace_id=? AND expires_at>? LIMIT 1").get(this.scope, workspaceId, now);
+          const binding = prepareSql(this.db, "SELECT path,kind FROM workspace_directories WHERE scope=? AND workspace_id=?").get(this.scope, workspaceId) as { path: string; kind: string } | undefined;
+          if (busy || binding && binding.kind !== "execution") { this.deferTemporaryReclaim(workspaceId, now); return; }
+          try { await releaseExecution(workspaceId); }
+          catch { this.deferTemporaryReclaim(workspaceId, now); return; }
+          const roots = [join(this.stateDirectory, "workspaces", this.scope, workspaceId)];
+          if (binding?.kind === "execution") roots.push(binding.path);
+          for (const root of [...new Set(roots.map(item => resolve(item)))])
+            await rm(await ordinaryPath(root, ".", true), { recursive: true, force: true });
+          sqliteTransaction(this.db, () => {
+            prepareSql(this.db, "DELETE FROM workspace_derived WHERE scope=? AND workspace_id=?").run(this.scope, workspaceId);
+            prepareSql(this.db, "DELETE FROM session_directories WHERE scope=? AND workspace_id=?").run(this.scope, workspaceId);
+            prepareSql(this.db, "UPDATE workspace_lifecycles SET state='deleted',reclaim_after=NULL WHERE scope=? AND workspace_id=?").run(this.scope, workspaceId);
+            this.emit(workspaceId, "workspace.expired", {});
+          });
+        }, false);
+      } catch { this.deferTemporaryReclaim(workspaceId, now); }
+    }
   }
   async registerDerived(workspaceId: string, path: string, input: { sourceVersionId: string; recipe: string; expiresAt: number }): Promise<void> {
     path = workspacePath(path, false); this.artifactVersion(input.sourceVersionId);

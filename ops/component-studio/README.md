@@ -53,4 +53,4 @@ npm run dev:components
 
 可通过 `COMPONENT_STUDIO_CODEX_COMMAND` 指定本机 Codex 可执行文件；默认优先复用 Mac 桌面应用内置版本，其余环境使用 PATH 中的 `codex`。此入口仅存在于本地工作台，生产 Dashboard 的组件预览仍为只读展示。
 
-Kimi Code 接入遵循[官方 Codex 配置说明](https://www.kimi.com/code/docs/third-party-tools/codex.html)，使用原生 Responses。工作台在 `.runtime/component-studio/` 生成不含密钥的模型元数据文件，不改写 `~/.codex/config.toml` 或系统模型默认值。当前接入仓库已登记的 `kimi-k3.1pro-kimicode`、`kimi-k3.1prohighspeed-kimicode`、`kimi-k3-kimicode`。
+Kimi Code 接入遵循[官方 Codex 配置说明](https://www.kimi.com/code/docs/third-party-tools/codex.html)，使用原生 Responses。工作台在 `.runtime/component-studio/` 生成不含密钥的模型元数据文件，不改写 `~/.codex/config.toml` 或系统模型默认值。当前接入仓库已登记的 `kimi-k3.1pro-kimicode`、`kimi-k3-kimicode`。

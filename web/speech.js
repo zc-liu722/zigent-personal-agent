@@ -70,10 +70,40 @@ window.ZigentSpeechDraft = class {
 window.ZigentSpeechInput = class {
   constructor({ onState, onText }) { this.onState = onState; this.onText = onText; this.state = 'idle'; this.lastWarmAt = -Infinity; }
   static supported() { return Boolean(window.isSecureContext && navigator.mediaDevices?.getUserMedia && window.AudioContext && window.AudioWorkletNode && window.WebSocket); }
+  // Share the HTML-owned, versioned URL with meetings. A rejected worklet fetch
+  // can remain cached by WebKit; retry with a new URL rather than that cache key.
+  static workletUrl() {
+    const url = new URL('./pcm-worklet.js', location.href);
+    const version = window.ZigentAssetVersionMap?.['pcm-worklet.js'];
+    if (version) url.searchParams.set('v', version);
+    return url.href;
+  }
+  static async loadWorklet(context) {
+    const href = document.getElementById('speech-worklet')?.href || window.ZigentSpeechInput.workletUrl();
+    try { await context.audioWorklet.addModule(href, { credentials: 'same-origin' }); return; }
+    catch (error) {
+      if (context.state === 'closed') throw error;
+      if (!['AbortError', 'TypeError', 'NetworkError'].includes(error?.name))
+        throw new Error('音频组件加载失败，请刷新页面后重试。', { cause: error });
+    }
+    const retry = new URL(href);
+    retry.searchParams.set('worklet_retry', crypto.randomUUID());
+    let response;
+    try {
+      response = await fetch(retry.href, { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(15000) });
+      await response.arrayBuffer();
+    }
+    catch (error) { throw new Error('音频组件下载失败，请检查网络后重试。', { cause: error }); }
+    const javascript = /(?:javascript|ecmascript)/i.test(response.headers.get('content-type') || '');
+    if (!response.ok || !javascript) throw new Error(`音频组件下载失败（HTTP ${response.status}），请刷新页面后重试。`);
+    if (context.state === 'closed') throw new Error('语音已结束，请重新开启。');
+    try { await context.audioWorklet.addModule(retry.href, { credentials: 'same-origin' }); }
+    catch (error) { throw new Error('音频组件加载失败，请重新打开页面后重试。', { cause: error }); }
+  }
   createCapture() {
     const context = new AudioContext({ latencyHint: 'interactive' });
     try {
-      const module = context.audioWorklet.addModule(document.getElementById('speech-worklet')?.href || new URL('./pcm-worklet.js', location.href).href);
+      const module = window.ZigentSpeechInput.loadWorklet(context);
       return { context, module };
     } catch (error) { void context.close().catch(() => {}); throw error; }
   }

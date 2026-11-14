@@ -7,13 +7,15 @@ description: Analyze, create, and edit Excel workbooks with formulas, formatting
 
 Use the actual platform, shell, Python command, helper paths and skills directory in the execution context. The Windows product runtime uses PowerShell 7 (`pwsh`) under a dedicated standard account, with network and localhost access enabled. It is full access for that account; conversations are not separate OS sandboxes. Production configuration/model credentials and other Agent accounts remain outside its permissions. Do not run administration or change the product runtime from a model command.
 
-On Windows use native PowerShell syntax and Windows paths. Do not paste Bash commands or `/opt` and `/workspace` paths into PowerShell. Any Linux examples below apply only when the context reports a legacy Linux runtime. `$env:ZIGENT_WORKSPACE` is the current project root, `$env:ZIGENT_HELPERS` contains `word.py`, `pdf.py`, `render_docx.py` and `render_pdf.py`, and `$env:ZIGENT_SKILLS` contains task resources. `python` and `node` select the versioned managed runtime. Install extra dependencies into the project, never the read-only managed runtime. Node programs can use `createRequire(process.env.ZIGENT_NODE_PACKAGE)` for bundled packages.
+On Windows use native PowerShell syntax and Windows paths. Do not paste Bash commands or `/opt` and `/workspace` paths into PowerShell. Any Linux examples below apply only when the context reports a legacy Linux runtime. `$env:ZIGENT_WORKSPACE` is the working root, `$env:ZIGENT_HELPERS` contains `word.py`, `pdf.py`, `render_docx.py` and `render_pdf.py`. `python` and `node` select the versioned managed runtime. Install extra dependencies into the project, never the read-only managed runtime. Node programs can use `createRequire(process.env.ZIGENT_NODE_PACKAGE)` for bundled packages.
 
-Windows render examples:
+Use `exec_command cache=render` for disposable crops, page images and conversion checks. The command starts in the render directory; use the working root to address the source. Use `view_image` for inspection and `image_assets present` to pin selected images. Keep editable sources and final files in the working directory.
+
+Windows render examples (set `$imageRenderRoot` to the actual returned imageScratchDirectory first):
 
 ```powershell
-python "$env:ZIGENT_HELPERS\render_docx.py" '.\report.docx' --output_dir '.\review\word' --emit_pdf
-python "$env:ZIGENT_HELPERS\render_pdf.py" '.\report.pdf' --output_dir '.\review\pdf'
+python "$env:ZIGENT_HELPERS\render_docx.py" '.\report.docx' --output_dir (Join-Path $imageRenderRoot 'word') --emit_pdf
+python "$env:ZIGENT_HELPERS\render_pdf.py" '.\report.pdf' --output_dir (Join-Path $imageRenderRoot 'pdf')
 ```
 
 `tty=true` provides ConPTY. A command returned with `session_id` continues independently of the frontend. Ctrl-C in a PTY is terminal input; Ctrl-C for a pipe command terminates its Job. A foreground shell exiting cleans up its remaining children; keep background servers attached to their returned command session. Service/host restart interrupts running execution jobs and never replays commands. Ordinary application reconnects preserve live sessions and cursors.
@@ -44,7 +46,7 @@ For formatting or report changes, render representative sheets/ranges and inspec
 
 ## Commands, files and delivery
 
-Use workspaces to open/import the authorized project. Use exec_command for shell commands, file reads, dependency discovery and generated programs; apply_patch for source edits; write_stdin to continue returned command sessions and view_image for rendered pages. Commands run in the persistent workspace path from context. Skill paths are supplied there. There is no separate native document-editing tool. Use installed libraries, ordinary helper scripts and soffice/Poppler for conversion, recalculation and rendering. Wait for authoring commands to finish before saving final artifacts; unrelated background servers may keep running.
+Read authorized attachments with `files read`. Import an attachment only when a program needs its path. Use the owning project or the working directory supplied by `exec_command`; continue processes with `write_stdin`. Use `skills files` only when a program needs packaged scripts or templates. Wait for authoring to finish before saving final versions.
 
 Save selected versions through artifact_files save with resultId and expectedHash, then deliver the complete requested items manifest with requestKey. Check delivery_status; retry using the original deliveryId and saved versions. Preserve originals and important project files.
 

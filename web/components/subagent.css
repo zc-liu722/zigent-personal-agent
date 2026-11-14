@@ -57,7 +57,7 @@
 .subagent-detail-body .activity-failure { margin: 10px 0 2px; font-size: 12px; }
 /* Keep the same pastel character under both themes. */
 :root[data-theme="dark"] .subagent-avatar svg { opacity: .88; }
-:root[data-theme="dark"] .mochi-shadow { fill: #0003; }
+:root[data-theme="dark"] .mochi-shadow { fill: var(--palette-subagent-mochi-shadow-fill); }
 @media (prefers-reduced-motion: reduce) {
   .subagent-cell .mochi-body, .subagent-cell .mochi-eyes-open, .subagent-detail { animation: none; }
 }

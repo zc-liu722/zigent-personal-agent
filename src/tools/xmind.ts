@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isConfirmedOperation } from "./confirmed-operation.js";
 import { waitForAccountAuthorization } from "./account-authorization.js";
 import type { AgentToolRegistration, ToolExecutionContext } from "./registry.js";
-import type { ToolActivityPresenter, ToolActivityResource } from "./activity-presentation.js";
+import { activitySubject, type ToolActivityPresenter, type ToolActivityResource } from "./activity-presentation.js";
 import {
   XmindAuthorizationRequiredError,
   xmindOperationSafety,
@@ -83,8 +83,13 @@ function parseInput(value: unknown): XmindInput {
 }
 
 function operationLabel(value: unknown): string | undefined {
-  if (!isRecord(value) || typeof value.operation !== "string") return undefined;
-  return Object.hasOwn(MAP_OPERATIONS, value.operation) ? MAP_OPERATIONS[value.operation] : undefined;
+  if (!isRecord(value)) return undefined;
+  if (value.action === "capabilities") return "查看 XMind 可用操作";
+  if (value.action === "describe") return "查看 XMind 操作说明";
+  if (value.action === "authorize") return "连接 XMind 账号";
+  if (value.action === "confirm") return "执行已确认的导图修改";
+  const operation = value.operation;
+  return value.action === "call" && typeof operation === "string" && Object.hasOwn(MAP_OPERATIONS, operation) ? MAP_OPERATIONS[operation] : undefined;
 }
 
 function safeResources(result: unknown): ToolActivityResource[] {
@@ -104,32 +109,28 @@ function isConfirmationResult(result: unknown): boolean {
 
 const activity: ToolActivityPresenter = {
   started: (input) => {
-    if (!isRecord(input)) return { message: "我正在处理 XMind 中的内容。" };
-    if (input.action === "capabilities") return { message: "我正在确认 XMind 当前可用的能力。" };
-    if (input.action === "describe") return { message: "我正在确认这一步导图操作需要的信息。" };
-    if (input.action === "authorize") return { message: "我正在为你准备 XMind 登录授权。" };
-    if (input.action === "confirm") return { message: "我正在执行你已确认的 XMind 修改。" };
-    const operation = operationLabel(input);
-    return {
-      message: "我正在 XMind 中处理这项请求。",
-      ...(operation ? { details: [{ label: "操作", value: operation }] } : {})
-    };
+    const title = operationLabel(input) ?? "检查导图操作";
+    return { title, message: `我正在${title}。` };
   },
   completed: (input, result) => {
+    const label = operationLabel(input);
     if (isRecord(result) && result.status === "authorization_pending") {
-      return { message: "我已启动 XMind 授权，你可以继续聊天；授权结果会另行通知。" };
+      return { title: label, message: "我已启动 XMind 授权，你可以继续聊天；授权结果会另行通知。" };
     }
-    if (isConfirmationResult(result)) return { message: "这项 XMind 修改需要你明确确认后才会执行。" };
-    if (isRecord(input) && input.action === "capabilities") return { message: "XMind 当前可用的读写能力已经确认。" };
-    if (isRecord(input) && input.action === "describe") return { message: "这一步导图操作需要的信息已经确认。" };
-    if (isRecord(input) && input.action === "authorize") return { message: "XMind 已经完成授权，可以继续访问脑图了。" };
+    if (isConfirmationResult(result)) return { title: label, message: "这项 XMind 修改需要你明确确认后才会执行。" };
+    if (isRecord(input) && input.action === "capabilities") return { title: label, message: "XMind 当前可用的读写能力已经确认。" };
+    if (isRecord(input) && input.action === "describe") return { title: label, message: "这一步导图操作需要的信息已经确认。" };
+    if (isRecord(input) && input.action === "authorize") return { title: label, message: "XMind 已经完成授权，可以继续访问脑图了。" };
     const resources = safeResources(result);
+    const subject = resources.length === 1 && resources[0]!.title !== "XMind 内容" ? activitySubject(resources[0]!.title) : "";
     return {
+      title: label && subject ? `${label} · ${subject}` : label,
       message: "XMind 中的这一步已经处理好了。",
       ...(resources.length > 0 ? { resources, resourcesLabel: "相关 XMind 内容" } : {})
     };
   },
-  failed: (_input, error) => ({
+  failed: (input, error) => ({
+    title: operationLabel(input),
     message: /授权|authoriz/i.test(error)
       ? "我暂时无法访问 XMind；当前授权缺失或已经失效。"
       : "这次没能完成 XMind 中的操作。"

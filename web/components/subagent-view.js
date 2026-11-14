@@ -63,7 +63,6 @@ export function createSubagentRenderer({ markdown, activity, load, resize, runni
       const snapshot = { ...item.snapshot, failureMessage: undefined, items: item.snapshot.items.map(child =>
         item.status !== 'running' && child.status === 'running' && child.type === 'tool' ? { ...child, status: 'failed' } : child) };
       entry.process = activity(snapshot, item.id, entry.process);
-      if (item.status !== 'running') updateText(entry.process.querySelector('.activity-preview'), '执行过程');
       nodes.push(entry.process);
     }
     if (item.snapshot?.answerDraft) {

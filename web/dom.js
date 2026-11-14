@@ -2,6 +2,10 @@ export const $ = id => document.getElementById(id);
 
 export function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 const messageIcons = {
+  close: '<path d="m6 6 12 12M6 18 18 6"/>',
+  expand: '<path d="M8 3H3v5m13-5h5v5m0 8v5h-5m-8 0H3v-5"/>',
+  delete: '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/>',
+  annotate: '<path d="M14 4H5a2 2 0 0 0-2 2v15l4-4h10a2 2 0 0 0 2-2v-3M13 10l1-4 5-5 3 3-5 5Z"/>',
   edit: '<path d="m16 3 5 5M4 20l4-1L21 6a2.1 2.1 0 0 0-3-3L5 16l-1 4Z"/>',
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
   'reply-add': '<path d="M20 10V6a3 3 0 0 0-3-3H6a3 3 0 0 0-3 3v11l4-3h4M17 13v8m-4-4h8"/>',

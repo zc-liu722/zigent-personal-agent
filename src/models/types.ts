@@ -69,6 +69,42 @@ export type ModelNativeState = {
   items: readonly unknown[];
 };
 
+/** A completed native chat thread for one Zigent session, never shared with other runs. */
+export type CodexChatThread = {
+  threadId: string;
+  binding: string;
+  totalUsage?: TokenUsage;
+};
+
+export type CodexChatRequest = {
+  previous?: CodexChatThread;
+  /** Consume the durable pointer before sending any new input to the old thread. */
+  consumePrevious(threadId: string): Promise<boolean>;
+};
+
+export type AcpChatSession = {
+  sessionId: string;
+  binding: string;
+  historyDigest: string;
+  contextRevision?: string;
+};
+
+export type AcpChatRequest = {
+  /** The channel's conversation key also exists for a draft before its first user turn. */
+  conversationKey: string;
+  previous?: AcpChatSession;
+  sessionKey: string;
+  consumePrevious(session: AcpChatSession): Promise<boolean>;
+};
+
+export type NativeProcessWarmTarget = { route: import("../config.js").ModelDeployment; expiresAt?: number };
+export type NativeModelWarmRequest = Pick<ModelRoundRequest,
+  "systemPrompt" | "tools" | "adapterTools" | "reasoningEfforts" | "capabilityVersions" | "measureNative" | "instructionRevision">
+  & { conversationKey: string; sessionKey?: string };
+
+export type NativeModelMetric = Extract<import("../performance/metrics.js").LatencyMetric, `model.native_${string}` | `model.codex_${string}`>;
+export type NativeModelMeasurement = (metric: NativeModelMetric, ms: number, outcome?: "ok" | "error" | "cancelled") => void;
+
 export type ModelConversationMessage =
   | {
       role: "user";
@@ -98,7 +134,39 @@ export type ModelConversationMessage =
       failed: boolean;
     };
 
+/** Host contract for a leased native model adapter. */
+export type ModelRoundAdapter = (config: import("./gateway-config.js").ModelGatewayConfig,
+  route: import("../config.js").ModelDeployment, request: ModelRoundRequest,
+  onUpdate?: (update: ModelRoundUpdate) => void, signal?: AbortSignal,
+  record?: import("../usage/types.js").RequestRecorder, executeTool?: ModelToolExecutor) => Promise<ModelRoundResult>;
+
+export type NativeModelService = {
+  invoke: ModelRoundAdapter;
+  keepWarm?(config: Parameters<ModelRoundAdapter>[0], targets: readonly NativeProcessWarmTarget[]): void;
+  prepare?(config: Parameters<ModelRoundAdapter>[0], route: import("../config.js").ModelDeployment,
+    request: NativeModelWarmRequest, signal: AbortSignal): Promise<void>;
+};
+
+/** Older component versions remain callable by journaled turns. */
+export type AcpModelService = Partial<NativeModelService> & {
+  invokeCursorRound?: ModelRoundAdapter;
+  invokeAntigravityRound?: ModelRoundAdapter;
+};
+
 export type ModelRoundRequest = {
+  codexChat?: CodexChatRequest;
+  acpChat?: AcpChatRequest;
+  /** Identifies the active compression checkpoint and projection changes. */
+  contextRevision?: string;
+  instructionRevision?: string;
+  capabilityVersions?: Readonly<Record<string, string>>;
+  measureNative?: NativeModelMeasurement;
+  beforeNativePrompt?: () => void;
+  codexModel?: ModelRoundAdapter;
+  cursorModel?: ModelRoundAdapter;
+  antigravityModel?: ModelRoundAdapter;
+  /** Host-owned serializer from the turn's leased component generation. */
+  protocolAdapter?: typeof import("../plugins/model-http/protocol.js").buildProtocolRequest;
   systemPrompt?: string;
   messages: readonly ModelConversationMessage[];
   tools: readonly ModelTool[];
@@ -119,6 +187,8 @@ export type ModelRoundRequest = {
 export type ModelToolExecutionResult = {
   text: string;
   failed: boolean;
+  /** The host saved this result; rebuild the adapter invocation before further model work. */
+  refreshTools?: boolean;
   images?: readonly ReferenceImage[];
 };
 
@@ -137,7 +207,9 @@ export type ModelRouteMetadata = {
 export type ModelRoundUpdate = ModelRouteMetadata & {
   provider: Provider;
 } & (
-  | { type: "attempt.reset" }
+  | { type: "attempt.reset"; itemIds?: readonly string[] }
+  /** A recoverable wait notice; an absent message removes the existing notice. */
+  | { type: "wait"; message?: string }
   | { type: "visual.preparing"; itemId: string }
   | {
       type: "route";
@@ -166,6 +238,10 @@ export type ModelRoundUpdate = ModelRouteMetadata & {
 );
 
 export type ModelRoundResult = {
+  codexThread?: CodexChatThread;
+  acpSession?: AcpChatSession;
+  /** A supplier ended before host callbacks finished; consume their saved results in another round. */
+  requiresContinuation?: boolean;
   text: string;
   textItems: readonly ModelAssistantTextItem[];
   usage: TokenUsage;

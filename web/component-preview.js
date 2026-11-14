@@ -2,6 +2,7 @@ import { createMarkdownRenderer } from './markdown.js';
 import { createSubagentRenderer, createActivityRenderer } from './components/index.js';
 import { createInteractionRenderer } from './components/index.js';
 import { createImageGeneration } from './components/image-generation.js';
+import { createSleepTimeline } from './components/sleep-timeline.js';
 const root = document.getElementById('preview-root');
 const parentOrigin = window.ZigentComponentPreviewContext?.parentOrigin || location.origin;
 const conversation = { current: 'component-preview', messages: [] };
@@ -38,7 +39,7 @@ function draw() {
     view = renderSubagents(item.subagents, { ...message, activityRevision: 1, activityDeferred: !!item.deferred }, view);
     root.replaceChildren(view.node);
   } else if (item.kind === 'output') {
-    view = window.ZigentOutputComponents.render(item.output, view, { openDocument: index => documentPreview(item, message, index), interactiveUrl: index => pages[index] ? { html: pages[index], key: `${item.id}:${index}` } : undefined });
+    view = window.ZigentOutputComponents.render(item.output, view, { programKey: item.data, renderProgram: item.program === 'sleep-timeline' ? (block, index) => index === 0 ? createSleepTimeline(item.data, block) : undefined : undefined, openDocument: index => documentPreview(item, message, index), interactiveUrl: index => pages[index] ? { html: pages[index], key: `${item.id}:${index}` } : undefined });
     root.replaceChildren(view.node); view.mount();
   } else {
     view = renderer.renderInteraction(item, message, view, scenario.mode === 'model' ? chooseModel : undefined);

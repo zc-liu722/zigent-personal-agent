@@ -1,6 +1,16 @@
 import { el, messageButton } from './dom.js';
 import { interactionUrl } from './components/interaction-model.js';
-import { loadScript, loadStyle } from './lazy-assets.js';
+import { loadScript, loadStyle, versionsReady } from './lazy-assets.js';
+
+let mermaidModule;
+function loadMermaid() {
+  mermaidModule ||= versionsReady.then(() => import('./mermaid.js'));
+  return mermaidModule;
+}
+export function clearMermaidPreviews() {
+  if (!mermaidModule) return;
+  void mermaidModule.then(module => module.clearMermaidPreviews());
+}
 
 let mathReady = false, mathDownload;
 let highlightDownload;
@@ -91,7 +101,22 @@ export function createMarkdownRenderer({ copyText, openConversationDocument, toa
   function contentButton(icon, label, className) {
     const button = messageButton(icon, label); button.className = `content-icon ${className}`; return button;
   }
-  function codeBlock(code, language, preserveLayout = false) {
+  function codeBlock(code, language, preserveLayout = false, complete = true) {
+    if (language.toLowerCase() === 'mermaid' && complete) {
+      const placeholder = el('section', 'code-block mermaid-block');
+      const status = el('div', 'mermaid-status', '正在绘制图表…');
+      status.setAttribute('role', 'status');
+      placeholder.append(status);
+      const options = { copyText, resize: update => {
+        const position = captureReadingPosition?.();
+        update();
+        if (position) { restoreReadingPosition(position, false, true); rememberReadingPosition?.(); }
+      } };
+      void loadMermaid().then(module => {
+        if (placeholder.isConnected) placeholder.replaceWith(module.mermaidBlock(code, options));
+      }).catch(() => { if (placeholder.isConnected) status.textContent = '图表未能绘制，请重试。'; });
+      return placeholder;
+    }
     const block = el('div', `code-block${preserveLayout ? ' preserve-layout' : ''}`), heading = el('div', 'code-heading'), copy = contentButton('copy', '复制代码', 'code-copy'), pre = el('pre');
     heading.dataset.selectionControl = 'true';
     copy.type = 'button'; copy.onclick = () => copyText(code, copy, '复制代码');
@@ -144,16 +169,28 @@ export function createMarkdownRenderer({ copyText, openConversationDocument, toa
     const displayMath = index => {
       const opening = /^\s{0,3}(\$\$|\\\[)(.*)$/.exec(lines[index]);
       if (!opening) return;
-      const closing = opening[1] === '$$' ? /(?<!\\)\$\$/ : /\\\]/, content = [];
-      for (let end = index; end < lines.length; end++) {
-        const line = end === index ? opening[2] : lines[end], match = closing.exec(line);
-        if (match) {
-          if (line.slice(match.index + match[0].length).trim()) return;
-          content.push(line.slice(0, match.index));
-          return { source: content.join('\n'), raw: lines.slice(index, end + 1).join('\n'), end: end + 1 };
+      const dollar = /(?<!\\)\$\$/, bracket = /\\\]/;
+      const read = (closing, recover = false) => {
+        const content = [];
+        for (let end = index; end < lines.length; end++) {
+          const line = end === index ? opening[2] : lines[end];
+          if (recover && end > index && (!line.trim() || fence(line) || heading(line) || rule(line) || list(line) || /^\s*>/.test(line) || table(end))) return;
+          const match = closing.exec(line);
+          if (match) {
+            if (line.slice(match.index + match[0].length).trim()) return;
+            content.push(line.slice(0, match.index));
+            return { source: content.join('\n'), raw: lines.slice(index, end + 1).join('\n'), end: end + 1 };
+          }
+          // A different display delimiter ends this candidate. Do not consume
+          // later paragraphs or formulas while searching for a matching pair.
+          if ((opening[1] === '$$' ? bracket : dollar).test(line)) return;
+          content.push(line);
         }
-        content.push(line);
-      }
+      };
+      // Models sometimes mix $$ and \[...\]. Keep the original TeX escapes
+      // intact and accept that explicit closing delimiter within this paragraph.
+      return read(opening[1] === '$$' ? dollar : bracket)
+        ?? read(opening[1] === '$$' ? bracket : dollar, true);
     };
     const boundary = index => !lines[index].trim() || fence(lines[index]) || displayMath(index) || heading(lines[index]) || rule(lines[index]) || list(lines[index]) || /^\s*>/.test(lines[index]) || table(index);
     let index = 0;
@@ -163,10 +200,11 @@ export function createMarkdownRenderer({ copyText, openConversationDocument, toa
       if (marker) {
         const code = []; index++;
         while (index < lines.length && !new RegExp(`^\\s{0,3}${marker[1][0]}{${marker[1].length},}\\s*$`).test(lines[index])) code.push(lines[index++]);
+        const complete = index < lines.length || message?.snapshot?.status !== 'running';
         if (index < lines.length) index++;
         container.append(depth < 8 && /^(writing|email|letter|reply)$/i.test(marker[2])
           ? writingBlock(code.join('\n'), marker[3].trim(), depth, message)
-          : codeBlock(code.join('\n'), marker[2], /(?:^|\s)nowrap(?:\s|$)/i.test(marker[3]))); continue;
+          : codeBlock(code.join('\n'), marker[2], /(?:^|\s)nowrap(?:\s|$)/i.test(marker[3]), complete)); continue;
       }
       const formula = displayMath(index);
       if (formula) { container.append(mathNode(formula.source, formula.raw, true, true)); index = formula.end; continue; }
@@ -177,13 +215,13 @@ export function createMarkdownRenderer({ copyText, openConversationDocument, toa
         const quote = el('blockquote'), content = markdown(quoted.join('\n'), depth + 1, message); quote.append(...content.childNodes); container.append(quote); continue;
       }
       if (table(index)) {
-        const wrapper = el('div', 'table-scroll'), node = el('table'), head = el('thead'), row = el('tr'), headers = tableCells(lines[index]), aligns = tableCells(lines[index + 1]);
+        const wrapper = el('div', 'table-scroll'), node = el('table'), head = el('thead'), row = el('tr'), headers = tableCells(lines[index]);
         wrapper.setAttribute('tabindex', '0'); wrapper.setAttribute('role', 'region'); wrapper.setAttribute('aria-label', '表格，可横向滚动');
         headers.forEach(value => { const cell = el('th'); cell.setAttribute('scope', 'col'); inline(cell, value); row.append(cell); }); head.append(row); node.append(head); index += 2;
         const body = el('tbody');
         while (index < lines.length && lines[index].trim() && lines[index].includes('|')) {
           const values = tableCells(lines[index++]), tr = el('tr');
-          headers.forEach((_, column) => { const cell = el('td'); if (/^:.*:$/.test(aligns[column])) cell.style.textAlign = 'center'; else if (/:$/.test(aligns[column])) cell.style.textAlign = 'right'; inline(cell, values[column] || ''); tr.append(cell); }); body.append(tr);
+          headers.forEach((_, column) => { const cell = el('td'); inline(cell, values[column] || ''); tr.append(cell); }); body.append(tr);
         }
         node.append(body); wrapper.append(node); container.append(wrapper); continue;
       }

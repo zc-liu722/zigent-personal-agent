@@ -4,7 +4,6 @@ import type { Duplex } from "node:stream";
 import type { LocationAccessConfig, LocationReceiverConfig } from "../config.js";
 import { AmapReverseGeocoder, type ReverseGeocoder } from "./amap.js";
 import { wgs84ToGcj02 } from "./coordinates.js";
-import { analyzeLocationMotion, type LocationMotionAnalysis, type LocationPoint } from "./motion.js";
 import { UserLocationStore, type LocationHistoryPage, type LocationHistoryQuery, type StoredGeocode, type StoredLocation, type StoredRegionEvent, type StoredWaypoint } from "./store.js";
 
 import { proxyWebRequest, proxyWebUpgrade } from "../web/proxy.js";
@@ -218,7 +217,7 @@ export class UserLocationAccess {
   private constructor(
     readonly store: UserLocationStore,
     readonly config: LocationAccessConfig,
-    private readonly reverseGeocoder?: ReverseGeocoder
+    readonly reverseGeocoder?: ReverseGeocoder
   ) {}
 
   static async create(config: LocationAccessConfig, reverseGeocoder?: ReverseGeocoder): Promise<UserLocationAccess> {
@@ -227,103 +226,6 @@ export class UserLocationAccess {
       config,
       reverseGeocoder ?? (config.amapApiKey ? new AmapReverseGeocoder(config.amapApiKey) : undefined)
     );
-  }
-
-  private async geocodeLocation(
-    location: LocationPoint,
-    signal: AbortSignal | undefined,
-    now: number
-  ): Promise<{
-    location: LocationPoint;
-    geocode?: StoredGeocode;
-    geocodeStatus: "available" | "unconfigured" | "unavailable";
-  }> {
-    const linked = location.geocodeId === undefined ? undefined : this.store.geocodeById(location.geocodeId);
-    if (linked && linked.reuseUntil >= now) return { location, geocode: linked, geocodeStatus: "available" };
-    const reusable = this.store.findReusableGeocode(location.gcj02Latitude, location.gcj02Longitude, now);
-    if (reusable) {
-      this.store.linkGeocode(location.id, reusable.id);
-      return { location: { ...location, geocodeId: reusable.id }, geocode: reusable, geocodeStatus: "available" };
-    }
-    if (!this.reverseGeocoder) return { location, geocodeStatus: "unconfigured" };
-    try {
-      const geocode = this.store.saveGeocode(await this.reverseGeocoder.reverse({
-        latitude: location.gcj02Latitude,
-        longitude: location.gcj02Longitude,
-        radiusMeters: Math.min(3000, Math.max(100, Math.round((location.accuracyMeters ?? 50) * 2))),
-        now,
-        signal
-      }));
-      this.store.linkGeocode(location.id, geocode.id);
-      return { location: { ...location, geocodeId: geocode.id }, geocode, geocodeStatus: "available" };
-    } catch {
-      signal?.throwIfAborted();
-      return { location, geocodeStatus: "unavailable" };
-    }
-  }
-
-  async latestWithGeocode(signal?: AbortSignal, now = Date.now()): Promise<{
-    location?: StoredLocation & { id: number };
-    geocode?: StoredGeocode;
-    geocodeStatus?: "available" | "unconfigured" | "unavailable";
-  }> {
-    const latest = this.store.latest();
-    if (!latest) return {};
-    const location = this.store.withRegionContext(latest);
-    return this.geocodeLocation(location, signal, now);
-  }
-
-  async motionWithGeocodes(signal?: AbortSignal, now = Date.now()): Promise<{
-    analysis?: LocationMotionAnalysis;
-    geocodes: ReadonlyMap<number, { geocode?: StoredGeocode; status: "available" | "unconfigured" | "unavailable" }>;
-  }> {
-    const history = [...this.store.historyNewestFirst()];
-    if (history[0]) history[0] = this.store.withRegionContext(history[0]);
-    const analysis = analyzeLocationMotion(history, now);
-    if (!analysis) return { geocodes: new Map() };
-    const markers = analysis.state === "moving"
-      ? [analysis.start, ...analysis.turningPoints, analysis.end]
-      : [analysis.location];
-    const uniqueMarkers = [...new Map(markers.map((point) => [point.id, point])).values()];
-    const geocodes = new Map<number, { geocode?: StoredGeocode; status: "available" | "unconfigured" | "unavailable" }>();
-    for (const marker of uniqueMarkers) {
-      signal?.throwIfAborted();
-      const resolved = await this.geocodeLocation(marker, signal, now);
-      geocodes.set(marker.id, {
-        ...(resolved.geocode ? { geocode: resolved.geocode } : {}),
-        status: resolved.geocodeStatus
-      });
-    }
-    return { analysis, geocodes };
-  }
-
-  async historyWithGeocodes(query: LocationHistoryQuery, signal?: AbortSignal, now = Date.now()): Promise<{
-    page: LocationHistoryPage;
-    geocodes: ReadonlyMap<number, { geocode?: StoredGeocode; status: "available" | "unconfigured" | "unavailable" | "not_requested" }>;
-  }> {
-    signal?.throwIfAborted();
-    const page = this.store.history(query);
-    const geocodes = new Map<number, { geocode?: StoredGeocode; status: "available" | "unconfigured" | "unavailable" | "not_requested" }>();
-    let lookups = 0;
-    for (const point of page.points) {
-      signal?.throwIfAborted();
-      // A linked historical address remains evidence even after its reuse period expires.
-      const cached = (point.geocodeId === undefined ? undefined : this.store.geocodeById(point.geocodeId))
-        ?? this.store.findReusableGeocode(point.gcj02Latitude, point.gcj02Longitude, now);
-      if (cached) {
-        if (point.geocodeId !== cached.id) this.store.linkGeocode(point.id, cached.id);
-        geocodes.set(point.id, { geocode: cached, status: "available" });
-      } else if (!this.reverseGeocoder) {
-        geocodes.set(point.id, { status: "unconfigured" });
-      } else if (lookups >= 5) {
-        geocodes.set(point.id, { status: "not_requested" });
-      } else {
-        lookups += 1;
-        const resolved = await this.geocodeLocation(point, signal, now);
-        geocodes.set(point.id, { geocode: resolved.geocode, status: resolved.geocodeStatus });
-      }
-    }
-    return { page, geocodes };
   }
 
   close(): void {
@@ -374,7 +276,7 @@ export class UserLocationReceiver {
   }
 
   private webRoute(path: string): { basePath: string; port: number } | undefined {
-    const routes = this.config.webProxyRoutes ?? (this.config.webProxyPort ? [{ basePath: "/deepmind/", port: this.config.webProxyPort }] : []);
+    const routes = this.config.webProxyRoutes ?? (this.config.webProxyPort ? [{ basePath: "/assistant/", port: this.config.webProxyPort }] : []);
     return routes.find(route => path === route.basePath.slice(0, -1) || path.startsWith(route.basePath));
   }
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import WebSocket from "ws";
 
 type Message = { id?: number | string; method?: string; params?: Record<string, unknown>; result?: unknown; error?: { message?: string } };
-/** Managed Unix WebSocket (default) or isolated stdio; neither is exposed through ZigentLink. */
+/** Desktop WebSocket or the component studio's local stdio; never exposed through ZigentLink. */
 export class CodexRpc extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
   private socket?: WebSocket;
@@ -13,7 +13,7 @@ export class CodexRpc extends EventEmitter {
   private buffer = "";
   private starting?: Promise<void>;
   private readonly pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
-  constructor(readonly command: string, readonly args: string[] = ["app-server", "proxy"], readonly cwd?: string) { super(); }
+  constructor(readonly command: string, readonly args: string[] = ["app-server", "proxy"], readonly cwd?: string, readonly desktopEndpoint?: string) { super(); }
   get connected() { return Boolean(this.child || this.socket?.readyState === WebSocket.OPEN); }
   async start() {
     if (this.starting) return this.starting; if (this.connected) return;
@@ -31,9 +31,9 @@ export class CodexRpc extends EventEmitter {
   }
   private async connect() {
     try {
-      if (this.args[0] === "app-server" && this.args[1] === "proxy") {
+      if (this.desktopEndpoint || this.args[0] === "app-server" && this.args[1] === "proxy") {
         const index = this.args.indexOf("--sock"), path = index >= 0 ? this.args[index + 1]! : join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "app-server-control/app-server-control.sock");
-        const socket = new WebSocket("ws+unix://" + path + ":/rpc", { handshakeTimeout: 10000, maxPayload: 16 * 1024 * 1024, perMessageDeflate: false }); this.socket = socket;
+        const socket = new WebSocket(this.desktopEndpoint ?? "ws+unix://" + path + ":/rpc", { handshakeTimeout: 10000, maxPayload: 16 * 1024 * 1024, perMessageDeflate: false }); this.socket = socket;
         socket.on("message", bytes => this.receive(bytes.toString()));
         socket.on("close", () => { if (this.socket === socket) this.close(); });
         socket.on("error", () => { if (this.socket === socket) this.close(); });
@@ -49,7 +49,8 @@ export class CodexRpc extends EventEmitter {
         });
         child.on("close", () => { if (this.child === child) this.close(); }); child.on("error", () => { if (this.child === child) this.close(); });
       }
-      await this.call("initialize", { clientInfo: { name: "zigent-worker", title: "Zigent local worker", version: "0.1.0" }, capabilities: { experimentalApi: true } });
+      const identity = await this.call<{ codexHome?: string; platformFamily?: string }>("initialize", { clientInfo: { name: "zigent-worker", title: "Zigent desktop connector", version: "0.1.0" }, capabilities: { experimentalApi: true } });
+      if (this.desktopEndpoint && (identity.codexHome?.replaceAll("\\", "/").toLowerCase() !== "c:/users/dell/.codex" || identity.platformFamily !== "windows")) throw new Error("The endpoint is not the Windows desktop Codex home");
       this.notify("initialized", {});
     } catch (error) { this.close(); throw error; }
   }

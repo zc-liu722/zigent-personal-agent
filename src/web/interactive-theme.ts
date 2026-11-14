@@ -7,7 +7,8 @@ export function interactiveThemeRuntime(): string {
     const isPalette = channels => {
       if (paletteTheme !== root.dataset.theme || !palette) {
         paletteTheme = root.dataset.theme;
-        palette = new Set(['--ui-bg', '--ui-surface', '--ui-text', '--ui-muted', '--ui-line', '--ui-accent', '--ui-track'].map(name => {
+        const series = Array.from({ length: 12 }, (_, i) => '--ui-series-' + (i + 1));
+        palette = new Set(['--ui-bg', '--ui-surface', '--ui-text', '--ui-muted', '--ui-line', '--ui-accent', '--ui-soft', '--ui-support', '--ui-detail', '--ui-on-accent', '--ui-track', ...series].map(name => {
           let hex = token(name).replace(/^#/, '');
           if (hex.length === 3) hex = [...hex].map(part => part + part).join('');
           return /^[0-9a-f]{6}$/i.test(hex) ? [0, 2, 4].map(start => parseInt(hex.slice(start, start + 2), 16)).join(',') : '';

@@ -19,24 +19,40 @@ export function validateManifest(manifest: Manifest, context: RefinementCtx): vo
     if (manifest.agents.some(agent => agent.id === 'dashboard')) context.addIssue({ code: z.ZodIssueCode.custom, path: ['integrations', 'dashboard'], message: 'dashboard is reserved for the server administration route' });
   }
   const proxyPort = manifest.integrations.location?.webProxyPort;
+  const projectMcp = manifest.integrations.projectMcp;
+  if (projectMcp && (!manifest.integrations.location || new Set(projectMcp.agents).size !== projectMcp.agents.length
+    || projectMcp.agents.some(id => !manifest.agents.some(agent => agent.id === id && agent.enabled && agent.web && agent.fileWorkbench?.enabled))))
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["integrations", "projectMcp"], message: "project MCP needs a gateway and unique enabled Agents with file workspaces" });
   if (proxyPort && !manifest.agents.some(agent => agent.enabled && agent.channel === "web" && agent.web?.listenPort === proxyPort)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["integrations", "location", "webProxyPort"], message: "web proxy must target an enabled web agent" });
-  if (manifest.integrations.health) {
-    const health = manifest.agents.find((agent) => agent.id === "deepmind");
-    if (!health?.enabled || !health.allowedTools.includes("health_data")) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["integrations", "health"], message: "health requires enabled Deepmind with health_data" });
+  const health = manifest.integrations.health;
+  const healthAccounts = health ? [{ agentId: "deepmind", storage: health.storage, tokenEnv: health.tokenEnv,
+    initialSkillPath: health.initialSkillPath }, ...health.additionalAccounts] : [];
+  const accountIds = new Set<string>(), healthPaths = new Set<string>(), seedPaths = new Set<string>(), tokenNames = new Set<string>();
+  const occupied = [...manifest.agents.flatMap(agent => [agent.storage.sqlite, agent.storage.sqlite + ".proactive.sqlite",
+    agent.storage.sqlite + ".performance.sqlite", agent.storage.longTermMemory, agent.web?.storage]),
+    manifest.integrations.location?.storage, manifest.integrations.dashboard?.storage].filter((path): path is string => Boolean(path));
+  for (const account of healthAccounts) {
+    const profile = manifest.agents.find(agent => agent.id === account.agentId);
+    if (!profile?.enabled || !profile.allowedTools.includes("health_data")
+      || (account.agentId !== "deepmind" && profile.channel !== "web") || accountIds.has(account.agentId))
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["integrations", "health"], message: "health accounts require unique enabled Agents with health_data and web ownership" });
+    const path = canonicalPath(account.storage);
+    if (healthPaths.has(path) || occupied.some(value => canonicalPath(value) === path))
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["integrations", "health"], message: "each health account requires dedicated storage" });
+    if (tokenNames.has(account.tokenEnv))
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["integrations", "health"], message: "health ingestion credentials must be separate per Agent" });
+    if (account.initialSkillPath) {
+      const seed = canonicalPath(account.initialSkillPath);
+      if (seedPaths.has(seed) || occupied.some(value => canonicalPath(value) === seed)
+        || healthAccounts.some(value => canonicalPath(value.storage) === seed))
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["integrations", "health"], message: "private health seed files must be isolated per Agent" });
+      seedPaths.add(seed);
     }
-    const canonicalStorage = (value: string): string => /^[A-Za-z]:[\\/]/.test(value)
-      ? win32.resolve(value).replace(/\\/g, "/").toLowerCase() : resolve(value);
-    const healthStorage = canonicalStorage(manifest.integrations.health.storage);
-    if (manifest.agents.some((agent) => [agent.storage.sqlite, agent.storage.longTermMemory].some((path) => canonicalStorage(path) === healthStorage))
-      || manifest.integrations.location && canonicalStorage(manifest.integrations.location.storage) === healthStorage) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["integrations", "health", "storage"], message: "health storage must be dedicated and separate from sessions, memory and location" });
-    }
+    accountIds.add(account.agentId); healthPaths.add(path); tokenNames.add(account.tokenEnv);
   }
   for (const [index, agent] of manifest.agents.entries()) {
-    if (agent.id !== "deepmind" && ["health_data", "health_tasks"].some((name) => agent.allowedTools.includes(name))) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["agents", index, "allowedTools"], message: "private health tools are restricted to Deepmind" });
-    }
+    if (!accountIds.has(agent.id) && ["health_data", "health_tasks"].some(name => agent.allowedTools.includes(name)))
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["agents", index, "allowedTools"], message: "private health tools require an isolated health account" });
   }
   if (manifest.integrations.location) {
     const authorizedAgents = new Set(manifest.integrations.location.agents);
@@ -116,13 +132,13 @@ export function validateManifest(manifest: Manifest, context: RefinementCtx): vo
         path: ["catalog", "models", index, "supplier"],
         message: `available model references unknown supplier ${model.supplier}`
       });
-    } else if ((model.protocol === "codex-app-server" || model.protocol === "claude-code") && supplier.transport !== model.protocol) {
+    } else if ((model.protocol === "codex-app-server" || model.protocol === "claude-code" || model.protocol === "cursor-acp" || model.protocol === "antigravity-acp") && supplier.transport !== model.protocol) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["catalog", "suppliers", model.supplier, "transport"],
         message: `${model.supplier} is not a ${model.protocol} supplier`
       });
-    } else if (model.protocol !== "codex-app-server" && model.protocol !== "claude-code" && !supplier.endpoints[model.protocol]) {
+    } else if (model.protocol !== "codex-app-server" && model.protocol !== "claude-code" && model.protocol !== "cursor-acp" && model.protocol !== "antigravity-acp" && !supplier.endpoints[model.protocol]) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["catalog", "suppliers", model.supplier, "endpoints", model.protocol],

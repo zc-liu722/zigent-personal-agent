@@ -8,6 +8,7 @@ export type ModelGatewayConfig = Pick<
   | "modelOrder"
   | "models"
   | "zenmuxProxyUrl"
+  | "modelProxyFallbackUrls"
   | "modelConnectTimeoutMs"
   | "modelFirstProgressTimeoutMs"
   | "modelProgressIdleTimeoutMs"
@@ -18,4 +19,4 @@ export type ModelGatewayConfig = Pick<
   | "toolSettings"
   | "memoryContextWindowTokens"
   | "memoryCompressionRatio"
->;
+> & Partial<Pick<AgentConfig, "sessionInactivityMinutes" | "memoryStoragePath">>;

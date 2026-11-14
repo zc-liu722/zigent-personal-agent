@@ -3,7 +3,7 @@ import { validateTrigger } from "../tasks/schedule.js";
 import { parseReusableTriggerSpec, triggerFixtureSchema } from "../tasks/reusable.js";
 import { triggerActions } from "./trigger-maintenance.js";
 
-export const proactiveTaskCreationGuidance = "create/propose: top-level title, instruction, trigger; spec/fixtures belong only to trigger_stage. For location/external weekday or time-window gates: trigger_stage(title,spec,fixtures) → trigger_validate(id,revision) → create(title,instruction,trigger={type:reference,triggerId},activate_revision=validated revision). Activation and creation share one confirmation; reuse active rules without activate_revision. Put deterministic schedules, windows, cooldowns and expiry in trigger configuration, not instruction.";
+export const proactiveTaskCreationGuidance = "create/propose: top-level title/instruction/trigger; spec/fixtures only for trigger_stage. Location/external weekday/time gates: trigger_stage(title,spec,fixtures) → trigger_validate(id,revision) → create(title,instruction,trigger={type:reference,triggerId},activate_revision=validated revision), one confirmation. Reuse active rules without activate_revision. Schedules/windows/cooldowns/expiry belong in trigger config, not instruction.";
 
 const triggerSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("reference"), triggerId: z.string().min(1).max(200) }).strict(),

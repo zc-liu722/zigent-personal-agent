@@ -62,10 +62,20 @@ export class FileLongTermMemoryRepository implements LongTermMemoryProvider {
     return { revision: snapshot.revision, items, has_more: ranked.length > input.offset + items.length,
       ...(ranked.length > input.offset + items.length ? { next_offset: input.offset + items.length } : {}) };
   }
+  async hasConfirmedChange(userId: string, proposalId: string, request: MemoryChangeRequest) {
+    await this.readyToRead();
+    const receipt = await this.store.confirmationReceipt(proposalId);
+    if (receipt === undefined) return false;
+    if (receipt !== this.receiptDigest(userId, request)) throw new Error("Memory confirmation mismatch");
+    return true;
+  }
+  private receiptDigest(userId: string, request: MemoryChangeRequest) {
+    return createHash("sha256").update(JSON.stringify([userId, request])).digest("hex");
+  }
   /** Only the authenticated confirmation path calls the writer; never exposed as a model action. */
   async applyConfirmedChange(userId: string, proposalId: string, request: MemoryChangeRequest): Promise<void> {
     await this.update(state => {
-      const receipt = createHash("sha256").update(JSON.stringify([userId, request])).digest("hex");
+      const receipt = this.receiptDigest(userId, request);
       if (Object.hasOwn(state.receipts, proposalId)) {
         if (state.receipts[proposalId] !== receipt) throw new Error("Memory confirmation mismatch");
         return;

@@ -26,5 +26,5 @@ export function contextPolicy(route: ModelDeployment, config: Pick<ModelGatewayC
     keepRecent: Math.min(settings?.keepRecentTokens ?? 20_000, Math.floor(inputLimit * 0.3)),
     summary: Math.min(settings?.summaryTokens ?? 4096, Math.floor(inputLimit * 0.15)),
     strategy: settings?.strategy ?? "summary",
-    protectedTools: settings?.protectedTools ?? ["ask_user_question", "long_term_memory", "proactive_tasks"] };
+    protectedTools: settings?.protectedTools ?? ["ask_user_question", "markdown", "proactive_tasks"] };
 }

@@ -43,6 +43,8 @@ function mergeUsage(reports: UsageReport[], period: string) {
   return { period, totals, models: [...models.values()].sort((a,b) => b.inputTokens + b.outputTokens - a.inputTokens - a.outputTokens),
     days: [...normalized.values()].sort((a,b) => a.date.localeCompare(b.date)), availableModels: [...available.values()], timezone: 'Asia/Shanghai' };
 }
+type ActiveModel = { name: string; supplier: string; costType: "free" | "subscription" | "official" };
+
 export class DashboardData {
   private readonly hostSampler: HostSampler;
   private host?: ReturnType<HostSampler['sample']>;
@@ -70,7 +72,7 @@ export class DashboardData {
     } catch { this.historyState = 'unavailable'; }
     return { intervalMs, points: mergeResourceHistory(rows) };
   }
-  private async liveStatus(agent: Manifest['agents'][number]) {
+  async liveStatus(agent: Manifest['agents'][number]) {
     if (!agent.enabled) return { state: 'disabled' as const };
     if (!agent.web) return { state: 'unavailable' as const };
     try {
@@ -78,11 +80,12 @@ export class DashboardData {
       // /healthz bypasses instrumentation and never refreshes the stored activity snapshot.
       const response = await fetch(`http://127.0.0.1:${agent.web.listenPort}/healthz`, { signal: AbortSignal.timeout(1500), redirect: 'error' });
       if (!response.ok) throw new Error('health');
-      const body = await response.json() as { status?: string; channel?: string; monitoring?: ReturnType<PerformanceStore['activityState']> };
+      const body = await response.json() as { status?: string; channel?: string; release?: { commit?: string }; models?: ActiveModel[]; monitoring?: ReturnType<PerformanceStore['activityState']> };
       if (body.status !== 'ok' || body.channel !== 'web') throw new Error('health');
       const monitoring = body.monitoring;
-      if (monitoring?.mode !== 'on-demand' || !Number.isSafeInteger(monitoring.active) || monitoring.active < 0) return { state: 'online' as const };
-      return { state: monitoring.active > 0 ? 'busy' as const : 'idle' as const, monitoring };
+      const runningCommit = /^[a-f0-9]{40}$/.test(body.release?.commit ?? '') ? body.release?.commit : undefined;
+      if (monitoring?.mode !== 'on-demand' || !Number.isSafeInteger(monitoring.active) || monitoring.active < 0) return { state: 'online' as const, runningCommit, models: body.models };
+      return { state: monitoring.active > 0 ? 'busy' as const : 'idle' as const, monitoring, runningCommit, models: body.models };
     } catch { return { state: 'unavailable' as const }; }
   }
   report(hours: number, period: 'today' | '7d' | '30d' | 'all', agent: string, model: string) {
@@ -117,11 +120,18 @@ export class DashboardData {
       if (health.monitoring) runtime = { ...health.monitoring.runtime, uptime: health.monitoring.uptime };
       else if (runtime) runtime = { ...runtime, uptime: null };
       return { id: agent.id, name: agent.name, enabled: agent.enabled, state: health.state, metricsState, usageState, runtime,
-        lastActivityAt: health.monitoring?.lastActivityAt, performance, resourceRows, usage };
+        lastActivityAt: health.monitoring?.lastActivityAt, performance, resourceRows, usage, activeModels: health.models };
     }));
     const reports = allReports.filter(agent => !selected || agent.id === selected);
-    const catalog = [...(this.manifest.catalog?.models ?? []), ...this.manifest.agents.flatMap(agent => agent.models ?? [])];
-    const configured = new Map(catalog.map(model => [model.name, model]));
+    const configured = new Map(reports.flatMap(report => report.activeModels ?? []).map(model => [model.name, model.costType]));
+    for (const report of reports) {
+      if (report.activeModels || !report.enabled) continue;
+      const profile = this.manifest.agents.find(agent => agent.id === report.id)!;
+      for (const model of profile.models ?? this.manifest.catalog?.models ?? []) {
+        if (!profile.modelOrder?.includes(model.name) || configured.has(model.name)) continue;
+        configured.set(model.name, model.cost?.type ?? this.manifest.catalog?.suppliers[model.supplier]?.cost.type ?? "official");
+      }
+    }
     const usage = mergeUsage(reports.flatMap(report => report.usage ? [report.usage] : []), period);
     const modelList = new Set([...configured.keys(), ...usage.availableModels.map(model => model.model)]);
     const generatedAt=Date.now(), resources=this.resourceHistory(hours, generatedAt, allReports.flatMap(agent => agent.resourceRows));
@@ -139,7 +149,7 @@ export class DashboardData {
         availableAgents: reports.filter(agent => agent.metricsState === 'ready').length,
         unavailableAgents: reports.filter(agent => agent.enabled && agent.metricsState !== 'ready').map(agent => agent.id),
         dropped: reports.reduce((n, agent) => n + Number(agent.runtime?.dropped ?? 0), 0) },
-      agents: reports.map(({ performance, resourceRows, ...agent }) => agent), usage: { ...usage, models: usage.models.map(model => ({ ...model, costType: model.billingTypes?.length ? model.billingTypes.length === 1 ? model.billingTypes[0] : 'mixed' : configured.get(model.model)?.cost?.type ?? this.manifest.catalog?.suppliers?.[model.supplier]?.cost.type ?? 'unknown' })) } };
+      agents: reports.map(({ performance, resourceRows, activeModels, ...agent }) => agent), usage: { ...usage, models: usage.models.map(model => ({ ...model, costType: model.billingTypes?.length ? model.billingTypes.length === 1 ? model.billingTypes[0] : 'mixed' : configured.get(model.model) ?? this.manifest.catalog?.suppliers?.[model.supplier]?.cost.type ?? 'unknown' })) } };
   }
   close() { this.cache.clear(); if(this.historyDb) closeSqlite(this.historyDb); }
 }

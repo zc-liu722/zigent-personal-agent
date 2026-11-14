@@ -19,7 +19,7 @@ function waitForShutdownSignal(): Promise<void> {
 async function main(): Promise<void> {
   const [agentId, ...extraArgs] = process.argv.slice(2);
   if (!agentId || extraArgs.length > 0) {
-    throw new Error("Usage: npm start -- <agent-id> (for example: npm start -- xiaochang)");
+    throw new Error("Usage: npm start -- <agent-id> (for example: npm start -- assistant)");
   }
 
   const releaseLock = await acquireAgentLock(agentId);

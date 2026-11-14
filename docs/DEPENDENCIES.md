@@ -7,10 +7,10 @@
 | 生态 | 依赖条目 |
 | --- | ---: |
 | cargo | 63 |
-| npm | 340 |
+| npm | 534 |
 | pypi | 25 |
 
-未取得许可表达式：**1** 条。注册表核对日期：2026-11-02。
+未取得许可表达式：**2** 条。注册表核对日期：2026-11-14。
 
 ## 需要额外核对的声明
 
@@ -31,6 +31,9 @@
 | @img/sharp-win32-arm64 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | npm |
 | @img/sharp-win32-ia32 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | npm |
 | @img/sharp-win32-x64 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | npm |
+| dompurify | 3.4.17 | (MPL-2.0 OR Apache-2.0) | npm |
+| elkjs | 0.12.1 | EPL-2.0 OR GPL-3.0-or-later | npm |
+| khroma | 2.1.0 | 未取得表达式（lockfile） | npm |
 | pdfplumber | 0.11.10 | 未取得表达式（retrieved） | pypi |
 | PyMuPDF | 1.28.2 | Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License | pypi |
 

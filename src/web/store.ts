@@ -1,3 +1,7 @@
+import { ConversationStore } from "../conversation/store.js";
+import { isMissingConversationObject } from "../conversation/objects.js";
+import { installWebConversationReader } from "../conversation/reader.js";
+import { indexConversationImages, installConversationImageIndex } from "./conversation-image-index.js";
 import { prepareSql, closeSqlite, sqliteTransaction } from "../sqlite.js";
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
@@ -7,10 +11,10 @@ import { dirname } from "node:path";
 import { EventEmitter } from "node:events";
 import { lstatSync } from "node:fs";
 import type { AgentRunSnapshot } from "../agent/transcript.js";
+import type { MessageAttachment } from "../channels/attachments.js";
 import type { WebMessageOperation } from "./message-operations.js";
 import { compactMessage } from "./message-activity.js";
 import type { Session } from "../memory/types.js";
-import { selectGreeting } from "./greetings.js";
 import type { ConversationDiagnostic } from "../audit/diagnostics.js";
 import { AUTHORIZATION_SERVICES, authorizationInteraction, authorizationSetupRequiredText, type WebAuthorizationService, type WebInteraction } from "./interactions.js";
 
@@ -43,6 +47,7 @@ export type WebMessage = {
   id: string; conversationId: string; role: "user" | "assistant" | "notice";
   text: string; createdAt: number; snapshot?: AgentRunSnapshot;
   assets?: string[]; action?: unknown; interactions?: WebInteraction[];
+  attachments?: MessageAttachment[];
   files?: Record<string, { name: string; mime: string; size: number }>;
   taskTitle?: string;
   replyTo?: string;
@@ -52,27 +57,39 @@ export type WebMessage = {
   streamRevision?: number;
   activityDeferred?: boolean;
   activityRevision?: string;
+  /** Read-only placeholder for a message whose stored body cannot be fully decoded. */
+  storageUnavailable?: true;
   writingEdits?: Record<string, { original: string; content: string; title: string; updatedAt: number }>;
 };
 export type QueuedWebMessage = {
   id: string; conversationId: string; text: string; assets: string[]; createdAt: number;
   files?: WebMessage["files"];
+  origin?: { type: "meeting"; meetingId: string } | { type: "authorization"; service: WebAuthorizationService };
   model: string; reasoningEfforts: Record<string, import("../config.js").ReasoningEffort>;
   status: "queued" | "dispatched" | "cancelled" | "failed";
+  resume?: boolean;
   error?: string;
 };
+function continuationNotice(message: QueuedWebMessage): string | undefined {
+  if (message.origin?.type === "meeting") return "会议已结束，继续处理。";
+  if (message.origin?.type === "authorization") return `${AUTHORIZATION_SERVICES[message.origin.service].label}已连接，继续处理。`;
+}
 export function queuedMessageView(message: QueuedWebMessage) {
   const { id, text, assets, files, createdAt, status, error } = message;
-  return { id, text, assets, files, createdAt, status, error };
+  return { id, text: message.origin?.type === "meeting" ? "会议完成，继续处理" : continuationNotice(message) ?? text, assets, files, createdAt, status, error };
 }
 type MessageRow = { seq: number; id: string; conversation_id: string; payload: string };
+export type ReplyAnnotation = {
+  id: string; number: number; quote: string; text: string; block: number; version: number;
+  anchor?: { start: number; end: number };
+};
 type ConversationRow = { id: string; chatId: string; sessionId: string | null; model: string | null };
-type ConversationDraft = ConversationRow & { greeting: string };
 type EditRequest = { request_id: string; conversation_id: string; message_id: string; session_id: string; from_turn: number; payload_key: string; completed: number };
 
 /** Private transport history, assets and device tokens; independent of model memory. */
 export class WebStore extends EventEmitter {
-  private readonly drafts = new Map<string, ConversationDraft>();
+  private maintenanceDatabase?: DatabaseSync;
+  private readonly drafts = new Map<string, ConversationRow>();
   readonly streamEpoch = randomUUID();
   private streamRevision = 0;
   private historyCache?: { changes: number; version: number; page: ReturnType<WebStore["conversationPage"]> };
@@ -80,12 +97,9 @@ export class WebStore extends EventEmitter {
   private liveMessage(id: string): (WebMessage & { seq: number }) | undefined {
     const live = this.liveMessages.get(id);
     if (!live) return;
-    // A read flushes pending operations before assigning the snapshot's revision.
-    const message = live.current();
-    const latest = this.liveMessages.get(id);
-    return { ...message, seq: live.seq, streamEpoch: this.streamEpoch, streamRevision: latest?.revision ?? message.streamRevision ?? live.revision };
+    return { ...live.current(), seq: live.seq, streamEpoch: this.streamEpoch, streamRevision: live.revision };
   }
-  private constructor(readonly db: DatabaseSync, readonly owner: string) { super(); }
+  private constructor(readonly db: DatabaseSync, readonly owner: string, readonly conversationStore?: ConversationStore) { super(); }
   /** Controlled data maintenance only: attach an existing owner database without
    * running startup recovery against live conversations or migrating schemas. */
   static connectForMaintenance(path: string, owner: string): WebStore {
@@ -95,10 +109,19 @@ export class WebStore extends EventEmitter {
     try {
       db.exec("PRAGMA busy_timeout=5000");
       if(db.prepare("SELECT value FROM settings WHERE key='owner'").get()?.value!==owner)throw new Error("WEB_OWNER_MISMATCH");
-      return new WebStore(db,owner);
+      const pathToHistory = dirname(path) + "/sessions.sqlite";
+      const historyFile=lstatSync(pathToHistory);
+      if(!historyFile.isFile()||historyFile.isSymbolicLink()||historyFile.nlink!==1)throw new Error("CONVERSATION_MAINTENANCE_FILE_INVALID");
+      const history = new DatabaseSync(pathToHistory);
+      try {
+        const canonical = history.prepare("SELECT 1 FROM sqlite_master WHERE name='conversation_objects'").get()
+          ? new ConversationStore(history,{initialize:false}) : undefined;
+        installWebConversationReader(db, canonical);
+        const store = new WebStore(db,owner,canonical); store.maintenanceDatabase=history; return store;
+      } catch(error) {closeSqlite(history);throw error;}
     } catch(error) {closeSqlite(db);throw error;}
   }
-  static async open(path: string, owner: string, initialHash?: string): Promise<WebStore> {
+  static async open(path: string, owner: string, initialHash?: string, resumable?: (replyId: string) => boolean, conversations?: ConversationStore): Promise<WebStore> {
     await mkdir(dirname(path), { recursive: true });
     const db = new DatabaseSync(path);
     db.function("history_title_matches", { deterministic: true }, (title, query) =>
@@ -125,6 +148,10 @@ export class WebStore extends EventEmitter {
     db.exec("CREATE TABLE IF NOT EXISTS task_proposals(id TEXT PRIMARY KEY, proposal_key TEXT UNIQUE NOT NULL, conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, payload TEXT NOT NULL)");
     db.exec("CREATE TABLE IF NOT EXISTS memory_proposals(id TEXT PRIMARY KEY, proposal_key TEXT UNIQUE NOT NULL, conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, payload TEXT NOT NULL)");
     db.exec("CREATE TABLE IF NOT EXISTS web_branches (request_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, message_id TEXT NOT NULL, target_id TEXT NOT NULL)");
+    db.exec(`CREATE TABLE IF NOT EXISTS web_reply_annotations (
+      id TEXT PRIMARY KEY, message_id TEXT NOT NULL, number INTEGER NOT NULL, payload TEXT NOT NULL,
+      UNIQUE(message_id,number));
+      CREATE INDEX IF NOT EXISTS web_reply_annotations_message ON web_reply_annotations(message_id,number)`);
     db.exec(`CREATE TABLE IF NOT EXISTS web_edits (request_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
       message_id TEXT NOT NULL, session_id TEXT NOT NULL, from_turn INTEGER NOT NULL, payload_key TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0)`);
     db.exec("CREATE TABLE IF NOT EXISTS web_rewound_messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL)");
@@ -136,7 +163,6 @@ export class WebStore extends EventEmitter {
     if (!columns.some(column => column.name === "chat_id")) db.exec("ALTER TABLE conversations ADD COLUMN chat_id TEXT");
     if (!columns.some(column => column.name === "model")) db.exec("ALTER TABLE conversations ADD COLUMN model TEXT");
     if (!columns.some(column => column.name === "revision")) db.exec("ALTER TABLE conversations ADD COLUMN revision INTEGER NOT NULL DEFAULT 0");
-    if (!columns.some(column => column.name === "greeting")) db.exec("ALTER TABLE conversations ADD COLUMN greeting TEXT");
     if (!columns.some(column => column.name === "deleted_at")) db.exec("ALTER TABLE conversations ADD COLUMN deleted_at INTEGER");
     db.exec("CREATE UNIQUE INDEX IF NOT EXISTS conversations_session ON conversations(session_id)");
     // Reverse scan also orders equal timestamps by descending rowid, matching the history list.
@@ -171,7 +197,10 @@ export class WebStore extends EventEmitter {
           UPDATE web_messages SET restart_pending=(${pending}) WHERE seq=NEW.seq;
         END`);
     }
-    const store = new WebStore(db, owner);
+    installConversationImageIndex(db);
+    installWebConversationReader(db, conversations);
+    if (conversations && !conversations.hasBaseline("web")) conversations.baseline("web", db.prepare(`SELECT count(*) AS records,COALESCE(sum(length(CAST(payload AS BLOB))),0) AS bytes FROM web_messages`).get());
+    const store = new WebStore(db, owner, conversations);
     const previous = store.setting("owner");
     if (previous && previous !== owner) { db.close(); throw new Error("WEB_OWNER_MISMATCH"); }
     if (!store.setting("password")) {
@@ -180,19 +209,84 @@ export class WebStore extends EventEmitter {
     }
     if (!previous) store.set("owner", owner);
     try {
+      // Remove location estimates added by the initial rollout. Only model history
+      // owns this metadata; web payload, messages, and recovery state stay intact.
+      const locationColumns = ["wgs84_latitude", "wgs84_longitude", "velocity_kph"]
+        .filter(name => messageColumns.some(column => column.name === name));
+      if (locationColumns.length) sqliteTransaction(db, () => {
+        db.exec("DROP INDEX IF EXISTS web_messages_location_time; DROP INDEX IF EXISTS web_messages_location_pending");
+        for (const name of locationColumns) db.exec(`ALTER TABLE web_messages DROP COLUMN ${name}`);
+      });
+      if (conversations) for (const row of prepareSql(db,"SELECT id,session_id,deleted_at FROM conversations WHERE deleted_at IS NOT NULL AND session_id IS NOT NULL").all()) {
+        conversations.deleteConversation(String(row.session_id),String(row.id),Number(row.deleted_at));
+      }
+      store.reconcileOutbox();
       store.repairLegacyHistory();
-      store.recoverInterruptedMessages();
+      store.recoverInterruptedMessages(resumable);
       return store;
     } catch (error) { closeSqlite(db); throw error; }
+  }
+  migrateConversationBatch(limit = 4): number {
+    if (!this.conversationStore) return 0;
+    const rows = prepareSql(this.db, `SELECT payload FROM web_messages WHERE json_valid(payload)
+      AND json_type(payload,'$._conversation') IS NULL ORDER BY seq LIMIT ?`).all(limit) as {payload:string}[];
+    for (const row of rows) {
+      const message = JSON.parse(row.payload) as WebMessage;
+      // Deleted rows are archived too, but save() must never restore a discarded turn.
+      const root = this.conversationStore.web(message);
+      if (JSON.stringify(this.conversationStore.objects.get(root.hash)) !== JSON.stringify(message)) throw new Error("CONVERSATION_WEB_BACKFILL_HASH_MISMATCH");
+      const changed = sqliteTransaction(this.db, () => {
+        const updated = prepareSql(this.db,"UPDATE web_messages SET payload=? WHERE id=? AND payload=?")
+          .run(this.conversationStore!.stub(message,root),message.id,row.payload);
+        if (updated.changes) indexConversationImages(this.db, message);
+        return updated;
+      });
+      if (changed.changes) this.conversationStore.acknowledge(root.seq);
+    }
+    return rows.length;
+  }
+  reconcileOutbox(): void {
+    if (!this.conversationStore) return;
+    for (const event of this.conversationStore.pendingDeletes()) {
+      const state = this.conversationStore.objects.get(event.hash) as {conversationId:string;deletedAt:number};
+      sqliteTransaction(this.db,()=>{
+        prepareSql(this.db,"UPDATE conversations SET deleted_at=COALESCE(deleted_at,?) WHERE id=?").run(state.deletedAt,state.conversationId);
+        for (const message of this.queuedMessages(state.conversationId)) prepareSql(this.db,"UPDATE web_message_queue SET payload=? WHERE id=?")
+          .run(JSON.stringify({...message,status:"cancelled"}),message.id);
+      });
+      this.conversationStore.acknowledge(event.seq);
+    }
+    for (const event of this.conversationStore.pendingWeb()) {
+      let message: WebMessage;
+      try { message = this.conversationStore.objects.get(event.hash) as WebMessage; }
+      catch (error) {
+        // Leave the undelivered event intact. It cannot authorize recovery of an incomplete action.
+        if (isMissingConversationObject(error)) continue;
+        throw error;
+      }
+      const existing = prepareSql(this.db, "SELECT payload,deleted_at FROM web_messages WHERE id=?").get(message.id) as { payload: string; deleted_at: number | null } | undefined;
+      const previous = existing ? JSON.parse(existing.payload)._conversation : undefined;
+      const conversation = prepareSql(this.db,"SELECT deleted_at FROM conversations WHERE id=?").get(message.conversationId) as {deleted_at:number|null}|undefined;
+      if (!conversation?.deleted_at && !existing?.deleted_at && !this.rewoundMessage(message.id) && (!previous || previous.revision < event.revision)) {
+        sqliteTransaction(this.db, () => {
+          this.conversation(message.conversationId, (message.taskTitle ?? message.text) || "新的对话", message.createdAt);
+          prepareSql(this.db, `INSERT INTO web_messages(id,conversation_id,payload,restart_pending) VALUES(?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,restart_pending=excluded.restart_pending`)
+            .run(message.id, message.conversationId, this.conversationStore!.stub(message, event), message.interactions?.some(restartInteraction) ? 1 : 0);
+          indexConversationImages(this.db, message);
+        });
+      }
+      this.conversationStore.acknowledge(event.seq);
+    }
   }
   private repairLegacyHistory(): void {
     if (this.setting(HISTORY_REPAIR_VERSION) === "1") return;
     sqliteTransaction(this.db, () => {
       this.db.exec("UPDATE conversations SET chat_id=id WHERE chat_id IS NULL");
       // Historical setup failures are repaired once; new failed operations already carry retry actions.
-      const rows = prepareSql(this.db, `SELECT seq,id,conversation_id,payload FROM web_messages
+      const rows = prepareSql(this.db, `SELECT seq,id,conversation_id,payload FROM web_message_display_records
         WHERE deleted_at IS NULL AND json_type(payload,'$.interactions')='array' AND EXISTS (
-          SELECT 1 FROM json_each(web_messages.payload,'$.interactions') AS interaction
+          SELECT 1 FROM json_each(web_message_display_records.payload,'$.interactions') AS interaction
           WHERE json_extract(interaction.value,'$.kind')='authorization'
             AND json_extract(interaction.value,'$.status') IN ('failed','expired')
             AND json_array_length(interaction.value,'$.actions')=0)`).all() as MessageRow[];
@@ -208,7 +302,7 @@ export class WebStore extends EventEmitter {
         });
         if (changed) this.save({ ...message, action: undefined, interactions }, false);
       }
-      const actions = prepareSql(this.db, `SELECT seq,id,conversation_id,payload FROM web_messages
+      const actions = prepareSql(this.db, `SELECT seq,id,conversation_id,payload FROM web_message_display_records
         WHERE deleted_at IS NULL AND json_extract(payload,'$.action.type') IN ('authorization','model-fallback')`).all() as MessageRow[];
       for (const row of actions) {
         const message = JSON.parse(row.payload) as WebMessage;
@@ -226,18 +320,28 @@ export class WebStore extends EventEmitter {
       this.set(HISTORY_REPAIR_VERSION, "1");
     });
   }
-  private recoverInterruptedMessages(): void {
-    for (const row of prepareSql(this.db, "SELECT seq,id,conversation_id,payload FROM web_messages WHERE deleted_at IS NULL AND json_extract(payload,'$.snapshot.status')='running'").all() as MessageRow[]) {
+  private recoverInterruptedMessages(resumable?: (replyId: string) => boolean): void {
+    // The transport index carries status even before the referenced body is decoded.
+    for (const row of prepareSql(this.db, `SELECT seq,id,conversation_id,conversation_web_display(payload) AS payload
+      FROM web_messages WHERE deleted_at IS NULL AND json_extract(web_messages.payload,'$.snapshot.status')='running'`).all() as MessageRow[]) {
       const message = JSON.parse(row.payload) as WebMessage;
-      this.save({ ...message, text: message.text || "连接中断了，请重新发送。",
-        snapshot: { ...message.snapshot!, status: "failed", failureMessage: "服务已重启，请重新发送。" } }, false);
+      if (message.storageUnavailable) continue;
+      const queued = message.replyTo ? this.queuedMessage(message.replyTo) : undefined;
+      if (queued && queued.status === "dispatched" && resumable?.(message.id)) {
+        this.saveQueuedMessage({ ...queued, status: "queued", resume: true });
+        continue;
+      }
+      this.save({ ...message, text: message.text || "连接已中断，已保存的进度保留。",
+        snapshot: { ...message.snapshot!, status: "failed", failureMessage: "连接已中断，已保存的执行状态需要核对。" } }, false);
     }
-    for (const row of prepareSql(this.db, "SELECT seq,id,conversation_id,payload FROM web_messages WHERE deleted_at IS NULL AND restart_pending=1").all() as MessageRow[]) {
+    for (const row of prepareSql(this.db, "SELECT seq,id,conversation_id,payload FROM web_message_display_records WHERE deleted_at IS NULL AND restart_pending=1").all() as MessageRow[]) {
       const message = JSON.parse(row.payload) as WebMessage;
+      if (message.storageUnavailable) continue;
       const interactions = message.interactions!.map(interaction => {
         if (!restartInteraction(interaction)) return interaction; // Durable consent survives restarts.
         if (interaction.actions.some(action => action.kind === "submit" && action.value.type === "audio-transcription"))
           return { ...interaction, status: "failed" as const, statusMessage: "转录已中断，请重试。" };
+        if (interaction.kind === "meeting") return { ...interaction, status: "failed" as const, actions: [], meeting: interaction.meeting ? { ...interaction.meeting, phase: "ended" as const, reason: "服务重启，会议已结束" } : undefined };
         if (interaction.kind === "user-question") return interaction.expiresAt && interaction.expiresAt > Date.now()
           ? { ...interaction, resumeAfterRestart: true }
           : { ...interaction, status: "expired" as const, statusMessage: "提问已过期。", actions: [] };
@@ -258,11 +362,21 @@ export class WebStore extends EventEmitter {
   modelReasoning(model: string): string | undefined { return this.setting(`model_reasoning:${model}`); }
   saveModelReasoning(model: string, effort: string): void {
     this.set(`model_reasoning:${model}`, effort);
-    this.emit("change");
   }
   setting(key: string): string | undefined {
     return (prepareSql(this.db, "SELECT value FROM settings WHERE key=?").get(key) as { value: string } | undefined)?.value;
   }
+  feishuAuthorizationStatus(): "failed" | "expired" | undefined {
+    const saved = this.setting("feishu_authorization_status");
+    if (saved !== undefined) return saved === "failed" || saved === "expired" ? saved : undefined;
+    // Preserve terminal cards made before this preference existed, including across releases.
+    const latest = prepareSql(this.db, `SELECT json_extract(item.value,'$.status') AS status
+      FROM web_message_display_records AS message, json_each(message.payload,'$.interactions') AS item
+      WHERE message.deleted_at IS NULL AND json_extract(item.value,'$.kind')='authorization'
+        AND json_extract(item.value,'$.service')='feishu' ORDER BY message.seq DESC LIMIT 1`).get() as { status: string } | undefined;
+    return latest?.status === "failed" || latest?.status === "expired" ? latest.status : undefined;
+  }
+  setFeishuAuthorizationStatus(status?: "failed" | "expired"): void { this.set("feishu_authorization_status", status ?? ""); }
   private set(key: string, value: string): void { prepareSql(this.db, "INSERT OR REPLACE INTO settings VALUES (?,?)").run(key, value); }
   allowLogin(key: string, now = Date.now()): boolean {
     prepareSql(this.db, "DELETE FROM login_attempts WHERE resets_at<=?").run(now);
@@ -302,8 +416,8 @@ export class WebStore extends EventEmitter {
     this.db.exec("DELETE FROM devices; DELETE FROM device_expiry_limits");
   }
   /** Empty chats live only in this process until a message or queued send is saved. */
-  draftConversation(id: string): void {
-    this.drafts.set(digest(id), { id, chatId: id, sessionId: null, model: null, greeting: selectGreeting() });
+  draftConversation(id: string, model?: string): void {
+    this.drafts.set(digest(id), { id, chatId: id, sessionId: null, model: model ?? null });
   }
   isDraft(id: string): boolean { return this.drafts.has(digest(id)); }
   conversation(id: string, title = "新的对话", updatedAt = Date.now(), sessionId?: string, chatId = id): void {
@@ -312,7 +426,7 @@ export class WebStore extends EventEmitter {
       ON CONFLICT(id) DO UPDATE SET session_id=COALESCE(excluded.session_id,conversations.session_id)`)
       .run(id, [...title].slice(0,60).join(""), updatedAt, digest(id), sessionId ?? null, chatId);
     if (draft) {
-      prepareSql(this.db, "UPDATE conversations SET model=?,greeting=? WHERE id=?").run(draft.model, draft.greeting, id);
+      prepareSql(this.db, "UPDATE conversations SET model=? WHERE id=?").run(draft.model, id);
       this.drafts.delete(digest(id));
     }
   }
@@ -321,21 +435,12 @@ export class WebStore extends EventEmitter {
     if (draft) return { id, chatId: draft.chatId, sessionId: draft.sessionId, model: draft.model };
     return prepareSql(this.db, "SELECT id,chat_id AS chatId,session_id AS sessionId,model FROM conversations WHERE id=?").get(id) as ConversationRow | undefined;
   }
-  conversationGreeting(id: string): string | undefined {
-    const draft = this.drafts.get(digest(id));
-    if (draft) return draft.greeting;
-    const row = prepareSql(this.db, "SELECT greeting FROM conversations WHERE id=?").get(id) as { greeting: string | null } | undefined;
-    if (!row) return undefined;
-    if (row.greeting) return row.greeting;
-    const greeting = selectGreeting();
-    prepareSql(this.db, "UPDATE conversations SET greeting=? WHERE id=?").run(greeting, id);
-    return greeting;
-  }
   selectModel(id: string, model: string): void {
-    const draft = this.drafts.get(digest(id));
+    const conversationId = this.publicId(id);
+    const draft = this.drafts.get(conversationId);
     if (draft) draft.model = model;
     else prepareSql(this.db, "UPDATE conversations SET model=? WHERE id=?").run(model, id);
-    this.emit("change");
+    this.emit("model-selection", { conversationId, selectedModel: model });
   }
   touchConversation(id: string, now = Date.now()): void {
     prepareSql(this.db, "UPDATE conversations SET updated_at=MAX(updated_at,?) WHERE id=?").run(now, id);
@@ -371,7 +476,7 @@ export class WebStore extends EventEmitter {
     const rows = prepareSql(this.db, `SELECT public_id AS id,title,updated_at AS updatedAt,rowid FROM conversations WHERE deleted_at IS NULL
       ${query ? "AND history_title_matches(title,?)" : ""}
       ${cursor ? "AND (updated_at,rowid)<(?,?)" : ""}
-      AND (EXISTS (SELECT 1 FROM web_messages WHERE deleted_at IS NULL AND conversation_id=conversations.id)
+      AND (EXISTS (SELECT 1 FROM web_message_records WHERE deleted_at IS NULL AND conversation_id=conversations.id)
         OR EXISTS (SELECT 1 FROM web_message_queue WHERE conversation_id=conversations.id AND json_extract(payload,'$.status') IN ('queued','failed')))
       ORDER BY updated_at DESC,rowid DESC LIMIT ?`).all(...(query ? [query] : []),
         ...(cursor ? [cursor.updatedAt, cursor.rowid] : []), limit + 1) as Array<{ id: string; title: string; updatedAt: number; rowid: number }>;
@@ -384,10 +489,12 @@ export class WebStore extends EventEmitter {
   /** Keep the transcript/session intact and retain a tombstone across imports and late replies. */
   deleteConversation(publicId: string, now = Date.now()): boolean {
     if (this.drafts.delete(publicId)) { this.emit("change"); return true; }
+    const target = prepareSql(this.db,"SELECT id,session_id,deleted_at FROM conversations WHERE public_id=?").get(publicId) as {id:string;session_id:string|null;deleted_at:number|null}|undefined;
+    const deletion = target?.session_id ? this.conversationStore?.deleteConversation(target.session_id,target.id,target.deleted_at??now) : undefined;
     this.db.exec("BEGIN IMMEDIATE");
     let changed = false;
     try {
-      const row = prepareSql(this.db, "SELECT id FROM conversations WHERE public_id=?").get(publicId) as { id: string } | undefined;
+      const row = target;
       if (row) {
         prepareSql(this.db, "UPDATE conversations SET deleted_at=COALESCE(deleted_at,?) WHERE id=?").run(now, row.id);
         for (const message of this.queuedMessages(row.id)) prepareSql(this.db, "UPDATE web_message_queue SET payload=? WHERE id=?")
@@ -396,11 +503,12 @@ export class WebStore extends EventEmitter {
       }
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    if (deletion !== undefined) this.conversationStore!.acknowledge(deletion);
     if (changed) this.emit("change");
     return changed;
   }
   private firstContentMessage(conversationId: string): WebMessage | undefined {
-    const row = prepareSql(this.db, `SELECT payload FROM web_messages WHERE deleted_at IS NULL AND conversation_id=?
+    const row = prepareSql(this.db, `SELECT payload FROM web_message_display_records WHERE deleted_at IS NULL AND conversation_id=?
       AND json_extract(payload,'$.role') IN ('user','assistant') AND trim(json_extract(payload,'$.text'))<>'' ORDER BY seq LIMIT 1`)
       .get(conversationId) as { payload: string } | undefined;
     return row ? JSON.parse(row.payload) as WebMessage : undefined;
@@ -439,23 +547,38 @@ export class WebStore extends EventEmitter {
   }
   /** Publish a recovered form receipt only after its continuation is durably queued. */
   completeRecoveredQuestion(message: WebMessage, continuation: QueuedWebMessage): void {
-    const continuationJson = JSON.stringify(continuation), messageJson = JSON.stringify(message);
+    const continuationJson = JSON.stringify(continuation);
+    const root = this.conversationStore?.web(message);
+    const messageJson = root ? this.conversationStore!.stub(message, root) : JSON.stringify(message);
     sqliteTransaction(this.db, () => {
       if (!this.message(message.id)) throw new Error("Question message unavailable");
       prepareSql(this.db, "INSERT INTO web_message_queue(id,conversation_id,payload) VALUES (?,?,?)")
         .run(continuation.id, continuation.conversationId, continuationJson);
       prepareSql(this.db, "UPDATE web_messages SET payload=?,restart_pending=? WHERE id=? AND deleted_at IS NULL")
         .run(messageJson, message.interactions?.some(restartInteraction) ? 1 : 0, message.id);
+      indexConversationImages(this.db, message);
     });
-    const row = prepareSql(this.db, "SELECT seq FROM web_messages WHERE deleted_at IS NULL AND id=?").get(message.id) as { seq: number };
+    if (root) this.conversationStore!.acknowledge(root.seq);
+    const row = prepareSql(this.db, "SELECT seq FROM web_message_records WHERE deleted_at IS NULL AND id=?").get(message.id) as { seq: number };
     this.emit("message", { ...message, seq: row.seq, conversationId: digest(message.conversationId) });
+    this.emitQueue(message.conversationId);
+  }
+  /** Finish receipt and one continuation share a transaction; replay never resets a dispatched turn. */
+  completeMeeting(message: WebMessage, continuation: QueuedWebMessage, meetingId: string, retain: boolean): void {
+    sqliteTransaction(this.db, () => {
+      if (!this.message(message.id) || !this.conversationInfo(message.conversationId)) throw new Error("Meeting conversation unavailable");
+      prepareSql(this.db, "INSERT OR IGNORE INTO web_message_queue(id,conversation_id,payload) VALUES (?,?,?)")
+        .run(continuation.id, continuation.conversationId, JSON.stringify(continuation));
+      if (!retain) prepareSql(this.db, "DELETE FROM web_meeting_invitations WHERE id=?").run(meetingId);
+      this.save(message, false);
+    });
     this.emitQueue(message.conversationId);
   }
   startQueuedMessage(message: QueuedWebMessage): void {
     const dispatchedJson = JSON.stringify({ ...message, status: "dispatched" });
     sqliteTransaction(this.db, () => {
       prepareSql(this.db, "UPDATE web_message_queue SET payload=? WHERE id=?").run(dispatchedJson, message.id);
-      this.save({ id: message.id, conversationId: message.conversationId, role: "user", text: message.text, assets: message.assets, createdAt: Date.now() });
+      this.save({ id: message.id, conversationId: message.conversationId, role: message.origin ? "notice" : "user", text: continuationNotice(message) ?? message.text, assets: message.assets, createdAt: Date.now() });
     });
     this.emitQueue(message.conversationId);
   }
@@ -467,15 +590,51 @@ export class WebStore extends EventEmitter {
     if (this.rewoundMessage(id)) return;
     const live = this.liveMessage(id);
     if (live) return live;
-    const row = prepareSql(this.db, "SELECT payload FROM web_messages WHERE deleted_at IS NULL AND id=?").get(id) as { payload: string } | undefined;
+    const row = prepareSql(this.db, "SELECT payload FROM web_message_records WHERE deleted_at IS NULL AND id=?").get(id) as { payload: string } | undefined;
     return row ? JSON.parse(row.payload) as WebMessage : undefined;
   }
-  messages(conversationId: string, before = Number.MAX_SAFE_INTEGER, limit = 100, compact = false): Array<WebMessage & { seq: number }> {
+  replyAnnotations(messageId: string): ReplyAnnotation[] {
+    return (prepareSql(this.db, "SELECT payload FROM web_reply_annotations WHERE message_id=? ORDER BY number")
+      .all(messageId) as { payload: string }[]).map(row => JSON.parse(row.payload) as ReplyAnnotation);
+  }
+  saveReplyAnnotation(message: WebMessage, input: Omit<ReplyAnnotation, "number" | "version">, expectedVersion: number): ReplyAnnotation | undefined {
+    const saved = sqliteTransaction(this.db, () => {
+      const row = prepareSql(this.db, "SELECT message_id,payload FROM web_reply_annotations WHERE id=?")
+        .get(input.id) as { message_id: string; payload: string } | undefined;
+      if (row && row.message_id !== message.id) return;
+      const prior = row ? JSON.parse(row.payload) as ReplyAnnotation : undefined;
+      const anchor = input.anchor ?? prior?.anchor;
+      // Reconcile a retry whose response was lost without creating another note.
+      if (prior && prior.quote === input.quote && prior.text === input.text && prior.block === input.block
+        && prior.anchor?.start === anchor?.start && prior.anchor?.end === anchor?.end) return prior;
+      if ((prior?.version ?? 0) !== expectedVersion) return;
+      const count = prepareSql(this.db, "SELECT count(*) AS count,COALESCE(max(number),0) AS last FROM web_reply_annotations WHERE message_id=?")
+        .get(message.id) as { count: number; last: number };
+      if (!prior && count.count >= 100) return;
+      const annotation = { ...input, anchor, number: prior?.number ?? count.last + 1, version: expectedVersion + 1 };
+      prepareSql(this.db, "INSERT INTO web_reply_annotations VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload")
+        .run(input.id, message.id, annotation.number, JSON.stringify(annotation));
+      return annotation;
+    });
+    // Refresh the transport revision, never append the private note to model memory.
+    if (saved) this.save(message);
+    return saved;
+  }
+  deleteReplyAnnotation(message: WebMessage, id: string, expectedVersion: number): boolean {
+    const annotation = this.replyAnnotations(message.id).find(item => item.id === id);
+    if (!annotation) return true;
+    if (annotation.version !== expectedVersion) return false;
+    prepareSql(this.db, "DELETE FROM web_reply_annotations WHERE id=? AND message_id=?").run(id, message.id);
+    this.save(message);
+    return true;
+  }
+  messages(conversationId: string, before = Number.MAX_SAFE_INTEGER, limit = 100, compact = false, display = false): Array<WebMessage & { seq: number }> {
+    const source = display ? "web_message_display_records" : "web_message_records";
     const sql = compact
       ? `SELECT message.seq,message.id,message.conversation_id,COALESCE(cached.payload,message.payload) AS payload,cached.message_id IS NOT NULL AS compact
-        FROM web_messages AS message LEFT JOIN web_message_views AS cached ON cached.message_id=message.id AND cached.version=1
+        FROM ${source} AS message LEFT JOIN web_message_views AS cached ON cached.message_id=message.id AND cached.version=1
         WHERE message.deleted_at IS NULL AND message.conversation_id=? AND message.seq<? ORDER BY message.seq DESC LIMIT ?`
-      : "SELECT seq,id,conversation_id,payload FROM web_messages WHERE deleted_at IS NULL AND conversation_id=? AND seq<? ORDER BY seq DESC LIMIT ?";
+      : `SELECT seq,id,conversation_id,payload FROM ${source} WHERE deleted_at IS NULL AND conversation_id=? AND seq<? ORDER BY seq DESC LIMIT ?`;
     return (prepareSql(this.db, sql).all(conversationId, before, limit) as Array<MessageRow & { compact?: number }>).reverse().map(row => {
       const live = this.liveMessage(row.id);
       if (live) return compact ? { ...compactMessage(live), seq: row.seq } : live;
@@ -499,11 +658,11 @@ export class WebStore extends EventEmitter {
     });
   }
   hasMessagesBefore(conversationId: string, before: number): boolean {
-    return !!prepareSql(this.db, "SELECT 1 FROM web_messages WHERE deleted_at IS NULL AND conversation_id=? AND seq<? LIMIT 1").get(conversationId, before);
+    return !!prepareSql(this.db, "SELECT 1 FROM web_message_records WHERE deleted_at IS NULL AND conversation_id=? AND seq<? LIMIT 1").get(conversationId, before);
   }
   messagesThrough(conversationId: string, messageId: string): WebMessage[] {
-    return (prepareSql(this.db, `SELECT payload FROM web_messages WHERE deleted_at IS NULL AND conversation_id=?
-      AND seq<=(SELECT seq FROM web_messages WHERE deleted_at IS NULL AND id=? AND conversation_id=?) ORDER BY seq`)
+    return (prepareSql(this.db, `SELECT payload FROM web_message_records WHERE deleted_at IS NULL AND conversation_id=?
+      AND seq<=(SELECT seq FROM web_message_records WHERE deleted_at IS NULL AND id=? AND conversation_id=?) ORDER BY seq`)
       .all(conversationId,messageId,conversationId) as { payload: string }[]).map(row => JSON.parse(row.payload) as WebMessage);
   }
   branchRequest(requestId: string): { source_id: string; message_id: string; target_id: string } | undefined {
@@ -535,10 +694,10 @@ export class WebStore extends EventEmitter {
     try {
       const request = this.editRequest(message.id);
       if (!request || request.completed || request.conversation_id !== message.conversationId) throw new Error("Edit unavailable");
-      const target = prepareSql(this.db, "SELECT seq FROM web_messages WHERE deleted_at IS NULL AND id=? AND conversation_id=?")
+      const target = prepareSql(this.db, "SELECT seq FROM web_message_records WHERE deleted_at IS NULL AND id=? AND conversation_id=?")
         .get(request.message_id, message.conversationId) as { seq: number } | undefined;
       if (!target) throw new Error("Edit point unavailable");
-      prepareSql(this.db, `INSERT INTO web_rewound_messages SELECT id,conversation_id FROM web_messages
+      prepareSql(this.db, `INSERT INTO web_rewound_messages SELECT id,conversation_id FROM web_message_records
         WHERE deleted_at IS NULL AND conversation_id=? AND seq>=?`).run(message.conversationId,target.seq);
       prepareSql(this.db, `UPDATE web_messages SET deleted_at=?,deleted_by_edit=?
         WHERE deleted_at IS NULL AND conversation_id=? AND seq>=?`)
@@ -580,7 +739,7 @@ export class WebStore extends EventEmitter {
   publishOperations(message: WebMessage, operations: readonly WebMessageOperation[], current: () => WebMessage): void {
     if (this.rewoundMessage(message.id)) { this.liveMessages.delete(message.id); return; }
     const seq = this.liveMessages.get(message.id)?.seq
-      ?? (prepareSql(this.db, "SELECT seq FROM web_messages WHERE deleted_at IS NULL AND id=?").get(message.id) as { seq: number } | undefined)?.seq;
+      ?? (prepareSql(this.db, "SELECT seq FROM web_message_records WHERE deleted_at IS NULL AND id=?").get(message.id) as { seq: number } | undefined)?.seq;
     if (seq === undefined) throw new Error("Activity must be opened before publishing operations");
     const baseRevision = this.liveMessages.get(message.id)?.revision ?? message.streamRevision;
     if (baseRevision === undefined || message.streamEpoch !== this.streamEpoch) throw new Error("Activity revision is unavailable");
@@ -593,7 +752,7 @@ export class WebStore extends EventEmitter {
   publish(message: WebMessage): void {
     if (this.rewoundMessage(message.id)) { this.liveMessages.delete(message.id); return; }
     const seq = this.liveMessages.get(message.id)?.seq
-      ?? (prepareSql(this.db, "SELECT seq FROM web_messages WHERE deleted_at IS NULL AND id=?").get(message.id) as { seq: number } | undefined)?.seq;
+      ?? (prepareSql(this.db, "SELECT seq FROM web_message_records WHERE deleted_at IS NULL AND id=?").get(message.id) as { seq: number } | undefined)?.seq;
     if (seq === undefined) { this.save(message); return; }
     message.streamEpoch = this.streamEpoch; message.streamRevision = ++this.streamRevision;
     this.liveMessages.set(message.id, { current: () => message, seq, revision: message.streamRevision });
@@ -604,7 +763,8 @@ export class WebStore extends EventEmitter {
     // Delayed OAuth or action results from a discarded turn cannot restore that turn.
     if (this.rewoundMessage(message.id)) { this.liveMessages.delete(message.id); return; }
     if (publish) { message.streamEpoch = this.streamEpoch; message.streamRevision = ++this.streamRevision; }
-    const payload = JSON.stringify(message);
+    const root = this.conversationStore?.web(message);
+    const payload = root ? this.conversationStore!.stub(message, root) : JSON.stringify(message);
     const view = compactMessage(message);
     const viewPayload = view === message ? null : JSON.stringify(view);
     const draft = this.drafts.get(digest(message.conversationId));
@@ -616,6 +776,7 @@ export class WebStore extends EventEmitter {
         prepareSql(this.db, `INSERT INTO web_messages(id,conversation_id,payload,restart_pending) VALUES (?,?,?,?)
           ON CONFLICT(id) DO UPDATE SET conversation_id=excluded.conversation_id,payload=excluded.payload,restart_pending=excluded.restart_pending`)
           .run(message.id, message.conversationId, payload, message.interactions?.some(restartInteraction) ? 1 : 0);
+        indexConversationImages(this.db, message);
         if (viewPayload !== null) prepareSql(this.db, "INSERT OR REPLACE INTO web_message_views(message_id,payload,version) VALUES (?,?,1)").run(message.id, viewPayload);
         prepareSql(this.db, "UPDATE conversations SET updated_at=MAX(updated_at,?) WHERE id=?").run(message.createdAt, message.conversationId);
         if (message.role === "user" && message.text) prepareSql(this.db, "UPDATE conversations SET title=? WHERE id=? AND title='新的对话'").run(message.text.slice(0,60), message.conversationId);
@@ -624,7 +785,7 @@ export class WebStore extends EventEmitter {
             .run(this.backgroundPreview(message), message.conversationId);
           changed = Boolean(updated.changes);
         }
-        const row = prepareSql(this.db, "SELECT seq FROM web_messages WHERE deleted_at IS NULL AND id=?").get(message.id) as { seq: number };
+        const row = prepareSql(this.db, "SELECT seq FROM web_message_records WHERE deleted_at IS NULL AND id=?").get(message.id) as { seq: number };
         return row.seq;
       }, "savepoint");
     } catch (error) {
@@ -633,6 +794,7 @@ export class WebStore extends EventEmitter {
     }
     this.liveMessages.delete(message.id);
     if (changed) this.emit("change");
+    if (root) this.conversationStore!.acknowledge(root.seq);
     if (publish) this.emit("message", { ...message, seq, conversationId: digest(message.conversationId) });
   }
   addAsset(bytes: Buffer, mime: string, name?: string): string {
@@ -653,7 +815,7 @@ export class WebStore extends EventEmitter {
   sharedDocuments(conversationId?: string, offset = 0, limit = 100) {
     const scoped = conversationId != null;
     return prepareSql(this.db, `WITH shared(id) AS (
-      SELECT j.value FROM web_messages m JOIN conversations c ON c.id=m.conversation_id, json_each(json_extract(m.payload,'$.assets')) j
+      SELECT j.value FROM web_message_records m JOIN conversations c ON c.id=m.conversation_id, json_each(json_extract(m.payload,'$.assets')) j
       WHERE m.deleted_at IS NULL AND c.deleted_at IS NULL AND json_extract(m.payload,'$.role')='user'
         ${scoped ? "AND m.conversation_id=?" : ""}
       UNION
@@ -666,7 +828,7 @@ export class WebStore extends EventEmitter {
   }
   sharedDocumentMetadata(id: string) {
     const allowed = prepareSql(this.db, `SELECT 1 FROM asset_documents d WHERE d.asset_id=? AND (
-      EXISTS (SELECT 1 FROM web_messages m JOIN conversations c ON c.id=m.conversation_id,json_each(json_extract(m.payload,'$.assets')) j WHERE j.value=d.asset_id AND m.deleted_at IS NULL AND c.deleted_at IS NULL AND json_extract(m.payload,'$.role')='user')
+      EXISTS (SELECT 1 FROM web_message_records m JOIN conversations c ON c.id=m.conversation_id,json_each(json_extract(m.payload,'$.assets')) j WHERE j.value=d.asset_id AND m.deleted_at IS NULL AND c.deleted_at IS NULL AND json_extract(m.payload,'$.role')='user')
       OR EXISTS (SELECT 1 FROM asset_document_links l JOIN conversations c ON c.id=l.conversation_id WHERE l.asset_id=d.asset_id AND c.deleted_at IS NULL))`).get(id);
     if (!allowed) throw new Error("文档不存在或尚未发送。");
     const saved = prepareSql(this.db, "SELECT sha256 FROM asset_documents WHERE asset_id=?").get(id) as { sha256: string };
@@ -699,6 +861,6 @@ export class WebStore extends EventEmitter {
   }
   close(): void {
     for (const id of this.liveMessages.keys()) { const message = this.liveMessage(id); if (message) this.save(message, false); }
-    this.liveMessages.clear(); this.drafts.clear(); this.removeAllListeners(); closeSqlite(this.db);
+    this.liveMessages.clear(); this.drafts.clear(); this.removeAllListeners(); closeSqlite(this.db); if(this.maintenanceDatabase)closeSqlite(this.maintenanceDatabase);
   }
 }

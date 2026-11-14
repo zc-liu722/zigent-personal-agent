@@ -11,7 +11,20 @@ import type { ToolActivityPresentation, ToolActivityPresentationContext, ToolAct
 import type { OperationDraft } from "./operation-policy.js";
 import type { ViewedSessionImage } from "./view-session-image.js";
 
+export type FeishuReadAuthorization = {
+  /** Return a user-facing failure, or undefined once the original read has succeeded. */
+  verify: () => Promise<string | undefined>;
+  chooseAccount?: string;
+  repairAppId?: string;
+};
+
 export type AgentToolSet = {
+  /** Immutable catalog and implementation lease for one complete model/tool turn. */
+  lease?(): { tools: AgentToolSet; versions: Readonly<Record<string, string>>; release(): void };
+  leaseVersions?(versions: Readonly<Record<string, string>>): Promise<{ tools: AgentToolSet; versions: Readonly<Record<string, string>>; release(): void }>;
+  readonly pluginServices?: Readonly<Record<string, unknown>>;
+  readonly pluginPrompts?: Readonly<Record<string, string>>;
+  skillContextFor?(context: ToolExecutionContext): Promise<string>;
   readonly names: readonly string[];
   readonly localNames: readonly string[];
   readonly definitions: readonly ModelTool[];
@@ -28,11 +41,20 @@ export type AgentToolSet = {
     context?: ToolActivityPresentationContext
   ): ToolActivityPresentation;
   executionMode?(name: string): "parallel" | "sequential";
+  resultFailed?(name: string, result: unknown): boolean;
   execute(name: string, input: unknown, context: ToolExecutionContext): Promise<unknown>;
 };
 
 export type ToolExecutionContext = {
+  /** Durable host operation identity. A plugin cannot manufacture user approval with it. */
+  readonly operationId?: string;
+  readonly pluginVersions?: Readonly<Record<string, string>>;
+  /** Selected by the host's version lease, never accepted from tool arguments. */
+  readonly skillCatalog?: import("../skills/catalog.js").SkillCatalog;
+  readonly executionId?: string;
   /** Executor-owned delegation scope; never accepted from model arguments. */
+  /** Model selection offered by the ordinary chat tool catalogue during passive preparation. */
+  readonly preparedSubagentModels?: readonly import("../config.js").Provider[];
   readonly subagents?: import("./subagents.js").SubagentControl;
   readonly subagent?: boolean;
   /** Channel-owned file access; models only select references, never database paths. */
@@ -73,11 +95,15 @@ export type ToolExecutionContext = {
   /** Signals that a newer user message superseded this run. */
   readonly signal?: AbortSignal;
   /** Current run-owned delivery; models cannot select another message or conversation. */
-  readonly presentOutput?: (output: ConversationOutput) => Promise<void>;
+  readonly presentOutput?: (output: ConversationOutput) => Promise<ConversationOutput | void>;
   /** Current reply identity, assigned by the channel, never model supplied. */
   readonly replyId?: string;
+  readonly imageAssets?: ReturnType<import("../web/conversation-images.js").ConversationImages["forConversation"]>;
+  readonly visibleReplyText?: () => readonly string[];
   /** Current run-owned early image delivery; final completion reuses its assets. */
   readonly presentImages?: (images: readonly GeneratedImage[]) => Promise<void>;
+  /** Trusted channel invitation; returns after delivery, independently of the originating turn. */
+  readonly voiceCall?: (plan: import("../meetings/types.js").MeetingPlan, context: ToolExecutionContext) => Promise<unknown>;
   /** Trusted channel form; waits for the original user and resumes this tool call. */
   readonly askUserQuestion?: (request: UserQuestionRequest) => Promise<UserQuestionResult>;
   /** Trusted channel confirmation UI. A proposal never activates a task. */
@@ -106,12 +132,18 @@ export type ToolExecutionContext = {
   readonly startFeishuUserAuthorization?: () => void;
   /** Channel-owned OAuth rendezvous; resolves only after credentials are saved and verified. */
   readonly authorizeAccount?: (service: ProductivityIntegration | "notion" | "xmind" | "feishu", signal?: AbortSignal) => Promise<void>;
+  readonly authorizeFeishuRead?: (read: FeishuReadAuthorization, signal?: AbortSignal) => Promise<void>;
+  /** End the live turn after a channel-owned interaction has published the terminal result. */
+  readonly stopAfterInteraction?: () => void;
+  readonly getFeishuAccountConnections?: () => Promise<Array<{ appId: string; appSecret: string; accessToken?: string; readDocumentsAsUser?: boolean }>>;
+  readonly feishuConnectionSucceeded?: (appId: string) => Promise<void>;
   readonly getFeishuAccountConnection?: () => Promise<{ appId: string; appSecret: string; accessToken?: string; readDocumentsAsUser?: boolean } | undefined>;
   readonly getFeishuUserAccessToken?: () => Promise<string | undefined>;
-  readonly invalidateFeishuUserAuthorization?: () => Promise<void>;
+  readonly invalidateFeishuUserAuthorization?: (appId?: string) => Promise<void>;
 };
 
 export type AgentToolRegistration = {
+  readonly operationRecovery?: "schedule-v1";
   /** Immutable code-owned capability gate; mutable skill prose cannot grant it. */
   readonly requiredSkill?: string;
   /** Runtime dependency availability, determined by code rather than skill prose. */
@@ -120,6 +152,8 @@ export type AgentToolRegistration = {
   readonly executionMode?: "parallel" | "sequential";
   /** Required user-facing translation for every execution lifecycle phase. */
   readonly activity: ToolActivityPresenter;
+  /** A completed command can fail without throwing; preserve its output and session. */
+  readonly resultFailed?: (result: unknown) => boolean;
   prepare?(input: unknown, context: ToolExecutionContext): Promise<{ input: unknown; context: ToolExecutionContext }>;
   execute(input: unknown, context: ToolExecutionContext): Promise<unknown>;
 };

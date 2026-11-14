@@ -3,6 +3,7 @@ import { modelCostMultiplier } from "../config.js";
 import {
   imageSha256,
   type GeneratedImage,
+  type ImageGenerationAttemptResult,
   type ImageGenerationResult,
   type ImageQuality,
   type ImageSize
@@ -88,8 +89,10 @@ const imageGenerationActivity: ToolActivityPresenter = {
       ]
     };
   },
+  // The official image conversation may answer with text only, producing no
+  // image. Never report a generic success that contradicts that reply.
   completed: (_input, result) => ({ message: (result as ImageGenerationResult)?.images?.length
-    ? "图片已经画好了。" : "图片请求已处理。" }),
+    ? "图片已经画好了。" : "这轮没有生成图片。" }),
   failed: (input, error) => ({
     message: "这次图片没能画出来。",
     details: [
@@ -147,20 +150,25 @@ export function createImageGenerationTool(): AgentToolRegistration {
         if (!context.imageConversation) throw new Error("Original image conversation context is unavailable");
         const request = await context.imageConversation();
         context.claimImageGeneration?.();
-        const result = await context.imageGenerator.conversation({ ...request, selectedModel: context.model,
-          reasoningEfforts: context.reasoningEfforts });
-        const experimentId = randomUUID(), createdAt = Date.now();
+        const experimentId = randomUUID();
         const images: GeneratedImage[] = [], records: ImageGenerationRecord[] = [];
-        for (const [index, attempt] of result.attempts.entries()) {
-          const generationId = attempt.generationId ?? randomUUID(), ordinal = index + 1;
+        const received = new Set<ImageGenerationAttemptResult>();
+        const receive = async (attempt: ImageGenerationAttemptResult) => {
+          if (received.has(attempt)) return;
+          const generationId = attempt.generationId ?? randomUUID(), ordinal = images.length + 1;
           const sha256 = imageSha256(attempt.image.data);
-          images.push({ ...attempt.image, generationId, experimentId, variant: VARIANT.variant, ordinal, sha256 });
-          records.push({ ...attempt.usage, generationId, experimentId, variant: VARIANT.variant, ordinal,
+          const image = { ...attempt.image, generationId, experimentId, variant: VARIANT.variant, ordinal, sha256 };
+          const record: ImageGenerationRecord = { ...attempt.usage, generationId, experimentId, variant: VARIANT.variant, ordinal,
             sessionId: context.sessionId, turnId: context.turnId, inputPrompt: attempt.prompt,
             revisedPrompt: attempt.image.revisedPrompt, model: attempt.model, modelSupplier: attempt.supplier,
-            size: attempt.size, quality: attempt.quality, status: "success", imageSha256: sha256, createdAt });
-        }
-        if (records.length) await context.onImageGenerationRecords?.(records);
+            size: attempt.size, quality: attempt.quality, status: "success", imageSha256: sha256, createdAt: Date.now() };
+          await context.onImageGenerationRecords?.([record]);
+          images.push(image); records.push(record); received.add(attempt);
+          await publishImages(context, [image]);
+        };
+        const result = await context.imageGenerator.conversation({ ...request, selectedModel: context.model,
+          reasoningEfforts: context.reasoningEfforts, onAttempt: receive });
+        for (const attempt of result.attempts) await receive(attempt);
         // Publish through the current authenticated run before the routing model
         // writes its closing reply. Final delivery reuses these same assets.
         await publishImages(context, images);
@@ -213,6 +221,7 @@ export function createImageGenerationTool(): AgentToolRegistration {
       const experimentId = randomUUID();
       const inputPrompt = values.prompt.trim();
       const request = {
+        signal: context.signal,
         reasoningEfforts: context.reasoningEfforts,
         n: 1 as const,
         size: normalizedSize,

@@ -3,7 +3,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import type WebSocket from "ws";
 import type { WebChannelConfig } from "../config.js";
 
-export const SPEECH_PATH = "/deepmind/api/speech";
+export const SPEECH_PATH = "/assistant/api/speech";
 export const SPEECH_ENDPOINT = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
 
 // Provider controls verified 2026-11-01 against https://www.volcengine.com/docs/6561/1354869

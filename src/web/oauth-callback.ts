@@ -7,9 +7,9 @@ export function webNotionCallbackUrl(publicUrl: string): string {
 
 export function webProductivityCallbackPaths(publicUrl: string): Record<ProductivityIntegration, string> {
   const base = new URL(publicUrl).pathname;
-  return Object.fromEntries(["google_calendar", "google_drive", "todoist"].map(service => [service, `${base}oauth/${service}/callback`])) as Record<ProductivityIntegration, string>;
+  return Object.fromEntries(["google_calendar", "google_drive", "gmail", "todoist"].map(service => [service, `${base}oauth/${service}/callback`])) as Record<ProductivityIntegration, string>;
 }
-export const WEB_PRODUCTIVITY_CALLBACK_PATHS = webProductivityCallbackPaths("https://localhost/deepmind/");
+export const WEB_PRODUCTIVITY_CALLBACK_PATHS = webProductivityCallbackPaths("https://localhost/assistant/");
 export function webProductivityCallbackUrl(publicUrl: string, service: ProductivityIntegration): string {
   return new URL(webProductivityCallbackPaths(publicUrl)[service], publicUrl).toString();
 }
@@ -69,6 +69,6 @@ export class WebOAuthCallback {
   close(): void { this.closed = true; for (const id of this.pending.keys()) this.expire(id); }
 }
 
-export function webOAuthCallbackPage(received: boolean, basePath = "/deepmind/"): string {
+export function webOAuthCallbackPage(received: boolean, basePath = "/assistant/"): string {
   return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>账号连接</title><link rel="stylesheet" href="${basePath}style.css"><main class="login-content"><h1>${received ? "已收到授权结果" : "授权链接已失效"}</h1><p>${received ? "回到对话查看连接状态；账号验证完成后，操作区会自动更新。" : "请回到对话重新连接账号。"}</p><a class="primary" href="${basePath}">返回对话</a></main></html>`;
 }

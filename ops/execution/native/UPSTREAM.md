@@ -46,3 +46,12 @@ and controlling terminals before target exec.
 `cargo build --release --locked --workspace` in this directory builds
 `zigent-execution` and the standalone `codex-apply-patch` (installed as
 `apply_patch`). The Windows runner builds from the exact release commit with Rust 1.99.1, MSVC and Windows SDK. Rust/MSVC/Cargo are build prerequisites only. The product includes the two executables, common durable worker and a locked Windows Python/Node/headless LibreOffice/font capsule. Existing Codex model routing/delegation dependencies remain separate. WSL/Docker are used only by retained legacy recovery paths. Source hashes, Cargo.lock, executable hashes, actual dependency files and host font configuration bind the runtime identity. Upstream upgrades require review and actual terminal/document verification; never fetch a full CLI as fallback.
+
+
+The 2026-11-10 request/terminal-management alignment separately reviewed OpenAI
+Codex commit `e0370f0b0693ad75b7d07b4d5b79aeaf3995b199`. It did not replace the
+pinned terminal/patch code above. The Zigent-owned runner accepts an omitted
+lifetime deadline for interactive processes, while preserving explicit deadlines
+and EOF/shutdown cleanup. Request-lane and per-conversation handle policies live
+in the durable host/worker, not this one-command transport. Details and deliberate
+upstream differences are recorded in `../README.md`.

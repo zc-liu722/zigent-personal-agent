@@ -2,9 +2,15 @@
 // Native data renderers; generated HTML is handled exclusively by the isolated preview.
 (() => {
   const node = (tag, className, text) => { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = String(text); return element; };
-  const labels = { artifact: '文件', metrics: '关键指标', chart: '图表', table: '数据表', steps: '步骤', resources: '参考资料', document: 'Markdown 文档', interactive: '交互可视化', animation: '动态画面' };
+  const labels = { image:'图片', artifact: '文件', metrics: '关键指标', chart: '图表', table: '数据表', steps: '步骤', resources: '参考资料', document: 'Markdown 文档', interactive: '交互可视化', animation: '动态画面' };
   const stepLabels = { pending: '待开始', active: '进行中', completed: '已完成' };
-  const colors = ['#b7684c', '#637867', '#727fa0', '#a38a59'];
+  const seriesColor = index => `var(--ui-series-${index + 1})`;
+  const metricTones = ['support', 'detail'];
+  function validChartHighlight(highlight, seriesCount, pointCount) {
+    return highlight === undefined || Boolean(highlight &&
+      Number.isInteger(highlight.seriesIndex) && highlight.seriesIndex >= 0 && highlight.seriesIndex < seriesCount &&
+      Number.isInteger(highlight.pointIndex) && highlight.pointIndex >= 0 && highlight.pointIndex < pointCount);
+  }
   const safeUrl = value => { try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password ? url.href : undefined; } catch { return undefined; } };
   const string = (value, max = 500) => typeof value === 'string' && value.length <= max;
   function valid(output) {
@@ -13,6 +19,7 @@
     if (JSON.stringify(output).length > 48000) return false;
     if (output.blocks.filter(block => ['interactive', 'animation'].includes(block?.type)).length > 3) return false;
     return output.blocks.every(block => {
+      if (block?.type === 'image') return /^[a-f0-9-]{36}$/.test(block.assetId) && string(block.alt,500) && string(block.after,500) && block.after.trim() && Number.isInteger(block.width) && block.width>0 && block.width<=6000 && Number.isInteger(block.height) && block.height>0 && block.height<=6000;
       if (!block || !Object.hasOwn(labels, block.type)) return false;
       if (block.type === 'artifact') return /^[a-f0-9-]{36}$/.test(block.versionId) && /^[a-f0-9-]{36}$/.test(block.fileId)
         && (block.previousVersions === undefined || Array.isArray(block.previousVersions) && block.previousVersions.length <= 100 && block.previousVersions.every(version => version && /^[a-f0-9-]{36}$/.test(version.versionId) && string(version.filename, 240) && Number.isSafeInteger(version.size) && version.size >= 0))
@@ -21,11 +28,11 @@
       if (block.type === 'animation' && (!Number.isFinite(block.duration) || block.duration < 1 || block.duration > 300)) return false;
       if (['interactive', 'animation'].includes(block.type)) return string(block.html, 32000) && !!block.html.trim() && !block.html.includes('\0') && string(block.summary, 1500) && !!block.summary.trim() && (block.height === undefined || Number.isInteger(block.height) && block.height >= 240 && block.height <= 720);
       if (block.type === 'document') return string(block.content, 32000) && string(block.filename, 120) && /^[^/\\\x00-\x1f]+\.md$/i.test(block.filename) && !['.', '..'].includes(block.filename);
-      if (block.type === 'chart') return (block.unit === undefined || string(block.unit, 40)) && ['bar', 'line'].includes(block.chartType) && Array.isArray(block.labels) && block.labels.length > 0 && block.labels.length <= 48 && block.labels.every(label => string(label, 80)) && Array.isArray(block.series) && block.series.length > 0 && block.series.length <= 4 && block.series.every(series => series && string(series.label, 80) && Array.isArray(series.values) && series.values.length === block.labels.length && series.values.every(value => Number.isFinite(value) && Math.abs(value) <= 1e15));
+      if (block.type === 'chart') return (block.unit === undefined || string(block.unit, 40)) && ['bar', 'line'].includes(block.chartType) && Array.isArray(block.labels) && block.labels.length > 0 && block.labels.length <= 48 && block.labels.every(label => string(label, 80)) && Array.isArray(block.series) && block.series.length > 0 && block.series.length <= 4 && block.series.every(series => series && string(series.label, 80) && Array.isArray(series.values) && series.values.length === block.labels.length && series.values.every(value => Number.isFinite(value) && Math.abs(value) <= 1e15)) && validChartHighlight(block.highlight, block.series.length, block.labels.length);
       if (block.type === 'table') return Array.isArray(block.columns) && block.columns.length > 0 && block.columns.length <= 8 && block.columns.every(column => string(column, 80)) && Array.isArray(block.rows) && block.rows.length <= 50 && block.rows.every(row => Array.isArray(row) && row.length === block.columns.length && row.every(cell => cell === null || Number.isFinite(cell) || string(cell, 300)));
       return Array.isArray(block.items) && block.items.length > 0 && block.items.length <= ({ metrics: 6, steps: 12, resources: 8 }[block.type]) && block.items.every(item => {
         if (!item) return false;
-        if (block.type === 'metrics') return string(item.label, 80) && string(item.value, 100) && (item.change === undefined || string(item.change, 100));
+        if (block.type === 'metrics') return string(item.label, 80) && string(item.value, 100) && (item.change === undefined || string(item.change, 100)) && (item.tone === undefined || metricTones.includes(item.tone));
         if (block.type === 'steps') return string(item.title, 160) && Object.hasOwn(stepLabels, item.status) && (item.description === undefined || string(item.description, 500));
         return string(item.title, 160) && typeof item.url === 'string' && item.url.length <= 2048 && safeUrl(item.url) && (item.description === undefined || string(item.description, 300)) && (item.format === undefined || string(item.format, 40));
       });
@@ -51,9 +58,10 @@
     const values = block.series.flatMap(series => series.values), min = Math.min(0, ...values), max = Math.max(0, ...values), span = max - min || 1;
     const x = index => block.chartType === 'bar' ? 48 + (index + .5) * 520 / block.labels.length : 48 + (block.labels.length === 1 ? 260 : index * 520 / (block.labels.length - 1));
     const y = value => 218 - ((value - min) / span) * 190, zero = y(0);
+    const format = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 });
     for (let i = 0; i <= 4; i++) {
       const value = min + span * i / 4, pos = y(value), label = svgNode('text', { x: 40, y: pos + 4, 'text-anchor': 'end', class: 'output-axis-label' });
-      label.textContent = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+      label.textContent = format.format(value);
       svg.append(svgNode('line', { x1: 48, x2: 580, y1: pos, y2: pos, class: 'output-chart-grid' }), label);
     }
     const skip = Math.max(1, Math.ceil(block.labels.length / 6));
@@ -62,31 +70,81 @@
       const text = svgNode('text', { x: x(index), y: 244, 'text-anchor': 'middle', class: 'output-axis-label' });
       text.textContent = label.length > 8 ? `${label.slice(0, 7)}…` : label; svg.append(text);
     });
+    let focalMark;
     block.series.forEach((series, seriesIndex) => {
-      const color = colors[seriesIndex];
+      const color = seriesColor(seriesIndex);
+      const focalIndex = block.highlight?.seriesIndex === seriesIndex ? block.highlight.pointIndex : -1;
       if (block.chartType === 'line') {
         svg.append(svgNode('polyline', { points: series.values.map((value, index) => `${x(index)},${y(value)}`).join(' '), fill: 'none', stroke: color, 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
-        series.values.forEach((value, index) => { const dot = svgNode('circle', { cx: x(index), cy: y(value), r: 3, fill: color }); const title = svgNode('title'); title.textContent = `${block.labels[index]} · ${series.label}: ${value}${block.unit || ''}`; dot.append(title); svg.append(dot); });
+        series.values.forEach((value, index) => {
+          const dot = svgNode('circle', { cx: x(index), cy: y(value), r: index === focalIndex ? 5 : 3, fill: color });
+          const title = svgNode('title'); title.textContent = `${block.labels[index]} · ${series.label}: ${value}${block.unit || ''}`;
+          dot.append(title); svg.append(dot);
+          if (index === focalIndex) focalMark = dot;
+        });
       } else {
         const group = 520 / block.labels.length, slot = group * .72 / block.series.length, width = Math.min(38, slot * .85);
         series.values.forEach((value, index) => {
           const center = 48 + index * group + group * .14 + (seriesIndex + .5) * slot, left = center - width / 2;
           const rect = svgNode('rect', { x: left, y: Math.min(zero, y(value)), width, height: Math.max(1, Math.abs(y(value) - zero)), rx: 2, fill: color });
           const title = svgNode('title'); title.textContent = `${block.labels[index]} · ${series.label}: ${value}${block.unit || ''}`; rect.append(title); svg.append(rect);
+          if (index === focalIndex) focalMark = rect;
         });
       }
     });
+    if (focalMark) {
+      focalMark.setAttribute('class', 'output-chart-highlight');
+      svg.append(focalMark);
+    }
     const legend = node('div', 'output-chart-legend');
-    block.series.forEach((series, index) => { const item = node('span'), dot = node('i'); dot.style.backgroundColor = colors[index]; dot.setAttribute('aria-hidden', 'true'); item.append(dot, document.createTextNode(series.label)); legend.append(item); });
+    block.series.forEach((series, index) => { const item = node('span'), dot = node('i'); dot.style.backgroundColor = seriesColor(index); dot.setAttribute('aria-hidden', 'true'); item.append(dot, document.createTextNode(series.label)); legend.append(item); });
     wrap.append(legend, svg);
     if (block.unit) wrap.append(node('p', 'output-unit', `单位：${block.unit}`));
     const details = node('details', 'output-chart-data'), summary = node('summary', '', '查看图表数据');
-    details.append(summary, table(['', ...block.series.map(series => series.label)], block.labels.map((label, i) => [label, ...block.series.map(series => series.values[i])]), block.title || '图表数据'));
+    details.append(summary);
+    function showData() {
+      if (!details.open) return;
+      details.removeEventListener('toggle', showData);
+      details.append(table(['', ...block.series.map(series => series.label)],
+        block.labels.map((label, i) => [label, ...block.series.map(series => series.values[i])]), block.title || '图表数据'));
+    }
+    details.addEventListener('toggle', showData);
     wrap.append(details); return wrap;
+  }
+  function chartPreview(block, view) {
+    const host = node('div', 'output-chart-slot');
+    let mounted = false, visible = false, scheduled = false, observer;
+    function schedule() {
+      if (!visible || scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        scheduled = false;
+        if (!mounted || !visible || !host.isConnected) return;
+        observer?.disconnect();
+        const update = () => host.append(chart(block));
+        if (view.resize) view.resize(update); else update();
+      }));
+    }
+    view.previews.push({
+      mount() {
+        if (mounted || host.hasChildNodes()) return;
+        mounted = true;
+        if (typeof IntersectionObserver === 'undefined') { visible = true; schedule(); return; }
+        observer = new IntersectionObserver(entries => {
+          if (!mounted) return;
+          visible = entries.at(-1).isIntersecting;
+          schedule();
+        }, { rootMargin: '240px' });
+        observer.observe(host);
+      },
+      unmount() { mounted = visible = false; observer?.disconnect(); }
+    });
+    return host;
   }
   function renderBlock(block, outputId, index, view) {
     const section = node('section', `output-block output-block-${block.type}`), heading = node('div', 'output-block-heading');
     heading.append(node('h3', '', block.title || labels[block.type])); heading.hidden = view.singleBlock && (!block.title || block.title === view.output.title || ['interactive', 'animation'].includes(block.type)); section.append(heading);
+    if (block.type === 'image') { heading.hidden=true; if(view.renderImage) section.append(view.renderImage(block)); }
     if (block.type === 'artifact') {
       heading.hidden = true;
       const card = node('div', 'output-artifact'), copy = node('div', 'output-artifact-copy'), actions = node('div', 'output-artifact-actions');
@@ -110,7 +168,9 @@
       }
     }
     if (['interactive', 'animation'].includes(block.type)) {
-      if (window.ZigentInteractiveOutput && view.interactiveUrl) {
+      const program = view.renderProgram?.(block, index);
+      if (program) section.append(program);
+      else if (window.ZigentInteractiveOutput && view.interactiveUrl) {
         const preview = window.ZigentInteractiveOutput.create(block, view.interactiveUrl(index), { resize: update => view.resize ? view.resize(update) : update() });
         view.previews.push(preview); section.append(preview.node);
       } else section.append(node('p', 'interactive-summary', block.summary));
@@ -124,10 +184,17 @@
     }
     if (block.type === 'metrics') {
       const group = node('dl', 'output-metrics');
-      for (const item of block.items) { const metric = node('div'); metric.append(node('dt', '', item.label), node('dd', 'output-metric-value', item.value)); if (item.change) metric.append(node('dd', 'output-metric-change', item.change)); group.append(metric); }
+      for (const item of block.items) {
+        const metric = node('div');
+        const value = node('dd', 'output-metric-value', item.value);
+        if (item.tone) value.dataset.tone = item.tone;
+        metric.append(node('dt', '', item.label), value);
+        if (item.change) metric.append(node('dd', 'output-metric-change', item.change));
+        group.append(metric);
+      }
       section.append(group);
     }
-    if (block.type === 'chart') section.append(chart(block));
+    if (block.type === 'chart') section.append(chartPreview(block, view));
     if (block.type === 'table') {
       section.append(table(block.columns, block.rows, block.title || '数据表'));
       if (!block.rows.length) section.append(node('p', 'output-empty', '暂无数据。'));
@@ -205,16 +272,17 @@
     return view;
   }
   function render(output, previousView, options = {}) {
-    const view = previousView || createView(); view.openDocument = options.openDocument; view.interactiveUrl = options.interactiveUrl; view.resize = options.resize;
+    const view = previousView || createView(); view.openDocument = options.openDocument; view.interactiveUrl = options.interactiveUrl; view.resize = options.resize; view.renderImage=options.renderImage; view.renderProgram=options.renderProgram;
     if (!valid(output)) {
       view.dispose(); view.previews = []; view.content.replaceChildren(); view.surface.hidden = view.dialog.hidden = true; view.opener.hidden = false; view.output = undefined; view.key = undefined;
       view.opener.disabled = true; view.title.textContent = '此成果暂时无法显示'; view.meta.textContent = '请让 Agent 重新整理'; view.preview.hidden = true; return view;
     }
-    const key = JSON.stringify(output); if (key === view.key) return view;
+    const key = JSON.stringify([output, options.programKey]); if (key === view.key) return view;
     view.key = key; view.output = output; view.opener.disabled = false; view.title.textContent = output.title;
     view.singleBlock = output.blocks.length === 1; view.interactiveOnly = view.singleBlock && ['interactive', 'animation'].includes(output.blocks[0].type);
     const documentOnly = view.singleBlock && output.blocks[0].type === 'document';
     const filesOnly = output.blocks.every(block => block.type === 'artifact');
+    const imagesOnly = output.blocks.every(block => block.type === 'image');
     const persistentDialog = output.blocks.some(block => ['interactive', 'animation'].includes(block.type));
     if (view.expanded && (documentOnly || filesOnly || persistentDialog !== view.persistentDialog)) view.collapse();
     view.persistentDialog = persistentDialog; view.filesOnly = filesOnly;
@@ -224,7 +292,8 @@
     view.opener.setAttribute('aria-haspopup', 'false'); view.opener.setAttribute('aria-label', `打开文档：${output.title}`); if (view.expanded) view.dialog.setAttribute('aria-label', output.title); else view.dialog.removeAttribute('aria-label');
     view.expand.setAttribute('aria-label', `放大查看：${output.title}`); view.surface.setAttribute('role', 'region'); view.surface.setAttribute('aria-label', output.title);
     view.meta.textContent = documentOnly ? `${output.blocks[0].filename} · 可编辑` : ''; view.preview.hidden = true;
-    view.heading.parentElement.hidden = filesOnly; view.expand.hidden = filesOnly;
+    view.heading.parentElement.hidden = filesOnly || imagesOnly; view.expand.hidden = filesOnly || imagesOnly;
+    view.node.classList.toggle('output-card-images',imagesOnly);
     view.node.classList.toggle('output-card-files', filesOnly);
     view.heading.textContent = output.title; view.description.textContent = output.description || ''; view.description.hidden = true;
     const top = view.content.scrollTop; view.previews.forEach(preview => preview.unmount()); view.previews = [];

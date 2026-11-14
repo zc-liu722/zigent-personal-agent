@@ -1,3 +1,4 @@
+import { renderMeeting } from './meeting.js';
 import { createMarkdownRenderer } from '../markdown.js';
 import { el, syncChildren, updateText } from '../dom.js';
 import { interactionUrl, interactionStatus, messageInteractions } from './interaction-model.js';
@@ -480,6 +481,11 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
     return { node, header, title, description, status, actions, feedback, manual, plan, schedule, scheduleNote, delivery, instruction, taskDetails, footer, documents, memoryReview, memoryToggle, review, memoryDiff, memoryEntries: new Map(), documentEntries: new Map(), entries: new Map(), submitting: undefined };
   }
   function renderModelReasoning(entry, action, item, view, submit) {
+    entry.node.classList.add('model-option'); entry.node.classList.toggle('selected', Boolean(action.selected));
+    if (!action.selected || action.disabled) {
+      if (entry.reasoningPanel) entry.reasoningPanel.hidden = true;
+      return;
+    }
     if (!entry.reasoningPanel) {
       entry.reasoningPanel = el('div', 'model-reasoning-panel');
       entry.reasoningPanel.setAttribute('role', 'group'); entry.reasoningPanel.setAttribute('aria-label', '思考强度');
@@ -489,21 +495,23 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
       entry.reasoningPanel.append(entry.reasoningSlider, entry.reasoningLabels);
       entry.node.append(entry.reasoningPanel);
     }
-    const reasoning = action.reasoning, selected = Boolean(action.selected), levels = reasoning?.levels || [];
-    entry.node.classList.add('model-option'); entry.node.classList.toggle('selected', selected);
-    entry.reasoningPanel.hidden = !selected || Boolean(action.disabled);
-    const label = levels.find(level => level.value === reasoning.selected)?.label || '默认';
+    const reasoning = action.reasoning, levels = reasoning?.levels || [];
+    entry.reasoningPanel.hidden = false;
+    const label = levels.find(level => level.value === reasoning?.selected)?.label || '默认';
     const slider = entry.reasoningSlider;
     slider.max = String(Math.max(1, levels.length - 1));
-    slider.value = String(Math.max(0, levels.findIndex(level => level.value === (entry.reasoningDraft ?? reasoning.selected))));
-    slider.disabled = Boolean(view.submitting) || Boolean(action.disabled) || !reasoning?.adjustable || levels.length < 2;
-    const labels = levels.map(level => el('span', '', level.label));
-    syncChildren(entry.reasoningLabels, labels);
+    slider.value = String(Math.max(0, levels.findIndex(level => level.value === (entry.reasoningDraft ?? reasoning?.selected))));
+    slider.disabled = Boolean(view.submitting) || !reasoning?.adjustable || levels.length < 2;
+    if (entry.reasoningLevels !== levels) {
+      entry.reasoningLevels = levels;
+      entry.labels = levels.map(level => el('span', '', level.label));
+      entry.reasoningLabels.replaceChildren(...entry.labels);
+    }
     function preview() {
       const index = Number(slider.value), level = levels[index];
       slider.setAttribute('aria-valuetext', level?.label || label);
       slider.style.setProperty('--reasoning-progress', `${index / Number(slider.max) * 100}%`);
-      labels.forEach((node, position) => node.classList.toggle('selected', position === index));
+      entry.labels.forEach((node, position) => node.classList.toggle('selected', position === index));
     }
     preview(); slider.oninput = preview;
     slider.onchange = async () => {
@@ -520,53 +528,53 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
     if (!item.codexForm) { if (view.codexForm) view.codexForm.node.hidden = true; return; }
     const form = item.codexForm, editable = ['pending', 'failed'].includes(interactionStatus(item)) && item.actions?.length;
     if (!view.codexForm) {
-      const node = el('div', 'codex-dispatch-form'), executor = el('select'), project = el('select'), session = el('select'), prompt = el('textarea'), review = el('input'), projectControl = el('div', 'codex-project-control'), path = el('div', 'codex-project-path');
-      for (const [label, control] of [['执行器', executor], ['项目', project], ['会话', session], ['派发提示词', prompt], ['完成后核对并补做', review]]) {
+      const node = el('div', 'codex-dispatch-form'), executor = el('select'), project = el('input'), session = el('select'), prompt = el('textarea'), review = el('input');
+      for (const [label, control] of [['桌面 Codex', executor], ['工作目录', project], ['会话', session], ['派发提示词', prompt], ['完成后核对并补做', review]]) {
         const field = el('label', `codex-dispatch-field${control === prompt ? ' codex-dispatch-prompt' : control === review ? ' codex-dispatch-review' : ''}`);
-        if (control === project) { projectControl.append(path, project); field.append(el('span', '', label), projectControl); }
-        else field.append(el('span', '', label), control);
+        field.append(el('span', '', label), control);
         node.append(field);
         control.setAttribute('aria-label', label);
       }
       prompt.maxLength = 16000; prompt.rows = 8; review.type = 'checkbox';
-      view.codexForm = { node, executor, project, session, prompt, review, path };
+      view.codexForm = { node, executor, project, session, prompt, review };
       view.node.insertBefore(node, view.memoryReview);
     }
     const controls = view.codexForm; controls.node.hidden = false;
     if (controls.version !== item.actions?.[0]?.id || !controls.draft) {
       controls.version = item.actions?.[0]?.id;
-      controls.draft = { projectKey: form.projectKey, sessionId: form.sessionId, prompt: form.prompt, reviewAfterCompletion: !!form.reviewAfterCompletion };
+      controls.draft = { projectKey: form.projectKey, directory: form.directory || form.projects.find(p => p.key === form.projectKey)?.project.directory || '', sessionId: form.sessionId, prompt: form.prompt, reviewAfterCompletion: !!form.reviewAfterCompletion };
     }
-    const draft = controls.draft, selected = form.projects.find(item => item.key === draft.projectKey);
-    const compactPath = value => String(value || '').replace(/^\/Users\/[^/]+(?=\/|$)/, '~');
+    const draft = controls.draft;
     const options = (control, items, value) => {
       const signature = JSON.stringify(items);
       if (control.dataset.options !== signature) { syncChildren(control, items.map(([key, label, disabled]) => { const option = el('option', '', label); option.value = key; option.disabled = !!disabled; return option; })); control.dataset.options = signature; }
       control.value = value;
     };
-    const execution = selected?.project.executor || 'codex';
-    options(controls.executor, [...new Set(form.projects.map(p => p.project.executor || 'codex'))].map(id => [id, ({ 'windows-codex': 'Windows Codex', 'linux-claude': 'Linux Claude · 无账号', codex: 'Codex' })[id] || id, !form.projects.some(p => (p.project.executor || 'codex') === id && p.project.available !== false)]), execution);
-    controls.executor.onchange = () => { const target = form.projects.find(p => (p.project.executor || 'codex') === controls.executor.value); if (target) { draft.projectKey = target.key; draft.sessionId = ''; renderCodexForm(item, view); } };
-    options(controls.project, form.projects.filter(p => (p.project.executor || 'codex') === execution).map(item => [item.key, compactPath(item.project.directory || item.project.roots?.[0] || item.project.name)]), draft.projectKey);
-    options(controls.session, [['', '新建会话'], ...form.sessions.filter(item => item.deviceId === selected?.deviceId && item.projectId === selected?.project.id).map(item => [item.id, `${item.title} · ${item.threadId}`])], draft.sessionId);
-    updateText(controls.path, compactPath(selected?.project.directory || selected?.project.roots?.[0] || selected?.project.name));
-    if (controls.pathKey !== draft.projectKey) {
-      controls.pathKey = draft.projectKey;
-      requestAnimationFrame(() => { controls.path.scrollLeft = controls.path.scrollWidth; });
-    }
+    const devices = form.devices || [...new Map(form.projects.map(p => [p.deviceId, { id: p.deviceId, name: p.deviceName || 'Codex' }])).values()];
+    const deviceId = draft.projectKey.split('/')[0];
+    options(controls.executor, devices.map(d => [d.id, d.name]), deviceId);
+    controls.executor.onchange = () => { draft.projectKey = controls.executor.value + '/directory'; draft.sessionId = ''; renderCodexForm(item, view); };
+    if (controls.project.value !== draft.directory) controls.project.value = draft.directory;
+    const sameDirectory = value => String(value || '').replaceAll('\\', '/').replace(/\/$/, '').toLowerCase() === String(draft.directory || '').replaceAll('\\', '/').replace(/\/$/, '').toLowerCase();
+    options(controls.session, [['', '新建会话'], ...form.sessions.filter(s => s.deviceId === deviceId && sameDirectory(s.project.directory)).map(s => [s.id, s.title + ' · ' + s.threadId])], draft.sessionId);
     controls.review.checked = !!draft.reviewAfterCompletion;
     controls.review.onchange = () => { draft.reviewAfterCompletion = controls.review.checked; };
     if (controls.prompt.value !== draft.prompt) controls.prompt.value = draft.prompt;
-    controls.project.onchange = () => { draft.projectKey = controls.project.value; draft.sessionId = ''; renderCodexForm(item, view); };
+    controls.project.oninput = () => { draft.directory = controls.project.value; draft.sessionId = ''; renderCodexForm(item, view); };
     controls.session.onchange = () => { draft.sessionId = controls.session.value; };
     controls.prompt.oninput = () => { draft.prompt = controls.prompt.value; };
     for (const control of [controls.executor, controls.project, controls.session, controls.prompt, controls.review]) control.disabled = !editable || !!view.submitting;
   }
   function renderInteraction(item, message, view, submit) {
+    if (item.kind === 'meeting') return renderMeeting(item, message, view, { api, conversation: appState, refresh });
     if (item.kind === 'user-question') return renderUserQuestion(item, message, view);
     if (view?.questionControls) view = undefined;
     view ||= createInteractionView();
     const status = interactionStatus(item), authorization = item.kind === 'authorization', taskProposal = item.kind === 'task-proposal', memoryProposal = item.kind === 'memory-proposal';
+    const deployment = item.id?.startsWith('deployment:');
+    const deploymentProgress = deployment ? item.deployment : undefined;
+    const deploymentStages = ['queued', 'building', 'promoting', 'finalizing', 'verifying'];
+    const deploymentIndex = status === 'completed' ? deploymentStages.length : deploymentStages.indexOf(deploymentProgress?.stage);
     const changes = (item.codexForm ? [] : memoryProposal ? (item.memoryChanges || []).filter(change => ['longTermMemory', 'archiveMemory', 'userProfile', 'behaviorRules'].includes(change.target))
       .map(change => ({ title: `${{ add: '新增', update: '修改', delete: '删除' }[change.operation]}${change.target === 'archiveMemory' ? `存档记忆：${change.title || ''}` : change.target === 'longTermMemory' ? '长期记忆' : change.target === 'userProfile' ? '个人档案' : '行为规则'}`, before: change.before, after: change.after }))
       : Array.isArray(item.changes) ? item.changes
@@ -575,15 +583,53 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
     const changePreview = changes.length > 0;
     updateText(view.memoryReview.firstChild, changes.some(change => typeof change?.before === 'string') ? '查看本次变更' : '查看本次内容');
     const entries = Array.isArray(item.actions) ? item.actions : [];
-    const pending = status === 'pending', retry = entries.some(action => action.kind === 'submit' && ['authorization-retry', 'task-proposal', 'memory-proposal', 'operation-confirmation', 'audio-transcription'].includes(action.value?.type));
+    if (view.operationReceipt && (!['pending', 'failed'].includes(status)
+      || !entries.some(action => action.id === view.operationReceipt.actionId))) {
+      view.operationReceipt = undefined; view.feedback.textContent = '';
+    }
+    const pending = status === 'pending', retry = entries.some(action => action.kind === 'submit' && ['deployment-retry', 'authorization-retry', 'task-proposal', 'memory-proposal', 'operation-confirmation', 'audio-transcription'].includes(action.value?.type));
     const hasLink = entries.some(action => action.kind === 'link' && interactionUrl(action.url, authorization));
+    const authorizationLink = authorization ? entries.find(action => action.kind === 'link')?.url : undefined;
+    if (authorization && view.authorizationLink !== authorizationLink) view.feedback.textContent = '';
+    view.authorizationLink = authorizationLink;
     if (view.lastStatus !== undefined && view.lastStatus !== status) { view.feedback.textContent = ''; view.manual.hidden = true; view.manual.value = ''; }
     view.lastStatus = status;
     const visualPreview = changes.some(change => change?.presentation);
     const mindmapCard = changes.some(change => change?.presentation?.kind === 'mindmap');
     // Keep compact object summaries visible after completion; secondary content stays folded.
     const settled = item.kind !== 'user-question' && !item.memoryDocumentView && !submit && ['completed', 'cancelled'].includes(status);
+    // Saved memory uses the inline receipt: its document links and status must
+    // stay together in the footer, including when restored from history.
+    const compactMemory = settled && memoryProposal && status === 'completed'
+      && Array.isArray(item.documents) && item.documents.some(document => typeof document?.id === 'string')
+      && !/其他内容未应用/.test(item.statusMessage || '');
     view.node.className = `interaction ${item.kind} ${status}${changePreview ? ' change-preview' : ''}${visualPreview ? ' visual-operation' : ''}${settled ? ' settled' : ''}${['todo', 'calendar', 'task'].includes(item.operationView) ? ` operation-view-${item.operationView}` : ''}`; view.node.dataset.interactionId = item.id;
+    view.node.classList.toggle('deployment-card', Boolean(deploymentProgress));
+    if (deploymentProgress) {
+      if (!view.deploymentProgress) {
+        view.deploymentProgress = el('ol', 'deployment-progress');
+        view.deploymentSteps = deploymentStages.map(() => {
+          const step = el('li');
+          step.append(el('span'));
+          return step;
+        });
+        view.deploymentProgress.append(...view.deploymentSteps);
+        view.node.insertBefore(view.deploymentProgress, view.footer);
+        view.deploymentProgress.setAttribute('aria-label', '部署阶段');
+      }
+      const { mode } = deploymentProgress;
+      const labels = ['排队', mode === 'unchanged' ? '比对' : '构建',
+        { components: '热切换', host: '服务切换', unchanged: '无需切换' }[mode] || '切换', '收尾', '核验'];
+      view.deploymentSteps.forEach((step, index) => {
+        updateText(step.firstChild, labels[index]);
+        step.firstChild.hidden = false;
+        step.className = index < deploymentIndex ? 'done' : index === deploymentIndex && pending ? 'active'
+          : index === deploymentIndex && status === 'failed' ? 'failed' : '';
+        if (index === deploymentIndex && pending) step.setAttribute('aria-current', 'step');
+        else step.removeAttribute('aria-current');
+      });
+    }
+    if (view.deploymentProgress) view.deploymentProgress.hidden = !deploymentProgress;
     view.node.setAttribute('aria-busy', view.submitting ? 'true' : 'false');
     view.node.classList.toggle('operation-view-mindmap', mindmapCard);
     const targetEntries = Array.isArray(item.memoryChanges) && item.memoryChanges.length ? item.memoryChanges : Array.isArray(item.documents) ? item.documents : [];
@@ -595,13 +641,14 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
     view.node.setAttribute('aria-label', view.title.textContent);
     const documentCard = changes.some(change => ['document', 'markdown'].includes(change.presentation?.kind));
     view.node.classList.toggle('operation-view-document', documentCard);
-    const confirmationCard = !submit && (documentCard || todoCard || ['operation-confirmation', 'task-proposal', 'memory-proposal', 'audio-transcription', 'authorization', 'actions', 'browser'].includes(item.kind)
+    const confirmationCard = !submit && !compactMemory && (documentCard || todoCard || ['operation-confirmation', 'task-proposal', 'memory-proposal', 'audio-transcription', 'authorization', 'actions', 'browser'].includes(item.kind)
       || entries.some(action => action?.kind === 'submit' && typeof action.value?.confirm === 'boolean'));
     view.node.classList.toggle('confirmation-card', confirmationCard);
-    view.header.hidden = settled && !confirmationCard;
-    const actionParent = confirmationCard ? view.header : view.footer;
+    view.header.hidden = Boolean(deploymentProgress) || settled && !confirmationCard;
+    const deploymentStep = deploymentProgress && view.deploymentSteps[deploymentIndex];
+    const actionParent = deploymentStep || (confirmationCard ? view.header : view.footer);
     if (view.actions.parentNode !== actionParent) actionParent.append(view.actions);
-    const statusParent = confirmationCard && status === 'completed' ? view.header : view.footer;
+    const statusParent = confirmationCard && status === 'completed' && !authorization && !deployment ? view.header : view.footer;
     if (view.status.parentNode !== statusParent) statusParent.insertBefore(view.status, statusParent === view.footer ? view.footer.firstChild : null);
     renderCodexExecution(item, message, view);
     renderCodexForm(item, view);
@@ -625,7 +672,6 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
       documentNodes.push(button);
     }
     syncChildren(view.documents, documentNodes); view.documents.hidden = !documentNodes.length;
-    const compactMemory = settled && memoryProposal && status === 'completed' && documentNodes.length > 0 && !/其他内容未应用/.test(item.statusMessage || '');
     view.node.classList.toggle('compact-memory', compactMemory);
     if (compactMemory) syncChildren(view.documents, documentNodes.flatMap((node, index) => index ? [el('span', '', '、'), node] : [node]));
     const fileReview = !visualPreview && !item.memoryDocumentView && settled && (changePreview || memoryProposal && !!view.description.textContent);
@@ -636,7 +682,7 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
     if (view.memoryDiff.parentNode !== diffParent) diffParent === view.node ? view.node.insertBefore(view.memoryDiff, view.memoryReview) : diffParent.append(view.memoryDiff);
     const documentParent = compactMemory ? view.footer : (memoryProposal || changePreview) && !item.memoryDocumentView && !settled ? view.header : view.node;
     if (view.documents.parentNode !== documentParent) documentParent === view.node ? view.node.insertBefore(view.documents, view.memoryReview) : documentParent.insertBefore(view.documents, compactMemory ? view.status : null);
-    view.description.hidden = authorization || visualPreview || !!item.codexForm || !view.description.textContent;
+    view.description.hidden = Boolean(deploymentProgress) || authorization || visualPreview || !!item.codexForm || !view.description.textContent;
     const planParent = settled ? view.review : view.node;
     if (view.plan.parentNode !== planParent) planParent === view.node ? view.node.insertBefore(view.plan, view.review) : planParent.append(view.plan);
     view.plan.hidden = changePreview || item.kind !== 'task-proposal' || !item.taskPlan;
@@ -659,15 +705,16 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
       ? /其他内容未应用/.test(item.statusMessage || '') ? item.statusMessage : `${memoryTarget}已保存` : '已取消，记忆未更改。';
     if (compactMemory) statusText = '已保存';
     if (settled && taskProposal) statusText = `${item.title} · ${status === 'completed' ? '已启用' : '已取消'}`;
-    if (confirmationCard && item.kind !== 'schedule-reminder' && status === 'completed') statusText = '✓';
+    if (confirmationCard && !authorization && item.kind !== 'schedule-reminder' && status === 'completed' && !deployment) statusText = '✓';
     if (authorization && status === 'expired' && !retry) statusText += ' 请告诉我继续授权。';
     if (authorization && statusText === '授权后请重新提出请求，刚才的操作不会自动执行。') statusText = '';
     updateText(view.status, statusText);
     view.status.hidden = !statusText;
+    view.status.classList.toggle('sr-only', Boolean(deploymentProgress));
     if (confirmationCard && status === 'completed') view.status.setAttribute('aria-label', item.statusMessage || '已完成');
     else view.status.removeAttribute('aria-label');
     if (view.feedback.textContent === statusText) updateText(view.feedback, '');
-    view.review.hidden = memoryProposal || fileReview || !(settled && (!view.description.hidden || !view.plan.hidden) || changePreview && !view.description.hidden);
+    view.review.hidden = Boolean(deploymentProgress) || memoryProposal || fileReview || !(settled && (!view.description.hidden || !view.plan.hidden) || changePreview && !view.description.hidden);
     updateText(view.review.firstChild, visualPreview ? '操作详情' : changePreview ? '说明' : '查看详情');
     if (view.detailStatus !== status) {
       if (settled) { view.memoryReview.open = false; view.review.open = false; if (taskProposal) view.taskDetails.open = true; }
@@ -692,7 +739,8 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
         entry.node.append(entry.control);
         view.entries.set(key, entry);
       }
-      const control = entry.control, available = action.kind === 'submit' && action.value?.type === 'authorization-retry' ? ['failed', 'expired'].includes(status)
+      const control = entry.control, available = action.kind === 'submit' && action.value?.type === 'authorization-retry' ? ['failed', 'expired'].includes(status) || item.service === 'feishu' && ['pending', 'completed'].includes(status)
+        : action.kind === 'submit' && action.value?.type === 'deployment-retry' ? status === 'failed'
         : action.kind === 'submit' && action.value?.type === 'audio-transcription' ? ['failed', 'cancelled'].includes(status)
         : action.kind === 'submit' && ['task-proposal', 'memory-proposal', 'operation-confirmation'].includes(action.value?.type) ? ['pending', 'failed'].includes(status) : pending;
       entry.node.hidden = !available;
@@ -713,12 +761,19 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
         updateText(entry.outputPrice, `输出：${pricing.output}`);
         syncChildren(control, [entry.priceBody]);
         control.setAttribute('aria-label', `${label}，${entry.price.textContent}`);
-      } else updateText(control, view.submitting === key ? '处理中…' : label);
+      } else updateText(control, view.submitting === key ? action.value?.type === 'operation-confirmation' ? '提交中…' : '处理中…'
+        : view.operationReceipt?.actionId === action.id ? '核对并重试' : label);
       if (action.kind === 'link') {
         if (available) { control.href = url; control.target = '_blank'; control.rel = 'noopener noreferrer'; }
         else { control.removeAttribute('href'); control.removeAttribute('target'); }
         control.setAttribute('aria-label', `${label}（在新页面打开）`);
-        control.onclick = event => { if (interactionStatus(item) !== 'pending') { event.preventDefault(); renderMessages(); } };
+        control.onclick = event => {
+          if (interactionStatus(item) !== 'pending') { event.preventDefault(); renderMessages(); return; }
+          if (authorization && item.service === 'feishu') {
+            view.feedback.textContent = '请在飞书页面完成授权。';
+            view.feedback.hidden = false;
+          }
+        };
         if (entry.copy) {
           entry.copy.onclick = async () => {
             if (interactionStatus(item) !== 'pending') { renderMessages(); return; }
@@ -741,16 +796,52 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
           if (interactionStatus(item) !== status) { renderMessages(); return; }
           if (item.codexForm && action.value?.confirm && !view.codexForm.draft.prompt.trim()) { view.feedback.textContent = '请填写提示词'; view.codexForm.prompt.focus(); return; }
           const redraw = () => submit ? renderInteraction(item, message, view, submit) : renderMessages();
-          view.submitting = key; view.feedback.textContent = ''; redraw();
+          const operation = !submit && action.value?.type === 'operation-confirmation';
+          const feishu = !submit && authorization && item.service === 'feishu';
+          if ((operation || feishu) && navigator.onLine === false) {
+            view.feedback.textContent = '当前离线，联网后重试。'; redraw(); return;
+          }
+          // Capture the original conversation before this request can outlive navigation.
+          const targetConversation = message?.conversationId || appState.current;
+          view.submitting = key; view.feedback.textContent = '';
+          // Update only the active controls before sending the request. Rebuilding
+          // the conversation or a large change preview can delay the click.
+          if (action.value?.type !== 'model-select') {
+            view.feedback.hidden = true; view.node.setAttribute('aria-busy', 'true');
+            for (const other of view.entries.values()) {
+              if (other.control instanceof HTMLButtonElement) other.control.disabled = true;
+            }
+            if (view.codexForm) for (const field of [view.codexForm.executor, view.codexForm.project, view.codexForm.session, view.codexForm.prompt, view.codexForm.review]) field.disabled = true;
+            updateText(entry.label || control, operation ? '提交中…' : action.pricing ? '正在保存…' : '处理中…');
+          }
           try {
+            let receipt;
             if (action.value?.type === 'model-picker') {
               openPanel('model-dialog', control); await loadModelLibrary(action.value.requestId);
             } else if (submit) await submit(action);
             else if (item.legacy) await api('action', 'POST', { conversationId: appState.current, requestId: action.value.requestId, confirm: action.value.confirm });
-            else await api('interactions', 'POST', { conversationId: appState.current, messageId: message.id, interactionId: item.id, actionId: action.id, ...(item.codexForm && action.value?.confirm ? { codexEdits: { ...view.codexForm.draft } } : {}) });
+            else receipt = await api('interactions', 'POST', { conversationId: targetConversation, messageId: message.id, interactionId: item.id, actionId: action.id, ...(item.codexForm && action.value?.confirm ? { codexEdits: { ...view.codexForm.draft } } : {}) }, operation || feishu ? AbortSignal.timeout(12000) : undefined);
+            if (operation) {
+              // HTTP 202 acknowledges delivery only. HTTP/SSE owns the actual execution result.
+              view.operationReceipt = { actionId: action.id };
+              view.feedback.textContent = '已提交，等待执行结果。';
+            }
             if (action.value?.type === 'browser-control' && action.value.action === 'view') await openBrowserWorkspace({ conversationId: message.conversationId, id: action.value.browserId, opener: control });
             if (!submit) await refresh();
-          } catch (error) { view.feedback.textContent = error.message; }
+            if (feishu && receipt?.interaction?.actions.some(next => next.id === action.id) && view.lastStatus === 'pending'
+              && view.authorizationLink && action.id.startsWith('retry')) view.feedback.textContent = '仍在等待飞书授权。';
+          } catch (error) {
+            if (operation && (error.network || error.name === 'TimeoutError' || error.name === 'AbortError'
+              || error.status >= 500 || error.responseFormat && error.status >= 200 && error.status < 300)) {
+              view.operationReceipt = { actionId: action.id };
+              view.feedback.textContent = '连接中断，结果待核实；可重试核对。';
+              // A lost response does not establish failure. Read state; never queue a new write.
+              if (appState.current === targetConversation) await refresh();
+            } else if (feishu && (error.network || error.name === 'TimeoutError' || error.name === 'AbortError' || error.status >= 500)) {
+              if (appState.current === targetConversation) await refresh();
+              view.feedback.textContent = '未收到操作回执，请重试。';
+            } else view.feedback.textContent = error.message;
+          }
           finally { view.submitting = undefined; redraw(); }
         };
       }
@@ -760,6 +851,16 @@ export function createInteractionRenderer({ conversation: appState, api, loadMod
     for (const key of view.entries.keys()) if (!keys.has(key)) view.entries.delete(key);
     syncChildren(view.actions, nodes);
     view.actions.hidden = !nodes.some(node => !node.hidden);
+    if (deploymentStep && !view.actions.hidden) {
+      const stageLabel = deploymentStep.firstChild.textContent;
+      deploymentStep.firstChild.hidden = true;
+      for (const entry of view.entries.values()) {
+        if (entry.node.hidden) continue;
+        const label = entry.control.textContent;
+        entry.control.setAttribute('aria-label', `${stageLabel}，${label}${entry.control.tagName === 'A' ? '（在新页面打开）' : ''}`);
+        updateText(entry.control, status === 'failed' ? `${stageLabel} · ${view.submitting ? '核验中' : '重试'}` : stageLabel);
+      }
+    }
     view.footer.hidden = (view.status.parentNode !== view.footer || view.status.hidden) && (view.actions.parentNode !== view.footer || view.actions.hidden) && view.memoryToggle.hidden;
     if (!pending) { view.manual.hidden = true; view.manual.value = ''; }
     view.feedback.hidden = !view.feedback.textContent;

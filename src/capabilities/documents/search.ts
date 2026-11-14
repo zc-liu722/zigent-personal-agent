@@ -1,3 +1,4 @@
+import { CodePointText, codePointLength } from "../../text/code-points.js";
 import { z } from "zod";
 import type { ModelGateway } from "../../llm.js";
 import type { ToolExecutionContext } from "../../tools/registry.js";
@@ -21,20 +22,20 @@ export function passages(path: string, hash: string, document: DocumentContent, 
   const result: Passage[] = [];
   const literal = query.toLowerCase();
   for (const unit of document.units) {
-    const characters = Array.from(unit.text);
     if (mode === "literal") {
       let offset = 0;
       for (const [index, line] of unit.text.split("\n").entries()) {
         const at = line.toLowerCase().indexOf(literal);
         if (at >= 0) result.push({ path, sha256: hash, page: unit.page, paragraph: unit.paragraph, line: index + 1,
           offset: (unit.offset ?? 0) + offset, excerpt: line.slice(Math.max(0, at - 100), at + literal.length + 220) });
-        offset += Array.from(line).length + 1;
+        offset += codePointLength(line) + 1;
         if (result.length >= 12001) return result;
       }
     } else {
+      const characters = new CodePointText(unit.text);
       for (let offset = 0; offset < characters.length; offset += 1200) {
         result.push({ path, sha256: hash, page: unit.page, paragraph: unit.paragraph,
-          offset: (unit.offset ?? 0) + offset, excerpt: characters.slice(offset, offset + 1500).join("") });
+          offset: (unit.offset ?? 0) + offset, excerpt: characters.slice(offset, offset + 1500) });
         if (result.length >= 12001) return result;
       }
     }

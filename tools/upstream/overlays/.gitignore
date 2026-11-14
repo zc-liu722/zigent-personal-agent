@@ -1,6 +1,8 @@
 node_modules/
 dist/
 build/
+/components/
+/web/meeting-rtc.js
 .env
 .env.*
 !.env.example

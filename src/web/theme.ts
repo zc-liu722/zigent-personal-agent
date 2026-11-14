@@ -1,3 +1,5 @@
+import type { PageColors, PaletteId } from "./palette.js";
+
 const DAY = 86_400_000;
 const BEIJING_OFFSET = 8 * 60 * 60_000;
 const LATITUDE = 39.9042 * Math.PI / 180;
@@ -26,16 +28,20 @@ export function beijingSunTimes(now: number): { sunrise: number; sunset: number 
     sunset: Math.round(day + (noon + 4 * hourAngle) * 60_000) };
 }
 
-export function webTheme(now = Date.now()): { mode: "light" | "dark"; color: string; refreshAfterMs: number } {
+// Fallback for historical resource releases without an interactive palette.
+const legacyColors = { light: "#faf9f5", dark: "#1d1c19" };
+
+export function webTheme(now = Date.now(), colors: PageColors = legacyColors): { mode: "light" | "dark"; color: string; refreshAfterMs: number } {
   const { sunrise, sunset } = beijingSunTimes(now);
-  const light = now >= sunrise && now < sunset;
+  const mode = now >= sunrise && now < sunset ? "light" : "dark";
   const next = now < sunrise ? sunrise : now < sunset ? sunset : beijingSunTimes(now + DAY).sunrise;
-  return { mode: light ? "light" : "dark", color: light ? "#faf9f5" : "#1d1c19", refreshAfterMs: next - now };
+  return { mode, color: colors[mode], refreshAfterMs: next - now };
 }
 
-export function themedIndex(html: string, now = Date.now()): string {
-  const theme = webTheme(now);
+export function themedIndex(html: string, now = Date.now(), colors?: PageColors, paletteId: PaletteId = "brown"): string {
+  const theme = webTheme(now, colors);
   return html.replace('data-theme="light"', `data-theme="${theme.mode}"`)
+    .replace('data-palette="brown"', `data-palette="${paletteId}"`)
     .replace('name="color-scheme" content="light"', `name="color-scheme" content="${theme.mode}"`)
-    .replace('name="theme-color" content="#faf9f5"', `name="theme-color" content="${theme.color}"`);
+    .replace(/name="theme-color" content="[^"]*"/, `name="theme-color" content="${theme.color}"`);
 }

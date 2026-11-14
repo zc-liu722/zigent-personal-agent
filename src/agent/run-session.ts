@@ -11,11 +11,12 @@ export class AgentRunSession {
   private readonly transcript: AgentTranscript;
   private readonly outputIds = new Set<string>();
   private readonly fileOutputIds = new Set<string>();
+  private readonly imageOutputIds = new Set<string>();
   private readonly imageDeliveries = new Map<GeneratedImage, DeliveredImage | undefined>();
   private hasVisibleText = false;
 
   constructor(private readonly channel: AgentRunChannel) {
-    this.transcript = new AgentTranscript(Boolean(channel.updateActivitySource));
+    this.transcript = new AgentTranscript(Boolean(channel.updateActivitySource), channel.initialSnapshot);
   }
 
   async open(): Promise<void> {
@@ -77,13 +78,14 @@ export class AgentRunSession {
     });
   }
 
-  async presentOutput(output: ConversationOutput, signal?: AbortSignal): Promise<void> {
+  async presentOutput(output: ConversationOutput, signal?: AbortSignal): Promise<ConversationOutput | void> {
     signal?.throwIfAborted();
     if (this.transcript.snapshot().status !== "running" || !this.channel.sendOutput) throw new Error("This run cannot publish visual output");
-    const ids = output.blocks.every(block=>block.type==="artifact") ? this.fileOutputIds : this.outputIds;
-    if (!ids.has(output.id) && ids.size >= (ids===this.fileOutputIds?100:6)) throw new Error("Too many outputs in this reply");
-    await this.channel.sendOutput(conversationOutputSchema.parse(output));
+    const ids = output.blocks.every(block=>block.type==="artifact") ? this.fileOutputIds : output.blocks.every(block=>block.type==="image") ? this.imageOutputIds : this.outputIds;
+    if (!ids.has(output.id) && ids.size >= (ids===this.fileOutputIds?100:ids===this.imageOutputIds?32:6)) throw new Error("Too many outputs in this reply");
+    const delivered = await this.channel.sendOutput(conversationOutputSchema.parse(output));
     ids.add(output.id);
+    return delivered;
   }
 
   async complete(

@@ -10,7 +10,7 @@ export function interactionStatus(item) {
   return status === 'pending' && Number.isFinite(item.expiresAt) && item.expiresAt <= Date.now() ? 'expired' : status;
 }
 export function messageInteractions(message) {
-  if (Array.isArray(message.interactions)) return message.interactions.filter(item => item && typeof item.id === 'string' && ['schedule-reminder', 'browser', 'authorization', 'actions', 'output', 'task-proposal', 'memory-proposal', 'operation-confirmation', 'user-question'].includes(item.kind));
+  if (Array.isArray(message.interactions)) return message.interactions.filter(item => item && typeof item.id === 'string' && ['meeting', 'schedule-reminder', 'browser', 'authorization', 'actions', 'output', 'task-proposal', 'memory-proposal', 'operation-confirmation', 'user-question'].includes(item.kind));
   const action = message.action;
   if (action?.type === 'authorization') return [{ id: 'legacy-authorization', kind: 'authorization', title: '连接账号', service: action.service,
     status: 'pending', expiresAt: action.expiresAt, actions: [{ id: 'authorize', kind: 'link', label: '前往授权', url: action.url }] }];

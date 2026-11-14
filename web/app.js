@@ -2,11 +2,11 @@ import { $, el, messageButton, syncChildren } from './dom.js';
 import { interactionStatus, messageInteractions } from './components/interaction-model.js';
 import { createConversationState } from './app-state.js';
 import { createComposerFocusGuard, createComposerKeyboardMotion, createComposerKeyboardViewport, isEditableElement, visualViewportClientBottom } from './composer-keyboard-viewport.js';
-import { createKeyboardReadingScroll } from './keyboard-reading-scroll.js';
 import { createClipboard } from './clipboard.js';
-import { createMarkdownRenderer } from './markdown.js';
+import { clearMermaidPreviews, createMarkdownRenderer } from './markdown.js';
 import { createInteractionRenderer } from './components/index.js';
 import { createMessageRenderer } from './message-renderer.js';
+import { createReplyAnnotations } from './reply-annotations.js';
 import { createConversationSync } from './conversation-sync.js';
 import { createImageUploads } from './image-uploads.js';
 import { createMessageOutbox } from './message-outbox.js';
@@ -20,8 +20,9 @@ const assetUrl = (id, preview = false) => `${base}api/assets/${encodeURIComponen
 const appState = createConversationState();
 const mobileLayout = matchMedia('(max-width:650px), (max-width:1024px) and (pointer:coarse)');
 let readingTouch = false, readingMotionUntil = 0;
-let keyboardReadingScrollActive = () => false;
+let keyboardReadingFrame = false;
 let keyboardReadingPosition;
+let cancelBrowserChromeReading = () => {};
 let uploads = [], choosingImages = false, messageSending = false, installPrompt;
 const stoppingReplies = new Set();
 const queueViews = new Map(), queueRequests = new Set(), queueErrors = new Map(), queueRetakes = new Map();
@@ -30,6 +31,7 @@ let memoryVersion = 0, agentName = document.title;
 let fileWorkbench;
 let speechInput, speechDraft, speechConfigured = false, speechBusy = false, speechSubmitting = false, speechComposing = false, speechPending;
 let selectedModel = '', defaultModel = '', modelSaving = false, modelLibraryView;
+let pendingModelChoice;
 let modelLibraryVersion = 0, modelRecoveryRequestId, modelLibraryCatalogue, modelLibraryRequest;
 let forking = false, userMessageActions, replySelection, editing, olderRequest;
 let replyQuotes = [];
@@ -55,27 +57,38 @@ const imagePickerStatus = el('div', 'attachment attachment-picker', '正在选�
 imagePickerStatus.setAttribute('role', 'status');
 const { copyText } = createClipboard({ toast });
 const { markdown, inline } = createMarkdownRenderer({ copyText, openConversationDocument, toast, captureReadingPosition, restoreReadingPosition, rememberReadingPosition });
+const replyAnnotations = createReplyAnnotations({ api, getConversation: () => appState.current,
+  readingScroller, readingTopEdge,
+  getMessages: () => appState.messages, onChange: () => scheduleMessages(), toast,
+  onAdd: addReplyToConversation, onNew: (text, selected) => addReplyToNewConversation(text, selected),
+  onBranch: (text, selected) => addReplyToNewConversation(text, selected, true) });
 const interactionRenderer = createInteractionRenderer({ conversation: appState, api, loadModelLibrary, openConversationDocument, openBrowserWorkspace, openPanel, refresh, renderMessages });
 const messageRenderer = createMessageRenderer({ conversation: appState, assetUrl, loadActivity: loadMessageActivity,
   branchReply, captureReadingPosition, copyText, isForking: () => forking, inline, markdown, toast,
+  renderAnnotations: replyAnnotations.render,
   openConversationDocument, openCurrentBrowser, readingMetrics, readingScroller, readingTopEdge, rememberReadingPosition,
   renderInteraction, renderSend, restoreReadingPosition, scrollReadingToBottom, scheduleInteractionExpiry: interactionRenderer.scheduleInteractionExpiry, userMessageText,
   subagentRunningText: () => agentName === '小昌' ? '大昌正在工作中' : '子agent正在工作中',
   pendingArticles: () => messageOutbox.render(appState.current, new Set([...appState.messages, ...appState.queuedMessages].map(item => item.id))) });
 const conversationSync = createConversationSync({ conversation: appState, base, api, closeMenu, refreshCodexExecutions: interactionRenderer.refreshCodexExecutions,
   renderHistory, renderMessages, renderQueue, scheduleMessages, captureReadingPosition, restoreReadingPosition, rememberReadingPosition,
+  fillRecentMessages: limit => { void loadOlderMessages(limit, true); },
   beforeSelect: id => {
     cancelModelLibraryLoad();
     readingTouch = false; readingMotionUntil = 0;
     messageRenderer.cancelActivityLoads();
-    olderRequest?.abort(); olderRequest = undefined; $('older').disabled = false;
+    cancelOlderMessages();
     cancelSpeech(); memoryVersion++;
-    userMessageActions?.close(); replySelection?.close(); cancelEdit(false);
+    userMessageActions?.close(); replySelection?.close(); void replyAnnotations.close(); cancelEdit(false);
     if (id !== appState.current) replyQuotes = [];
     renderReplyQuotes(); window.ZigentDocumentWorkspace?.close(); window.ZigentBrowser?.close();
     fileWorkbench?.close();
+    warmSelectedModel(id || null);
   },
-  selectModel: model => { selectedModel = model || defaultModel; renderModel(); },
+  selectModel: model => {
+    selectedModel = pendingModelChoice?.selection === appState.selectionVersion ? pendingModelChoice.model : model || defaultModel;
+    renderModel();
+  },
   setReconnecting: value => { reconnecting = value; renderStatusNotice(); }, toast });
 function renderMessages(...args) { return messageRenderer.renderMessages(...args); }
 function scheduleMessages(...args) { return messageRenderer.scheduleMessages(...args); }
@@ -91,6 +104,7 @@ let sidebarCollapsed = false;
 try { sidebarCollapsed = localStorage.getItem(sidebarPreference) === '1'; } catch {}
 function setSidebarCollapsed(value) {
   sidebarCollapsed = value;
+  if (value) conversationSync.cancelPrefetch();
   try { localStorage.setItem(sidebarPreference, value ? '1' : '0'); } catch {}
   syncSidebar();
 }
@@ -108,7 +122,7 @@ function syncSidebar() {
   if (!mobileLayout.matches) { $('sidebar').classList.remove('open'); $('scrim').hidden = true; }
 }
 mobileLayout.addEventListener('change', syncSidebar); syncSidebar();
-let scheduleReadingViewport, flushReadingViewport;
+let scheduleReadingViewport, flushReadingViewport, syncReadingKeyboardFrame;
 function observeAppViewport() {
   const root = document.documentElement, viewport = window.visualViewport, composer = document.querySelector('.composer-area');
   if (!root?.style || !composer) return;
@@ -116,9 +130,10 @@ function observeAppViewport() {
   const composerMotion = createComposerKeyboardMotion(composer, () => {
     scheduleReadingViewport?.(); requestAnimationFrame(syncComposer);
   });
-  const properties = ['--app-width', '--app-height', '--app-left', '--app-top'];
+  const properties = ['--app-width', '--app-height', '--app-left', '--app-top', '--app-layout-height', '--keyboard-reading-top', '--keyboard-reading-left'];
   const previous = new Map();
   let frame, settleTimer, previousHeight = 0, orientationChanged = false, composerKeyboardActive = false;
+  let readingViewport;
   const pixels = value => `${Math.round(value * 100) / 100}px`;
   function update() {
     frame = undefined;
@@ -131,6 +146,7 @@ function observeAppViewport() {
         for (const property of properties) root.style.removeProperty(property);
         previous.clear(); composerKeyboard.reset(); composerMotion.reset(); composerKeyboardActive = false;
         root.removeAttribute('data-composer-keyboard'); orientationChanged = false;
+        syncReadingKeyboardFrame?.(false);
         scheduleReadingViewport?.();
       }
       return;
@@ -146,8 +162,8 @@ function observeAppViewport() {
     const boundedLeft = Math.max(0, Math.min(left, layoutWidth - width));
     const keyboardOpen = composerKeyboard.update(Boolean(viewport && mobileLayout.matches), height, layoutHeight);
     const editingChat = composer.contains(document.activeElement) && isEditableElement(document.activeElement);
-    // Only the composer follows the keyboard. The transcript always remains
-    // document content, including while focus survives keyboard dismissal.
+    // Keyboard reading uses a native transcript scrollport. Its gestures never
+    // write the document scroll position used by Safari's focused-input panning.
     composerKeyboardActive = mobileLayout.matches && !$('app').hidden && keyboardOpen &&
       (editingChat || composerKeyboardActive);
     // Safari can retain a small keyboard offset after dismissal. Clear it when
@@ -155,15 +171,14 @@ function observeAppViewport() {
     const boundedTop = mobileLayout.matches && !composerKeyboardActive
       ? 0
       : Math.max(0, Math.min(top, layoutHeight - height));
-    // Keep the transcript in document flow while floating controls follow only
-    // the real visible rectangle, including keyboard occlusion.
-    // Focus panning changes offsetTop as the document scrolls. Feeding that
-    // offset into document padding changes its scroll range again, creating a
-    // feedback loop at the bottom. Only viewport shrinkage reserves space.
-    // The motion controller projects clearance and navigation together when
-    // dismissal starts ahead of WebKit's next viewport measurement.
+    // Keep the reading layer in document coordinates, spanning the layout
+    // viewport beneath Safari's chrome. An absolute scroller avoids WebKit's
+    // fixed-container edge tinting; only its visible reading area shrinks.
+    const readingParent = composerKeyboardActive ? document.querySelector('.chat-main').getBoundingClientRect() : undefined;
+    const readingTop = readingParent ? visualViewportClientBottom(document) - height - boundedTop - readingParent.top : 0;
+    const readingLeft = readingParent ? root.getBoundingClientRect().left + viewport.pageLeft - readingParent.left : 0;
     const keyboardInset = composerKeyboardActive ? Math.max(0, layoutHeight - height) : 0;
-    const values = [width, height, boundedLeft, boundedTop].map(pixels);
+    const values = [width, height, boundedLeft, boundedTop, layoutHeight, readingTop, readingLeft].map(pixels);
     properties.forEach((property, index) => {
       if (previous.get(property) !== values[index]) { root.style.setProperty(property, values[index]); previous.set(property, values[index]); }
     });
@@ -180,21 +195,18 @@ function observeAppViewport() {
         inset: keyboardInset, top: boundedTop
       }, closingJump);
     } else composerMotion.reset();
+    syncReadingKeyboardFrame?.(composerKeyboardActive);
     if (keyboardChanged) requestAnimationFrame(syncComposer);
     orientationChanged = false;
+    const readingGeometry = [width, height, layoutHeight, composerKeyboardActive];
+    const readingChanged = !readingViewport || readingGeometry.some((value, index) => value !== readingViewport[index]);
+    readingViewport = readingGeometry;
     // Apply bottom-follow in this viewport transaction, before the lifted dock
     // paints. Scheduling another frame leaves the transcript behind the editor.
-    if (flushReadingViewport) flushReadingViewport();
-    else scheduleReadingViewport?.();
-    // Following the new scroll end can change Safari's native fixed anchor and
-    // visual pan. Reconcile after that write, before painting the lifted editor.
-    if (viewport && composerKeyboardActive) {
-      const afterHeight = viewport.height, afterTop = viewport.offsetTop;
-      if (Number.isFinite(afterHeight) && afterHeight > 0 && Number.isFinite(afterTop)) {
-        const top = Math.max(0, Math.min(afterTop, root.clientHeight - afterHeight));
-        composerMotion.update(true, { lift: composerMotion.measureLift(),
-          inset: Math.max(0, root.clientHeight - afterHeight), top }, false);
-      }
+    // A document/visual pan alone must not restart reading-position settling.
+    if (readingChanged) {
+      if (flushReadingViewport) flushReadingViewport();
+      else scheduleReadingViewport?.();
     }
   }
   function schedule() { if (frame === undefined) frame = requestAnimationFrame(update); }
@@ -233,12 +245,7 @@ function observeAppViewport() {
 observeAppViewport();
 function observeTouchScrolling() {
   let gesture, drawerFrame;
-  const app = $('app'), sidebar = $('sidebar'), scrim = $('scrim'), timeline = $('timeline');
-  const keyboardScroll = createKeyboardReadingScroll({ scroller: readingScroller, range: readingScrollRange,
-    canScroll: () => mobileLayout.matches && !app.hidden && !document.hidden && !sidebar.classList.contains('open') &&
-      !document.querySelector('dialog:modal') && Math.abs((window.visualViewport?.scale || 1) - 1) <= .01,
-    onMove: () => { readingMotionUntil = performance.now() + 220; } });
-  keyboardReadingScrollActive = keyboardScroll.isActive;
+  const app = $('app'), sidebar = $('sidebar'), scrim = $('scrim');
   const stopEdgeGesture = () => { if (gesture) gesture.edgeCandidate = false; };
   function paintDrawer() {
     drawerFrame = undefined;
@@ -249,7 +256,6 @@ function observeTouchScrolling() {
   }
   const end = event => {
     const active = gesture;
-    keyboardScroll.end(event);
     if (drawerFrame !== undefined) cancelAnimationFrame(drawerFrame);
     drawerFrame = undefined;
     gesture = undefined;
@@ -308,7 +314,6 @@ function observeTouchScrolling() {
       sidebar.style.setProperty('--drawer-offset', '-101%');
       scrim.style.setProperty('--drawer-progress', '0');
       sidebar.classList.add('dragging'); scrim.hidden = false;
-      keyboardScroll.cancel();
       userMessageActions?.cancelPress(); replySelection?.cancelPress();
     }
     if (event.cancelable) event.preventDefault();
@@ -325,11 +330,6 @@ function observeTouchScrolling() {
     const root = readingScroller(), top = readingScrollTop(root);
     gesture.boundary = !sidebar.classList.contains('open') && !event.target.closest?.('dialog:modal') &&
       (document.documentElement.hasAttribute('data-composer-keyboard') || top <= 0 || top >= readingScrollRange(root) - 1);
-    if (gesture.boundary && timeline.contains(event.target) && document.documentElement.hasAttribute('data-composer-keyboard') &&
-      parseFloat(document.documentElement.style.getPropertyValue('--chat-keyboard-inset')) > 0 &&
-      !event.target.closest?.('dialog, input, textarea, [contenteditable]') && window.getSelection()?.isCollapsed !== false) {
-      keyboardScroll.start(event);
-    }
     if (touch.clientX >= left && touch.clientX <= left + 40 && !$('sidebar').classList.contains('open') &&
       !event.target.closest?.('dialog') && Math.abs((window.visualViewport?.scale || 1) - 1) <= .01) {
       gesture.edgeCandidate = true;
@@ -341,7 +341,6 @@ function observeTouchScrolling() {
     moveEdge(event);
     if (gesture?.edgeLocked) return;
     moveComposerSelection(event);
-    if (keyboardScroll.move(event)) return;
     if (gesture?.boundary) moveBoundary(event);
   }
   function syncEdgeListener() {
@@ -349,7 +348,7 @@ function observeTouchScrolling() {
     // WebKit determines scroll-blocking regions before touchstart. Installing
     // this listener inside touchstart can leave the first moves uncancelable,
     // especially with native document scrolling. Keep it on the app in advance;
-    // The same preinstalled handler owns keyboard reading pans and edge guards.
+    // The same preinstalled handler owns drawer swipes and page-edge guards.
     // Other touches return immediately and retain their native behavior.
     // https://bugs.webkit.org/show_bug.cgi?id=184251
     if (mobileLayout.matches) app.addEventListener('touchmove', moveTouch, { passive: false, capture: true });
@@ -358,42 +357,25 @@ function observeTouchScrolling() {
   mobileLayout.addEventListener('change', syncEdgeListener);
   syncEdgeListener();
   window.addEventListener('pagehide', end);
-  window.addEventListener('blur', () => keyboardScroll.cancel());
-  app.addEventListener('wheel', () => keyboardScroll.cancel(), { passive: true, capture: true });
-  document.addEventListener('visibilitychange', () => { if (document.hidden) keyboardScroll.cancel(); });
 }
 observeTouchScrolling();
-function readingScroller() { return mobileLayout.matches ? document.scrollingElement || document.documentElement : $('timeline'); }
+function readingScroller() { return mobileLayout.matches && !keyboardReadingFrame ? document.scrollingElement || document.documentElement : $('timeline'); }
 function readingScrollRange(element) {
-  const range = Math.max(0, element.scrollHeight - element.clientHeight);
-  const root = document.documentElement, viewport = window.visualViewport;
-  if (!mobileLayout.matches || $('app').hidden || !$('welcome').hidden || !viewport ||
-    Math.abs(viewport.scale - 1) > .01 || !root.hasAttribute('data-composer-keyboard') ||
-    !(parseFloat(root.style.getPropertyValue('--chat-keyboard-inset')) > 0)) return range;
-  const timeline = $('timeline'), composer = document.querySelector('.composer-area');
-  const padding = parseFloat(getComputedStyle(timeline).paddingBottom) || 0;
-  const edge = parseFloat(getComputedStyle(composer).getPropertyValue('--composer-edge-gap')) || 0;
-  // Keyboard clearance already reserves the occluded part of the layout
-  // viewport. Safari's additional visual pan must not spend that space again.
-  // Compare both edges in client coordinates rather than trusting the root's
-  // scrollHeight (which can include a phantom tail) or offsetTop alone.
-  const contentBottom = timeline.getBoundingClientRect().bottom - padding;
-  const readingBottom = visualViewportClientBottom(document) - composer.offsetHeight - edge;
-  return Math.max(0, Math.min(range, element.scrollTop + contentBottom - readingBottom));
+  return Math.max(0, element.scrollHeight - element.clientHeight);
 }
 function readingScrollTop(element) { return element.scrollTop; }
 function setReadingScrollTop(element, top) {
   const range = readingScrollRange(element), value = Math.max(0, Math.min(top, range));
-  if (Math.abs(element.scrollTop - value) > 1) element.scrollTop = value;
+  if (Math.abs(element.scrollTop - value) > 1) { cancelBrowserChromeReading(); element.scrollTop = value; }
 }
 function scrollReadingToBottom() {
-  if (mobileLayout.matches && !$('welcome').hidden) return;
+  cancelBrowserChromeReading();
   // Explicit navigation (including sending a message) ends history preservation.
   if (keyboardReadingPosition) keyboardReadingPosition.nearBottom = keyboardReadingPosition.atBottom = true;
   const element = readingScroller();
   setReadingScrollTop(element, readingScrollRange(element));
 }
-function readingGestureActive() { return readingTouch || keyboardReadingScrollActive() || performance.now() < readingMotionUntil; }
+function readingGestureActive() { return readingTouch || performance.now() < readingMotionUntil; }
 function observeReadingGestures() {
   const timeline = $('timeline'), composer = document.querySelector('.composer-area');
   let keyboardSwipe;
@@ -403,11 +385,12 @@ function observeReadingGestures() {
     if (!mobileLayout.matches || event.touches.length !== 1 ||
       !document.documentElement.hasAttribute('data-composer-keyboard') ||
       !keyboardReadingPosition?.openedAtBottom || keyboardReadingPosition.conversation !== appState.current ||
+      !readingMetrics().atBottom ||
       !composer.contains(document.activeElement) || !isEditableElement(document.activeElement) ||
       event.target.closest?.('dialog, input, textarea, [contenteditable], [data-native-selection], .browser-frame.controllable') ||
       replySelection?.isSelecting(event.target)) return;
     const touch = event.touches[0];
-    keyboardSwipe = { id: touch.identifier, x: touch.clientX, y: touch.clientY, input: document.activeElement };
+    keyboardSwipe = { id: touch.identifier, x: touch.screenX, y: touch.screenY, input: document.activeElement };
   }, { passive: true });
   timeline.addEventListener('touchmove', event => {
     if (!keyboardSwipe) return;
@@ -415,7 +398,7 @@ function observeReadingGestures() {
       window.getSelection()?.isCollapsed === false) { keyboardSwipe = undefined; return; }
     const touch = [...event.touches].find(value => value.identifier === keyboardSwipe.id);
     if (!touch) return;
-    const dx = touch.clientX - keyboardSwipe.x, dy = touch.clientY - keyboardSwipe.y;
+    const dx = touch.screenX - keyboardSwipe.x, dy = touch.screenY - keyboardSwipe.y;
     if (Math.max(Math.abs(dx), Math.abs(dy)) < 10) return;
     const input = keyboardSwipe.input;
     keyboardSwipe = undefined;
@@ -428,6 +411,7 @@ function observeReadingGestures() {
     keyboardSwipe = undefined;
     if (!readingTouch) return;
     readingTouch = event.touches.length > 0; moving();
+    if (!readingTouch) olderRequest?.insert?.();
   };
   document.addEventListener('touchend', release, { passive: true });
   document.addEventListener('touchcancel', release, { passive: true });
@@ -438,9 +422,13 @@ function observeReadingGestures() {
     if ((event.target === readingScroller() || event.target === document) && readingGestureActive()) moving();
   }, { passive: true, capture: true });
   document.addEventListener('scrollend', event => {
-    if ((event.target === readingScroller() || event.target === document) && !readingTouch) readingMotionUntil = 0;
+    if ((event.target === readingScroller() || event.target === document) && !readingTouch) {
+      readingMotionUntil = 0; olderRequest?.insert?.();
+    }
   }, { passive: true, capture: true });
-  window.addEventListener('blur', () => { keyboardSwipe = undefined; readingTouch = false; readingMotionUntil = 0; });
+  window.addEventListener('blur', () => {
+    keyboardSwipe = undefined; readingTouch = false; readingMotionUntil = 0; olderRequest?.insert?.();
+  });
 }
 observeReadingGestures();
 function readingMetrics() {
@@ -449,8 +437,8 @@ function readingMetrics() {
   return { element, top, height: element.scrollHeight, nearBottom: remaining < 140, atBottom: remaining <= 4 };
 }
 function readingTopEdge() {
+  if (!mobileLayout.matches) return $('timeline').getBoundingClientRect().top;
   const topbar = document.querySelector('.topbar');
-  if (!mobileLayout.matches) return topbar.getBoundingClientRect().bottom;
   // Mobile navigation has no fixed wrapper. Measure the floating controls and
   // keep the same reading clearance for anchors, folding and text selection.
   const controls = [...topbar.children].map(node => node.getBoundingClientRect()).filter(rect => rect.width && rect.height);
@@ -494,10 +482,9 @@ function observeReadingViewport() {
   const root = document.documentElement, timeline = $('timeline'), composer = document.querySelector('.composer-area'), topbar = document.querySelector('.topbar');
   const focusGuard = createComposerFocusGuard(composer);
   const geometry = () => ({ root: readingScroller(), width: timeline.clientWidth,
-    // Mobile browser chrome resizes the native scrollport during a swipe.
-    // Only desktop's nested scrollport height changes transcript layout;
-    // mobile keyboard changes are tracked by the inset and active state below.
-    height: mobileLayout.matches ? 0 : readingScroller().clientHeight,
+    // Observe toolbar height without treating every animation frame as a
+    // transcript layout change. Only a stationary transition may restore once.
+    height: mobileLayout.matches ? window.visualViewport?.height || window.innerHeight : readingScroller().clientHeight,
     // Measure control size, not its moving visual-viewport position. Native
     // panning is not a transcript layout change and must not trigger scrolling.
     header: mobileLayout.matches ? Math.max(0, ...[...topbar.children].map(node => node.offsetHeight)) : topbar.offsetHeight,
@@ -505,17 +492,96 @@ function observeReadingViewport() {
     // it with the dock height so the last message keeps its existing clearance.
     composer: composer.offsetHeight + (parseFloat(getComputedStyle(composer).getPropertyValue('--composer-edge-gap')) || 0),
     keyboard: root.style.getPropertyValue('--chat-keyboard-inset'),
-    // Read rendered clearance too: reopening during a dismissal can animate
-    // padding while the CSS variable already contains its final value.
-    clearance: mobileLayout.matches ? parseFloat(getComputedStyle(timeline).paddingBottom) || 0 : 0,
+    // The expanded keyboard layer's offscreen padding is paint space, not
+    // reading clearance. Panning must not restart bottom-follow/settling.
+    // Outside that layer, read animated padding during keyboard dismissal.
+    clearance: keyboardReadingFrame ? parseFloat(root.style.getPropertyValue('--composer-height')) || 100
+      : mobileLayout.matches ? parseFloat(getComputedStyle(timeline).paddingBottom) || 0 : 0,
     keyboardActive: root.hasAttribute('data-composer-keyboard') || root.hasAttribute('data-composer-moving') });
   let previous = geometry(), composerHeight = 0, frame, settleTimer;
+  let chromeTransaction, chromeTimer, chromeTouches = 0, chromeDragging = false, chromeScrollUntil = 0;
   const same = current => Object.keys(current).every(key => current[key] === previous[key]);
+  const cancelChrome = () => { clearTimeout(chromeTimer); chromeTransaction = undefined; };
+  // Programmatic navigation also owns any toolbar animation it causes.
+  cancelBrowserChromeReading = () => { cancelChrome(); userChromeScroll(); };
+  const userChromeScroll = () => {
+    chromeScrollUntil = performance.now() + 500;
+    // Ownership lasts for this whole toolbar transition, including its late
+    // frames after native scrollend. Never promote a swipe to an idle restore.
+    if (chromeTransaction) chromeTransaction.position = undefined;
+  };
+  const settleChrome = () => {
+    clearTimeout(chromeTimer);
+    chromeTimer = setTimeout(() => {
+      if (chromeTouches) { settleChrome(); return; }
+      const transaction = chromeTransaction;
+      cancelChrome();
+      if (!transaction?.position || transaction.conversation !== appState.current ||
+        !mobileLayout.matches || document.hidden || $('app').hidden ||
+        keyboardReadingPosition || root.hasAttribute('data-composer-keyboard') ||
+        root.hasAttribute('data-composer-moving') || $('sidebar').classList.contains('open') ||
+        document.querySelector('dialog:modal') || readingGestureActive() || performance.now() < chromeScrollUntil ||
+        Math.abs((window.visualViewport?.scale || 1) - 1) > .01) return;
+      // One correction after both scrolling and toolbar resizing are quiet.
+      // Consume the snapshot first so this write cannot replay itself.
+      restoreReadingPosition(transaction.position, false, false);
+      rememberReadingPosition();
+    }, 300);
+  };
+  const resizeChrome = () => {
+    const userOwned = chromeDragging || performance.now() < chromeScrollUntil;
+    if (userOwned) userChromeScroll();
+    chromeTransaction ??= { conversation: appState.current, position: userOwned ? undefined : rememberedReadingPosition };
+    settleChrome();
+  };
+  // A new interaction cancels an old snapshot immediately. Actual moves keep
+  // native ownership through momentum; a stationary tap can still reveal chrome.
+  document.addEventListener('touchstart', event => { chromeTouches = event.touches.length; cancelChrome(); }, { passive: true, capture: true });
+  document.addEventListener('touchmove', () => { chromeDragging = true; userChromeScroll(); }, { passive: true, capture: true });
+  const releaseChromeTouch = event => {
+    chromeTouches = event.touches.length;
+    if (!chromeTouches) { if (chromeDragging) userChromeScroll(); chromeDragging = false; }
+  };
+  document.addEventListener('touchend', releaseChromeTouch, { passive: true, capture: true });
+  document.addEventListener('touchcancel', releaseChromeTouch, { passive: true, capture: true });
+  document.addEventListener('wheel', userChromeScroll, { passive: true, capture: true });
+  document.addEventListener('pointerdown', cancelChrome, true);
+  document.addEventListener('keydown', () => { cancelChrome(); userChromeScroll(); }, true);
+  const resetChrome = () => { cancelChrome(); chromeTouches = 0; chromeDragging = false; };
+  window.addEventListener('pagehide', resetChrome);
+  window.addEventListener('orientationchange', cancelChrome);
+  document.addEventListener('visibilitychange', resetChrome);
   const releaseKeyboardPosition = () => { keyboardReadingPosition = undefined; clearTimeout(settleTimer); };
   const keepKeyboardPosition = position => {
     keyboardReadingPosition = { ...position, nearBottom: position.atBottom, conversation: appState.current,
       openedAtBottom: keyboardReadingPosition?.openedAtBottom ?? position.atBottom,
       settling: keyboardReadingPosition?.settling ?? true };
+  };
+  syncReadingKeyboardFrame = active => {
+    if (active === keyboardReadingFrame) return;
+    cancelChrome();
+    // Keep the root's real page extent while the transcript leaves normal flow.
+    // No fixed/clipped app wrapper or body fixation is needed, and the root must
+    // not clamp to zero as a long conversation enters its temporary scrollport.
+    const position = active && keyboardReadingPosition || captureReadingPosition();
+    if (active) root.style.setProperty('--keyboard-page-height', `${timeline.offsetHeight}px`);
+    keyboardReadingFrame = active;
+    root.toggleAttribute('data-keyboard-reading', active);
+    if (!active) root.style.removeProperty('--keyboard-page-height');
+    const element = readingScroller();
+    // Transfer once at each keyboard boundary, preserving the visible row. This
+    // is a layout transfer, so it must also run when a dismissal interrupts a pan.
+    const target = position.atBottom ? readingScrollRange(element)
+      : position.anchor?.isConnected && position.anchorOffset !== undefined
+        ? element.scrollTop + position.anchor.getBoundingClientRect().top - readingTopEdge() - position.anchorOffset
+        : position.top;
+    setReadingScrollTop(element, target);
+    if (keyboardReadingPosition) Object.assign(keyboardReadingPosition, captureReadingPosition(), {
+      nearBottom: position.atBottom
+    });
+    previous = geometry();
+    messageRenderer.syncReadingRoot();
+    rememberReadingPosition();
   };
   const settleKeyboardPosition = () => {
     clearTimeout(settleTimer);
@@ -536,19 +602,34 @@ function observeReadingViewport() {
   };
   document.addEventListener('scroll', event => {
     if (event.target !== readingScroller() && event.target !== document) return;
+    if (chromeDragging || performance.now() < chromeScrollUntil) userChromeScroll();
+    if (chromeTransaction) settleChrome();
+    // Root focus panning is not transcript movement while its scrollport is open.
+    if (keyboardReadingFrame && event.target !== timeline) return;
     if (keyboardReadingPosition && readingGestureActive()) keepKeyboardPosition(captureReadingPosition());
     if ((!keyboardReadingPosition || readingGestureActive()) && same(geometry())) rememberReadingPosition();
   }, { passive: true, capture: true });
   const resize = () => {
     frame = undefined;
     if ($('app').hidden) return;
+    // Pinch zoom owns its own visual viewport and native panning.
+    if (mobileLayout.matches && Math.abs((window.visualViewport?.scale || 1) - 1) > .01) return;
     const current = geometry();
     if (keyboardReadingPosition && (keyboardReadingPosition.conversation !== appState.current || !mobileLayout.matches)) releaseKeyboardPosition();
-    const changed = !same(current);
+    // Toolbar height does not change document layout. The keyboard's visible
+    // height does change the native scroll range and may need bottom-follow.
+    const changed = Object.keys(current).some(key => (key !== 'height' || !mobileLayout.matches || keyboardReadingFrame) && current[key] !== previous[key]);
+    const browserChromeResize = mobileLayout.matches && current.root === previous.root &&
+      current.width === previous.width && current.height !== previous.height &&
+      !current.keyboardActive && !previous.keyboardActive && !keyboardReadingPosition;
+    if (browserChromeResize && !changed) resizeChrome();
+    else if (changed || current.root !== previous.root || current.width !== previous.width) cancelChrome();
     if (!changed && composerHeight === current.composer) {
+      previous = current;
       // Native focus panning can continue after the final resize. Let its
       // scroll events delay the one correction without changing page layout.
       if (keyboardReadingPosition?.settling) settleKeyboardPosition();
+      rememberReadingPosition();
       return;
     }
     if (mobileLayout.matches && changed && (current.keyboardActive || previous.keyboardActive) &&
@@ -560,14 +641,12 @@ function observeReadingViewport() {
     // viewport panning alone and a reader's drag must never force bottom-follow.
     const followOpening = mobileLayout.matches && keyboardReadingPosition?.nearBottom &&
       composer.contains(document.activeElement) && isEditableElement(document.activeElement) &&
-      (current.clearance > previous.clearance + .5 || current.composer > previous.composer + .5) &&
+      (current.clearance > previous.clearance + .5 || current.composer > previous.composer + .5 ||
+        keyboardReadingFrame && current.height < previous.height - .5) &&
       !readingGestureActive();
     if (current.composer !== composerHeight) {
       composerHeight = current.composer;
       root.style.setProperty('--composer-height', `${composerHeight}px`);
-    }
-    if (!current.keyboardActive && !composer.contains(document.activeElement)) {
-      root.style.setProperty('--welcome-composer-height', `${composerHeight}px`);
     }
     if (current.root !== previous.root && !mobileLayout.matches) window.scrollTo(0, 0);
     previous = current;
@@ -699,8 +778,8 @@ async function request(path, options) {
     }
   }
 }
-async function api(path, method = 'GET', value, signal, validation) {
-  const options = { method, credentials: 'same-origin', cache: 'no-store', signal };
+async function api(path, method = 'GET', value, signal, validation, { priority, retry = true } = {}) {
+  const options = { method, credentials: 'same-origin', cache: 'no-store', signal, priority };
   if (value !== undefined) { options.headers = { 'Content-Type': 'application/json' }; options.body = JSON.stringify(value); }
   if (path === 'messages' && method === 'POST' && value?.id) {
     options.headers = { ...options.headers, 'X-Zigent-Trace': value.id };
@@ -713,7 +792,7 @@ async function api(path, method = 'GET', value, signal, validation) {
     try { ({ response, result } = await request(path, options)); break; }
     catch (error) {
       // Retry only these idempotent reads, once, while their view is still active.
-      if (attempt || !conversationRead(path, method) || !error.network || signal?.aborted
+      if (attempt || !retry || !conversationRead(path, method) || !error.network || signal?.aborted
         || !appState.authenticated || document.hidden || navigator.onLine === false) throw error;
       await new Promise(resolve => setTimeout(resolve, 300));
       if (signal?.aborted) throw signal.reason;
@@ -730,11 +809,21 @@ async function api(path, method = 'GET', value, signal, validation) {
   if (method === 'GET' && validation) Object.assign(validation, { path, etag: response.headers.get('ETag'), result });
   return result;
 }
+function rememberSession() {
+  try { localStorage.setItem('zigent-known-session', '1'); } catch { /* The hint cookie still covers the next paint. */ }
+  document.cookie = `zigent_seen=1; Path=${base}; Max-Age=34560000; SameSite=Lax${location.protocol === 'https:' ? '; Secure' : ''}`;
+}
+function forgetSession() {
+  try { localStorage.removeItem('zigent-known-session'); } catch { /* Cookie expiry still drops the hint. */ }
+  document.cookie = `zigent_seen=; Path=${base}; Max-Age=0; SameSite=Lax${location.protocol === 'https:' ? '; Secure' : ''}`;
+}
 function showLogin() {
+  clearMermaidPreviews(); window.ZigentInteractiveOutput?.clearDocuments();
+  replyAnnotations.reset();
   $('startup-error').hidden = true;
   window.ZigentTelemetry?.enabled(false);
   messageRenderer.clearActivity();
-  olderRequest?.abort(); olderRequest = undefined; $('older').disabled = false;
+  cancelOlderMessages();
   cancelSpeech(); memoryVersion++;
   userMessageActions?.close(); replySelection?.close(); cancelEdit(false);
   saveComposerDraft(); draftRestored = false;
@@ -745,11 +834,12 @@ function showLogin() {
   fileWorkbench?.clear();
   window.ZigentBrowser?.close();
   appState.browserSession = undefined; appState.browserVersion++; renderBrowserEntry();
+  forgetSession();
   appState.authenticated = false; conversationSync.close(); $('app').hidden = true; $('login').hidden = false;
   historyViews.clear(); $('history').replaceChildren();
   reconnecting = false; toast('');
   closeMenu(false);
-  for (const id of ['settings-dialog', 'model-dialog', 'memory-dialog', 'schedule-dialog', 'account-dialog', 'usage-dialog', 'automation-dialog', 'recovery-dialog', 'conversation-delete-dialog']) if ($(id).open) $(id).close();
+  for (const id of ['settings-dialog', 'model-dialog', 'memory-dialog', 'schedule-dialog', 'account-dialog', 'theme-dialog', 'usage-dialog', 'automation-dialog', 'conversation-delete-dialog']) if ($(id).open) $(id).close();
   cancelModelLibraryLoad(); modelLibraryVersion++; modelLibraryCatalogue = undefined;
   $('model-library').replaceChildren(); selectedModel = ''; modelLibraryView = undefined;
   for (const article of $('messages').children) messageRenderer.disposeMessageOutputs(article);
@@ -796,11 +886,14 @@ function addReplyToConversation(text) {
   renderSend(); resizeMessage();
 }
 async function addReplyToNewConversation(text, selected, branch = false) {
+  if (selected.conversationId && selected.conversationId !== appState.current) {
+    toast('请回到批注所在会话后再添加。'); return false;
+  }
   if (forking || messageSending || speechBusy || choosingImages || editing?.submitting || modelSaving) {
     toast('请等待当前输入操作完成后再添加。'); return false;
   }
   const conversationId = appState.current, selection = appState.selectionVersion;
-  const messageId = selected.body.closest('.message')?.dataset.id;
+  const messageId = selected.messageId ?? selected.body?.closest('.message')?.dataset.id;
   const message = appState.messages.find(item => item.id === messageId && item.role === 'assistant');
   if (branch && (!message || message.snapshot && message.snapshot.status !== 'completed')) {
     toast('请等待完整回复后再创建分支。'); return false;
@@ -821,7 +914,7 @@ async function addReplyToNewConversation(text, selected, branch = false) {
     }
     // Selection clears the old quote cards synchronously. Add the captured text
     // immediately so a slow history read cannot overwrite a later composer edit.
-    const selecting = selectConversation(result.id, result.greeting);
+    const selecting = selectConversation(result.id);
     const added = addReplyToConversation(text);
     if (branch) replySelectionBranchRequest = undefined;
     await selecting;
@@ -1044,11 +1137,15 @@ function renderHistory() {
     if (!view) {
       const button = el('button'), saved = { ...conversation };
       button.dataset.conversationId = conversation.id;
-      button.onclick = event => { if (heldConversation === saved.id) { heldConversation = undefined; event?.preventDefault(); return; } void selectConversation(saved.id); };
+      button.onclick = event => {
+        if (heldConversation === saved.id) { heldConversation = undefined; event.preventDefault(); return; }
+        void selectConversation(saved.id, undefined, performance.now());
+      };
       button.addEventListener('pointerenter', event => { if (event.pointerType === 'mouse') conversationSync.prefetchConversation(saved.id); });
       button.addEventListener('focus', () => conversationSync.prefetchConversation(saved.id));
       button.addEventListener('pointerdown', event => { if (event.isPrimary && event.button === 0) conversationSync.prefetchConversation(saved.id, 0); });
-      button.addEventListener('pointerleave', () => conversationSync.cancelPrefetch(saved.id));
+      button.addEventListener('pointerleave', event => { if (event.pointerType === 'mouse') conversationSync.cancelPrefetch(saved.id); });
+      button.addEventListener('pointercancel', () => conversationSync.cancelPrefetch(saved.id));
       button.addEventListener('blur', () => conversationSync.cancelPrefetch(saved.id));
       bindHistoryDeletion(button, saved);
       view = { button, conversation: saved }; historyViews.set(conversation.id, view);
@@ -1128,10 +1225,12 @@ $('conversation-delete-submit').onclick = async () => {
 function closeMenu(restore = true) {
   cancelHistoryHold();
   const wasOpen = $('sidebar').classList.contains('open');
+  if (wasOpen) conversationSync.cancelPrefetch();
   $('sidebar').classList.remove('open'); $('scrim').hidden = true; syncSidebar();
   if (wasOpen && restore) drawerReturnFocus?.focus({ preventScroll: true });
 }
 function openMenu() {
+  conversationSync.prefetchRecentConversation();
   if (!mobileLayout.matches) { setSidebarCollapsed(false); $('close-sidebar').focus({ preventScroll: true }); return; }
   drawerReturnFocus = $('menu');
   $('sidebar').classList.add('open'); $('scrim').hidden = false; syncSidebar();
@@ -1143,7 +1242,7 @@ function openPanel(id, trigger) {
   const panel = $(id); panelReturnFocus.set(panel, trigger || document.activeElement); panel.showModal();
 }
 function closePanel(id) { $(id).close(); }
-for (const id of ['settings-dialog', 'model-dialog', 'memory-dialog', 'schedule-dialog', 'account-dialog', 'usage-dialog', 'automation-dialog', 'recovery-dialog', 'conversation-delete-dialog']) {
+for (const id of ['settings-dialog', 'model-dialog', 'memory-dialog', 'schedule-dialog', 'account-dialog', 'theme-dialog', 'usage-dialog', 'automation-dialog', 'conversation-delete-dialog']) {
   const panel = $(id);
   panel.addEventListener('click', event => { if (event.target === panel && !(id === 'conversation-delete-dialog' && deletingConversation)) panel.close(); });
   panel.addEventListener('close', () => {
@@ -1168,21 +1267,20 @@ document.addEventListener('keydown', event => {
 async function enter() {
   const started = window.ZigentStartup?.started ?? performance.now();
   const bootstrap = await api('bootstrap'), { me } = bootstrap;
+  rememberSession();
   // Keep only this navigation's initial milestones; later login/reconnects are not page startup.
   const initial = !performance.getEntriesByName('zigent:bootstrap-ready').length;
   if (initial) performance.mark('zigent:bootstrap-ready');
   agentName = me.name; defaultModel = me.defaultModel || ''; selectedModel = defaultModel;
   modelLibraryCatalogue = bootstrap.modelLibrary;
   window.ZigentTriggerContext?.capabilities(me.triggerCapabilities);
-  appState.homeGreeting = me.greeting || ''; appState.conversationGreeting = '';
   $('open-schedule').hidden = !me.schedule;
   $('open-memory').hidden = !me.memory;
   $('open-files').hidden = !me.workbench;
-  $('open-recovery').hidden = me.recovery === false;
   speechConfigured = Boolean(me.speech); renderSpeech();
   window.ZigentTelemetry?.enabled(true);
   appState.authenticated = true; $('login').hidden = true; $('app').hidden = false;
-  renderModel(); $('message').placeholder = `和 ${agentName} 聊聊`;
+  renderModel();
   $('password').value = ''; $('login-error').textContent = '';
   if (initial) performance.mark('zigent:initial-render-start');
   await conversationSync.bootstrap(bootstrap, started);
@@ -1207,7 +1305,11 @@ async function enter() {
   draftRestored = true; draftSignature = ''; renderReplyQuotes(); renderUploads(); resizeMessage(); imageUploads.resume();
   connectEvents();
 }
-async function newChat() { try { const result = await api('conversations', 'POST', {}); await selectConversation(result.id, result.greeting); $('message').focus(); } catch (error) { toast(error); } }
+function newChat() {
+  if (!appState.authenticated) return;
+  conversationSync.startConversation();
+  $('message').focus({ preventScroll: true });
+}
 $('login-form').onsubmit = async event => {
   event.preventDefault(); const button = event.submitter; button.disabled = true; $('login-error').textContent = '';
   try { await api('login', 'POST', { password: $('password').value }); await start(); } catch (error) { $('login-error').textContent = error.message; } finally { button.disabled = false; }
@@ -1215,6 +1317,7 @@ $('login-form').onsubmit = async event => {
 $('show-password').onclick = () => { const show = $('password').type === 'password'; $('password').type = show ? 'text' : 'password'; $('show-password').textContent = show ? '隐藏' : '显示'; $('show-password').setAttribute('aria-label', show ? '隐藏密码' : '显示密码'); };
 $('new-mobile').onclick = newChat;
 $('branch-origin').onclick = async () => { if (appState.branchOrigin) await selectConversation(appState.branchOrigin.conversationId); };
+$('messages-retry').onclick = () => { void conversationSync.retryMessages(); };
 $('menu').onclick = openMenu; $('scrim').onclick = () => closeMenu(); $('close-sidebar').onclick = () => { if (mobileLayout.matches) closeMenu(); else { setSidebarCollapsed(true); $('menu').focus({ preventScroll: true }); } };
 $('history-search').oninput = () => conversationSync.searchHistory($('history-search').value);
 $('history-more').onclick = () => conversationSync.loadMoreHistory();
@@ -1251,39 +1354,62 @@ function rememberModelLibrary(interaction) {
   }) };
 }
 function showModelLibrary(interaction, target, recoveryRequestId) {
-  let selection = appState.selectionVersion;
-  const current = () => appState.authenticated && appState.current === target && appState.selectionVersion === selection;
+  const selection = appState.selectionVersion;
+  const current = () => appState.authenticated && (!target || appState.current === target) && appState.selectionVersion === selection;
   $('model-library-status').textContent = interaction.actions.length ? '' : '暂无可用模型，请稍后重新加载。';
   $('retry-models').hidden = interaction.actions.length > 0;
   const choose = async action => {
     if (!current()) throw new Error('当前对话已变化，请重新打开模型库。');
     if (modelSaving) throw new Error('正在保存模型，请稍后重试。');
     cancelModelLibraryLoad();
-    modelSaving = true; renderModel(); $('send').disabled = true;
+    modelSaving = true; $('send').disabled = true;
+    const reasoningEffort = action.value.reasoningEffort;
+    const optimistic = !recoveryRequestId && reasoningEffort === undefined;
+    const save = conversationId => api('models', 'POST', { conversationId, actionId: action.id,
+      compact: true, fallbackRequestId: recoveryRequestId, reasoningEffort });
+    const markSelected = model => { for (const entry of interaction.actions) entry.selected = entry.id === model; };
     try {
-      // Opening the catalogue never creates or loads a conversation. Defer that work until selection.
+      if (optimistic) {
+        pendingModelChoice = { selection, model: action.id };
+        selectedModel = action.id;
+        markSelected(action.id);
+      }
+      renderModel();
+      if (optimistic || recoveryRequestId) renderInteraction(interaction, undefined, view, choose);
+      let saved;
       if (!target) {
-        const created = await api('conversations', 'POST', {});
-        if (!current()) throw new Error('当前对话已变化，请重新打开模型库。');
-        target = created.id;
-        const selecting = selectConversation(target, created.greeting);
-        selection = appState.selectionVersion;
-        await selecting;
+        target = await conversationSync.ensureConversation(optimistic ? async () => {
+          saved = await save();
+          return { id: saved.conversationId };
+        } : undefined);
       }
       if (!current()) throw new Error('当前对话已变化，请重新打开模型库。');
-      const saved = await api('models', 'POST', { conversationId: target, actionId: action.id,
-        ...(recoveryRequestId ? { fallbackRequestId: recoveryRequestId } : {}),
-        ...(action.value.reasoningEffort !== undefined ? { reasoningEffort: action.value.reasoningEffort } : {}) });
+      saved ??= await save(target);
+      pendingModelChoice = undefined;
       if (current()) {
-        appState.selectedModel = selectedModel = saved.selectedModel; renderModel();
-        rememberModelLibrary(saved.interaction);
-        Object.assign(interaction, saved.interaction);
+        conversationSync.setConversationModel(target, saved.selectedModel);
+        markSelected(saved.selectedModel);
+        const entry = interaction.actions.find(entry => entry.id === saved.selectedModel);
+        const cached = modelLibraryCatalogue?.actions.find(entry => entry.id === saved.selectedModel);
+        if (entry && saved.reasoning) entry.reasoning = saved.reasoning;
+        if (cached && saved.reasoning && !recoveryRequestId) cached.reasoning = saved.reasoning;
         if (recoveryRequestId) { closePanel('model-dialog'); await refresh(); }
       }
-    } finally { modelSaving = false; renderModel(); renderSend(); }
+    } catch (error) {
+      pendingModelChoice = undefined;
+      if (optimistic && current()) {
+        selectedModel = appState.selectedModel || defaultModel;
+        markSelected(selectedModel);
+      }
+      throw error;
+    } finally {
+      modelSaving = false; renderModel(); renderSend();
+      if (view !== modelLibraryView && current() && $('model-dialog').open && !modelRecoveryRequestId) void loadModelLibrary();
+    }
   };
-  modelLibraryView = renderInteraction(interaction, undefined, undefined, choose);
-  $('model-library').replaceChildren(modelLibraryView.node);
+  const view = modelLibraryView = renderInteraction(interaction, undefined, modelLibraryView?.submitting ? undefined : modelLibraryView, choose);
+  view.feedback.textContent = ''; view.feedback.hidden = true;
+  if (view.node.parentNode !== $('model-library')) $('model-library').replaceChildren(view.node);
 }
 async function loadModelLibrary(recoveryRequestId, reload = false) {
   cancelModelLibraryLoad();
@@ -1291,11 +1417,8 @@ async function loadModelLibrary(recoveryRequestId, reload = false) {
   const version = ++modelLibraryVersion;
   const target = appState.current, selection = appState.selectionVersion;
   if (modelLibraryCatalogue) {
-    const interaction = structuredClone(modelLibraryCatalogue);
-    for (const action of interaction.actions) {
-      action.selected = action.id === (selectedModel || defaultModel);
-      if (recoveryRequestId) action.disabled = true;
-    }
+    const interaction = { ...modelLibraryCatalogue, actions: modelLibraryCatalogue.actions.map(action => ({ ...action,
+      selected: action.id === (selectedModel || defaultModel), disabled: Boolean(recoveryRequestId) })) };
     showModelLibrary(interaction, target, recoveryRequestId);
     if (!recoveryRequestId && !reload) return;
   } else { $('model-library').replaceChildren(); modelLibraryView = undefined; }
@@ -1307,8 +1430,9 @@ async function loadModelLibrary(recoveryRequestId, reload = false) {
     if (recoveryRequestId) query.set('fallbackRequestId', recoveryRequestId);
     const result = await api(`models${query.toString() ? `?${query}` : ''}`, 'GET', undefined, controller.signal);
     if (controller.signal.aborted || version !== modelLibraryVersion || selection !== appState.selectionVersion || !appState.authenticated) return;
-    rememberModelLibrary(result.interaction);
-    appState.selectedModel = selectedModel = result.selectedModel; renderModel();
+    if (!recoveryRequestId) rememberModelLibrary(result.interaction);
+    if (target) conversationSync.setConversationModel(target, result.selectedModel);
+    else if (!appState.current) { appState.selectedModel = selectedModel = result.selectedModel; renderModel(); }
     showModelLibrary(result.interaction, target, recoveryRequestId);
   } catch (error) {
     if (controller.signal.aborted || version !== modelLibraryVersion || selection !== appState.selectionVersion || !appState.authenticated) return;
@@ -1337,9 +1461,8 @@ function syncComposer() {
   resizeMessage();
 }
 let lastModelWarmupKey = '', lastModelWarmupAt = -Infinity;
-function warmSelectedModel() {
+function warmSelectedModel(conversationId = appState.current || undefined) {
   if (!appState.authenticated || document.hidden || navigator.onLine === false || !(selectedModel || defaultModel)) return;
-  const conversationId = appState.current || undefined;
   const key = `${conversationId || ''}\0${selectedModel || defaultModel}`, now = performance.now();
   if (key === lastModelWarmupKey && now - lastModelWarmupAt < 30000) return;
   lastModelWarmupKey = key; lastModelWarmupAt = now;
@@ -1362,7 +1485,13 @@ $('message').addEventListener('compositionend', () => {
   speechDraft?.edit($('message').value);
   if (speechPending !== undefined) { const text = speechPending; speechPending = undefined; applySpeechText(text); }
 });
-$('message').oninput = () => { speechDraft?.edit($('message').value); appState.draftId = undefined; warmSelectedModel(); renderSend(); resizeMessage(); };
+$('message').oninput = () => {
+  speechDraft?.edit($('message').value); appState.draftId = undefined;
+  warmSelectedModel(); renderSend(); resizeMessage();
+  // Keep first-send preparation while leaving an untouched draft free to create
+  // its address and save the initial model in the same request.
+  if (appState.localDraft && !appState.current && $('message').value.trim()) conversationSync.prepareConversation();
+};
 $('message').addEventListener('keydown', event => {
   if (event.key === 'Escape' && editing && !editing.submitting) { event.preventDefault(); cancelEdit(); }
 });
@@ -1489,9 +1618,7 @@ function renderUploads() {
   $('add-attachment').setAttribute('aria-busy', String(choosingImages));
   renderSend();
 }
-$('upload').onchange = () => {
-  const files = [...$('upload').files]; $('upload').value = '';
-  choosingImages = false;
+function addAttachments(files) {
   if (messageSending || editing?.submitting) { renderUploads(); return; }
   toast('');
   for (const file of files) {
@@ -1506,7 +1633,26 @@ $('upload').onchange = () => {
     uploads.push(imageUploads.add(file));
   }
   appState.draftId = undefined; renderUploads();
+}
+$('upload').onchange = () => {
+  const files = [...$('upload').files]; $('upload').value = '';
+  choosingImages = false;
+  addAttachments(files);
 };
+$('message').addEventListener('paste', event => {
+  const clipboard = event.clipboardData;
+  if (!clipboard) return;
+  let images = [...clipboard.files].filter(file => /^image\//.test(file.type));
+  // Some browsers expose clipboard images only as items. Do not add both
+  // representations of the same screenshot.
+  if (!images.length) images = [...clipboard.items]
+    .filter(item => item.kind === 'file' && /^image\//.test(item.type))
+    .map(item => item.getAsFile()).filter(Boolean);
+  if (!images.length) return;
+  // Leave accompanying text to the textarea's native paste behavior.
+  if (!clipboard.getData('text/plain')) event.preventDefault();
+  addAttachments(images);
+});
 $('composer').onsubmit = async event => {
   event.preventDefault();
   const submittedAt = performance.now();
@@ -1514,30 +1660,30 @@ $('composer').onsubmit = async event => {
   if (messageSending || forking || editing?.submitting || modelSaving) return;
   if (choosingImages || editing && uploads.some(id => !imageUploads.isReady(id))) return;
   if (speechBusy) {
-    const selected = appState.current;
+    const selection = appState.selectionVersion;
     speechSubmitting = true; renderSpeech(); renderSend();
     let completed;
     try { completed = await speechInput.finish(); }
     finally { speechSubmitting = false; renderSpeech(); renderSend(); }
-    if (!completed || appState.current !== selected) return;
+    if (!completed || appState.selectionVersion !== selection) return;
   }
   const text = composeMessageText($('message').value.trim()); if (!text && !uploads.length) return;
   if (text.length > $('message').maxLength) { toast('引用与草稿超过输入长度，请缩短后重试。'); return; }
   if (messageSending || forking || editing?.submitting || modelSaving) return;
   if (choosingImages || editing && uploads.some(id => !imageUploads.isReady(id))) return;
   if (editing) { toast(''); await submitEdit(text, submittedAt); return; }
+  const selection = appState.selectionVersion;
   const wasBusy = appState.busy, rawDraft = $('message').value, sentAssets = [...uploads], sentQuotes = [...replyQuotes];
   toast(''); messageSending = true; $('send').disabled = true;
   try {
     if (!appState.current && text.toLowerCase() === '/new') {
-      const result = await api('conversations', 'POST', {});
       $('message').value = ''; uploads = []; appState.draftId = undefined; renderUploads();
-      await selectConversation(result.id); return;
+      newChat(); return;
     }
-    if (!appState.current) { appState.current = (await api('conversations', 'POST', {})).id; }
+    const selected = await conversationSync.ensureConversation();
+    if (selection !== appState.selectionVersion) return;
     appState.draftId ||= crypto.randomUUID();
     saveComposerDraft();
-    const selected = appState.current;
     window.ZigentTelemetry?.beginReply(appState.draftId, selected, appState.current, submittedAt);
     if (sentAssets.some(id => id.startsWith('upload:')) || messageOutbox.has(selected) && text.toLowerCase() !== '/new') {
       let queued;
@@ -1557,7 +1703,9 @@ $('composer').onsubmit = async event => {
     if (appState.current === selected && result.conversationId && result.conversationId !== selected) await selectConversation(result.conversationId);
     else await refresh();
     renderMessages(true);
-  } catch (error) { appState.busy = wasBusy; toast(error); void refresh(); }
+  } catch (error) {
+    if (selection === appState.selectionVersion) { appState.busy = wasBusy; toast(error); void refresh(); }
+  }
   finally { messageSending = false; renderSend(); }
 };
 async function loadMessageActivity(message, signal) {
@@ -1569,24 +1717,61 @@ async function loadMessageActivity(message, signal) {
   }
   return result;
 }
-$('older').onclick = async () => {
-  if (!appState.current || !appState.messages.length) return;
+const olderPageSize = 20;
+function finishOlderMessages(request) {
+  if (olderRequest !== request) return;
+  clearTimeout(request.timer);
+  olderRequest = undefined;
+  $('older').disabled = false;
+  $('older').textContent = '查看更早的消息';
+}
+function cancelOlderMessages() {
+  if (olderRequest) {
+    olderRequest.controller.abort();
+    finishOlderMessages(olderRequest);
+  } else $('older').textContent = '查看更早的消息';
+}
+async function loadOlderMessages(limit = olderPageSize, background = false) {
+  if (olderRequest || !appState.authenticated || !appState.current || !appState.hasOlder || !appState.messages.length
+    || document.hidden || navigator.onLine === false) return;
   const selected = appState.current, selection = appState.selectionVersion, first = appState.messages[0].seq, revision = appState.conversationRevision;
-  if ($('older').disabled) return;
-  $('older').disabled = true;
-  const request = olderRequest = new AbortController();
+  const controller = new AbortController(), request = olderRequest = { controller };
+  const valid = () => olderRequest === request && !controller.signal.aborted && selection === appState.selectionVersion;
+  const failed = error => {
+    if (!background && valid() && error.name !== 'AbortError') toast(error);
+    finishOlderMessages(request);
+  };
+  $('older').disabled = true; $('older').textContent = '正在加载…';
   try {
-    const result = await api(`messages?conversationId=${selected}&before=${first}&compact=1`, 'GET', undefined, request.signal);
-    if (selected !== appState.current || selection !== appState.selectionVersion) return;
-    if (result.revision !== revision || appState.conversationRevision !== revision) { await refresh(); return; }
-    const position = captureReadingPosition();
-    appState.hasOlder = result.hasOlder;
-    Object.assign(appState.assetDimensions, result.assetDimensions);
-    appState.messages = [...new Map([...result.messages, ...appState.messages].map(message => [message.id, message])).values()].sort((a, b) => a.seq - b.seq); renderMessages();
-    restoreReadingPosition(position, true); rememberReadingPosition();
-  } catch (error) { if (error.name !== 'AbortError' && selection === appState.selectionVersion) toast(error); }
-  finally { if (olderRequest === request) { olderRequest = undefined; $('older').disabled = false; } }
-};
+    const params = new URLSearchParams({ conversationId: selected, before: first, limit, compact: '1' });
+    const result = await api(`messages?${params}`, 'GET', undefined, controller.signal, undefined, { priority: background ? 'low' : undefined });
+    if (!valid()) { finishOlderMessages(request); return; }
+    request.insert = () => {
+      clearTimeout(request.timer);
+      if (!valid()) { finishOlderMessages(request); return; }
+      // Preserve the current reading position when a page arrives mid-scroll.
+      if (readingTouch) return;
+      if (readingGestureActive()) {
+        request.timer = setTimeout(request.insert, Math.max(1, readingMotionUntil - performance.now() + 1));
+        return;
+      }
+      try {
+        if (result.revision !== revision || appState.conversationRevision !== revision) { void refresh(); return; }
+        if (appState.messages[0]?.seq !== first) return;
+        const position = captureReadingPosition();
+        appState.hasOlder = result.hasOlder;
+        Object.assign(appState.assetDimensions, result.assetDimensions);
+        appState.messages = [...new Map([...result.messages, ...appState.messages].map(message => [message.id, message])).values()]
+          .sort((a, b) => a.seq - b.seq);
+        renderMessages();
+        restoreReadingPosition(position, true, background); rememberReadingPosition();
+      } catch (error) { failed(error); }
+      finally { finishOlderMessages(request); }
+    };
+    request.insert();
+  } catch (error) { failed(error); }
+}
+$('older').onclick = () => { void loadOlderMessages(); };
 $('settings').onclick = () => {
   closeMenu(false); $('account-error').hidden = true;
   openPanel('account-dialog', mobileLayout.matches ? $('menu') : $('settings'));
@@ -1597,6 +1782,11 @@ function openAccountPanel(id) {
   closePanel('account-dialog'); openPanel(id, trigger);
 }
 $('open-password').onclick = () => openAccountPanel('settings-dialog');
+$('open-theme').onclick = () => openAccountPanel('theme-dialog');
+$('close-theme').onclick = () => {
+  const trigger = panelReturnFocus.get($('theme-dialog'));
+  closePanel('theme-dialog'); openPanel('account-dialog', trigger);
+};
 $('open-usage').onclick = () => void openLazyPanel('usage', 'ZigentUsage');
 async function openBrowserWorkspace(options) {
   const selection = appState.selectionVersion;
@@ -1625,7 +1815,6 @@ document.addEventListener('zigent:open-schedule', event => {
   if (typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day)) void openSchedule({ day, trigger: event.detail.trigger });
 });
 $('open-automation').onclick = () => void openLazyPanel('automation', 'ZigentAutomation');
-$('open-recovery').onclick = () => void openLazyPanel('recovery', 'ZigentRecovery');
 $('open-memory').onclick = () => { openAccountPanel('memory-dialog'); void loadMemoryDocuments(); };
 $('open-files').onclick = async () => {
   closePanel('account-dialog');
@@ -1689,7 +1878,7 @@ const automationOptions = { api, close: closePanel,
       if (run.attempts.length > 1) children.push(el('h4', '', `第 ${attempt.attempt} 次执行`));
       const id = `task:${run.id}:${attempt.attempt}`;
       const existing = [...content.querySelectorAll('.activity')].find(item => item.dataset.messageId === id);
-      const process = activity(attempt.snapshot, id, existing, []);
+      const process = activity(attempt.snapshot, id, existing);
       children.push(process);
     }
     if (!run.attempts?.length) children.push(el('p', 'automation-empty', run.state === 'pending' ? '等待执行' : '此记录没有工作过程'));
@@ -1697,10 +1886,7 @@ const automationOptions = { api, close: closePanel,
     if (run.message) { const answer = markdown(run.message); answer.classList.add('message-text', 'automation-first-message'); children.push(answer); }
     syncChildren(content, children); return content;
   },
-  conversation: async () => {
-    if (!appState.current) await selectConversation((await api('conversations', 'POST', {})).id);
-    return appState.current;
-  },
+  conversation: () => conversationSync.ensureConversation(),
   navigate: async result => {
     if (appState.current !== result.conversationId) await selectConversation(result.conversationId); else await refresh();
     renderMessages(true);
@@ -1738,7 +1924,6 @@ async function openLazyPanel(name, global) {
   const status = $(`${name}-status`);
   status.textContent = '正在加载…';
   if (name === 'usage') $('usage-content').hidden = true;
-  if (name === 'recovery') { $('recovery-login').hidden = true; $('recovery-content').hidden = true; }
   try {
     await loadFeature(name, async () => {
       await Promise.all([loadStyle(`./${name}.css`), ...(name === 'automation' ? [loadScript('./automation-triggers.js')] : [])]);
@@ -1768,15 +1953,18 @@ $('logout').onclick = async () => {
 };
 window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); installPrompt = event; $('install').hidden = false; });
 $('install').onclick = async () => { if (installPrompt) { await installPrompt.prompt(); installPrompt = undefined; $('install').hidden = true; } };
-window.addEventListener('offline', () => conversationSync.suspend());
+window.addEventListener('offline', () => { cancelOlderMessages(); conversationSync.suspend(); });
 window.addEventListener('online', () => conversationSync.resume(true));
-document.addEventListener('visibilitychange', () => { if (document.hidden) conversationSync.suspend(); else conversationSync.resume(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { cancelOlderMessages(); conversationSync.suspend(); }
+  else { conversationSync.resume(); warmSelectedModel(); }
+});
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveComposerDraft(); });
 window.addEventListener('pagehide', saveComposerDraft);
 window.addEventListener('focus', () => conversationSync.resume());
-document.addEventListener('freeze', () => conversationSync.suspend());
+document.addEventListener('freeze', () => { cancelOlderMessages(); conversationSync.suspend(); });
 document.addEventListener('resume', () => conversationSync.resume(true));
-window.addEventListener('pagehide', () => conversationSync.suspend());
+window.addEventListener('pagehide', () => { cancelOlderMessages(); conversationSync.suspend(); });
 window.addEventListener('pageshow', event => { if (event.persisted) conversationSync.resume(true); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register(`${base}sw.js`, { scope: base }).catch(() => {});
 if (window.ZigentMessageActions) userMessageActions = new window.ZigentMessageActions({
@@ -1790,6 +1978,7 @@ if (window.ZigentMessageActions) userMessageActions = new window.ZigentMessageAc
 });
 if (window.ZigentReplySelection) replySelection = new window.ZigentReplySelection({
   readingScroller, readingTopEdge, createButton: messageButton,
+  onAnnotate: replyAnnotations.annotate,
   onAdd: addReplyToConversation,
   onNew: (text, selected) => addReplyToNewConversation(text, selected),
   onBranch: (text, selected) => addReplyToNewConversation(text, selected, true),
@@ -1812,6 +2001,7 @@ $('startup-retry').onclick = async () => {
   $('startup-retry').disabled = true;
   try { await start(); } finally { $('startup-retry').disabled = false; }
 };
+window.ZigentAppReady = true;
 void start();
 
 // All document surfaces share one immutable-version reader; opening never sends a chat message.

@@ -11,7 +11,7 @@ export function savedReasoningEffort(route: ModelDeployment, saved: string | und
 }
 
 /** Resolve against the actual route, never reuse another supplier's effort enum. */
-export function effectiveReasoningEffort(route: ModelDeployment, request: ModelRoundRequest): ReasoningEffort {
+export function effectiveReasoningEffort(route: ModelDeployment, request: Pick<ModelRoundRequest, "reasoningEffort" | "reasoningEfforts">): ReasoningEffort {
   const saved = savedReasoningEffort(route, request.reasoningEfforts?.[route.name]);
   if (saved) return saved;
   if (request.reasoningEffort === "maximum") {

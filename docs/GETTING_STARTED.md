@@ -48,7 +48,7 @@ npm run build
 npm run start:prod -- assistant
 ```
 
-以上命令对两种终端相同。`assistant` 是配置中的 Agent ID，必须与启动参数一致。开发时可用 `npm run dev -- assistant`；停止前台服务使用 Ctrl+C。
+以上命令对两种终端相同。`assistant` 是配置中的 Agent ID，必须与启动参数一致。首次编译后可用 `npm run dev -- assistant`；停止前台服务使用 Ctrl+C。
 
 后端仅监听 `127.0.0.1:8790`。可在另一终端执行 `curl http://127.0.0.1:8790/healthz`，Windows PowerShell 可用 `Invoke-RestMethod http://127.0.0.1:8790/healthz`。健康接口成功只代表服务已启动，不代表模型账号已验证。
 

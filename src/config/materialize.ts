@@ -1,5 +1,6 @@
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { DEFAULT_IMAGE_GENERATION_TIMEOUT_MS } from "../image-generation-policy.js";
+import { DEFAULT_IMAGE_GENERATION_RETRY_ATTEMPTS, DEFAULT_IMAGE_GENERATION_TIMEOUT_MS } from "../image-generation-policy.js";
 import { loadNotificationConfig } from "../notifications/config.js";
 import { loadProductivityConfig } from "../productivity/config.js";
 import { mcpOAuthAccount } from "../mcp/account.js";
@@ -60,12 +61,21 @@ function readModelSuppliers(
         args: supplier.args.length > 0 ? supplier.args : ["app-server"]
       }]];
     }
+    if (supplier.transport === "antigravity-acp") {
+      return [[id, { id, transport: supplier.transport, endpoints: {}, network: supplier.network,
+        cost: supplier.cost, command: supplier.command, antigravityProxyUrl: supplier.antigravityProxyUrl,
+        antigravityDataDir: supplier.antigravityDataDir ?? resolve(homedir(), ".zigent", "antigravity") }]];
+    }
     const apiKeyNames = (Array.isArray(supplier.apiKeyEnv) ? supplier.apiKeyEnv : [supplier.apiKeyEnv!])
       .map((name) => name.replace("{ENV_PREFIX}", profile.envPrefix));
     const apiKey = apiKeyNames.map((name) => optionalEnv(environment, name)).find(Boolean)
       ?? (id === "zenmux" ? reusableZenmuxApiKey(environment, profile.envPrefix) : undefined);
     if (!apiKey && supplier.optional) return [];
     if (!apiKey) throw new Error(`Missing required configuration: one of ${apiKeyNames.join(", ")}`);
+    if (supplier.transport === "cursor-acp") {
+      return [[id, { id, transport: supplier.transport, apiKey, endpoints: {}, network: supplier.network,
+        cost: supplier.cost, command: supplier.command }]];
+    }
     return [[id, {
       id,
       transport: "http",
@@ -90,6 +100,25 @@ function readModelDeployments(
   const deployments = profile.models.flatMap((model): ModelDeployment[] => {
     const supplier = suppliers?.[model.supplier];
     if (profile.suppliers && !supplier) return [];
+    if (model.protocol === "cursor-acp") {
+      if (supplier?.transport !== "cursor-acp" || !supplier.apiKey || !supplier.command) {
+        throw new Error(`Missing Cursor ACP supplier for ${profile.id}.${model.supplier}`);
+      }
+      return [{ name: model.name, brand: model.brand, supplier: model.supplier, apiModel: model.apiModel,
+        apiKey: supplier.apiKey, protocol: model.protocol, network: supplier.network, cost: supplier.cost,
+        command: supplier.command, reasoningEffort: model.reasoningEffort, reasoning: model.reasoning,
+        context: model.context, capabilities: model.capabilities }];
+    }
+    if (model.protocol === "antigravity-acp") {
+      if (supplier?.transport !== model.protocol || !supplier.command || !supplier.antigravityDataDir) {
+        throw new Error(`Missing Antigravity ACP supplier for ${profile.id}.${model.supplier}`);
+      }
+      return [{ name: model.name, brand: model.brand, supplier: model.supplier, apiModel: model.apiModel,
+        protocol: model.protocol, network: supplier.network, cost: supplier.cost, command: supplier.command,
+        antigravityDataDir: supplier.antigravityDataDir, antigravityProxyUrl: supplier.antigravityProxyUrl,
+        reasoningEffort: model.reasoningEffort,
+        reasoning: model.reasoning, context: model.context, capabilities: model.capabilities }];
+    }
     if (model.protocol === "codex-app-server" || model.protocol === "claude-code") {
       if (supplier?.transport !== model.protocol) {
         throw new Error(`Missing ${model.protocol} supplier for ${profile.id}.${model.supplier}`);
@@ -163,6 +192,10 @@ export function materializeProfile(
   const ownerUserId = optionalEnv(environment, `${prefix}_WEB_OWNER_USER_ID`)
     ?? (profile.id === "deepmind" ? optionalEnv(environment, "HEALTH_OWNER_USER_ID") : undefined)
     ?? `web:${profile.id}:owner`;
+  const healthAccount = integrations.health?.additionalAccounts.find(account => account.agentId === profile.id);
+  const ownerPrincipalId = optionalEnv(environment, `${prefix}_WEB_OWNER_PRINCIPAL_ID`)
+    ?? (profile.id === "deepmind" ? optionalEnv(environment, "HEALTH_OWNER_PRINCIPAL_ID") : undefined)
+    ?? optionalEnv(environment, `${prefix}_WEB_OWNER_USER_ID`) ?? `web:${profile.id}:owner`;
   const accountFor = (service: "notion" | "xmind") => mcpOAuthAccount(service, dirname(resolve(profile.storage.sqlite)), profile.id, ownerUserId);
   const imageApiKey = reusableZenmuxApiKey(environment, prefix);
   const modelRuntime = { ...runtime, ...profile.modelRuntime };
@@ -197,7 +230,7 @@ export function materializeProfile(
       }
     }
   }
-  if (models?.some((model) => model.network === "proxy") && !resolvedZenmuxProxyUrl) {
+  if (models?.some((model) => model.network === "proxy" && !model.antigravityProxyUrl) && !resolvedZenmuxProxyUrl) {
     throw new Error(`Agent ${profile.id} has a proxy model route but no zenmuxProxyUrl is configured`);
   }
   const selectedImageDefinition = profile.imageModel && catalog
@@ -250,6 +283,7 @@ export function materializeProfile(
     : undefined;
   return {
     id: profile.id,
+    projectMcpCredentialFile: integrations.projectMcp?.agents.includes(profile.id) ? resolve(integrations.projectMcp.credentialFile) : undefined,
     name: profile.name,
     modelOrder,
     suppliers,
@@ -259,8 +293,11 @@ export function materializeProfile(
     fileWorkbench: profile.fileWorkbench ? {
       enabled: profile.fileWorkbench.enabled,
       stateDirectory: resolve(profile.fileWorkbench.stateDirectory),
+      nativeStateDirectory: profile.fileWorkbench.nativeStateDirectory ? resolve(profile.fileWorkbench.nativeStateDirectory) : undefined,
       executionEndpoint: profile.fileWorkbench.executionEndpoint,
       executionPreviousEndpoint:profile.fileWorkbench.executionPreviousEndpoint,
+      gitTransport: profile.fileWorkbench.gitTransport,
+      gitProxyUrl: profile.fileWorkbench.gitProxyUrl,
       executionTokenFile: profile.fileWorkbench.executionTokenFile ? resolve(profile.fileWorkbench.executionTokenFile) : undefined,
       executionToken: profile.fileWorkbench.executionTokenEnv ? optionalEnv(environment, profile.fileWorkbench.executionTokenEnv) : undefined
     } : undefined,
@@ -273,7 +310,7 @@ export function materializeProfile(
         integrations.productivity && optionalEnv(environment, "XMIND_AUTH_BRIDGE_SECRET") ? {
           bridgeUrl: integrations.productivity.authorizationBridgeUrl,
           bridgeSecret: optionalEnv(environment, "XMIND_AUTH_BRIDGE_SECRET")!, timeoutMs: integrations.productivity.authorizationTimeoutMs
-        } : undefined, integrations.productivity?.todoist))
+        } : undefined, integrations.productivity?.todoist, profile.channel === "web" ? ownerUserId : undefined))
         .filter(([name]) => profile.allowedTools.includes(name))),
       ...(profile.allowedTools.includes("notion") ? {
         notion: {
@@ -294,6 +331,7 @@ export function materializeProfile(
     zenmuxProxyUrl: resolvedZenmuxProxyUrl
       ? validUrl(resolvedZenmuxProxyUrl, modelRuntime.zenmuxProxyUrl ? `${profile.id}.modelRuntime.zenmuxProxyUrl` : "ZENMUX_PROXY_URL")
       : undefined,
+    modelProxyFallbackUrls: runtime.modelProxyFallbackUrls,
     imageGeneration: imageSupplier ? {
       transport: imageSupplier.transport === "codex-app-server" ? "codex-app-server" : "http",
       driver: imageDriver ? { ...imageDriver,
@@ -371,6 +409,9 @@ export function materializeProfile(
       ...(optionalEnv(environment, "HEALTH_OWNER_PRINCIPAL_ID") ? { ownerPrincipalId: optionalEnv(environment, "HEALTH_OWNER_PRINCIPAL_ID") } : {}),
       ...(integrations.health.initialSkillPath ? { initialSkillPath: resolve(integrations.health.initialSkillPath) } : {}),
       ...(integrations.health.publicUrl ? { publicUrl: integrations.health.publicUrl } : {})
+    } : healthAccount && profile.channel === "web" ? {
+      storagePath: resolve(healthAccount.storage), allowedAgentId: profile.id, ownerUserId, ownerPrincipalId,
+      ...(healthAccount.initialSkillPath ? { initialSkillPath: resolve(healthAccount.initialSkillPath) } : {})
     } : undefined,
     location: integrations.location?.agents.includes(profile.id) ? {
       storagePath: resolve(integrations.location.storage),
@@ -390,11 +431,16 @@ export function materializeProfile(
           accessKeySecret: requiredEnv(environment, profile.web.transcription.tos.secretKeyEnv),
           endpoint: profile.web.transcription.tos.endpoint, region: profile.web.transcription.tos.region, bucket: profile.web.transcription.tos.bucket }
       } : undefined,
+      meeting: profile.web.meeting && optionalEnv(environment, profile.web.meeting.apiKeyEnv)
+        ? { model: profile.web.meeting.model, apiKey: requiredEnv(environment, profile.web.meeting.apiKeyEnv),
+          rtc: profile.web.meeting.rtc ? {...profile.web.meeting.rtc,
+            apiKey:profile.web.meeting.rtc.enabled?requiredEnv(environment,profile.web.meeting.rtc.apiKeyEnv):'',
+            secret:profile.web.meeting.rtc.enabled?requiredEnv(environment,profile.web.meeting.rtc.secretEnv):''} : undefined } : undefined,
       speech: profile.web.speech && optionalEnv(environment, profile.web.speech.apiKeyEnv)
         ? { model: profile.web.speech.model, apiKey: requiredEnv(environment, profile.web.speech.apiKeyEnv) } : undefined,
       passwordHash: optionalEnv(environment, `${prefix}_WEB_PASSWORD_HASH`),
       ownerUserId,
-      ownerPrincipalId: optionalEnv(environment, `${prefix}_WEB_OWNER_PRINCIPAL_ID`) ?? (profile.id === "deepmind" ? optionalEnv(environment, "HEALTH_OWNER_PRINCIPAL_ID") : undefined) ?? optionalEnv(environment, `${prefix}_WEB_OWNER_USER_ID`) ?? `web:${profile.id}:owner`
+      ownerPrincipalId
     } : undefined,
     feishu: optionalEnv(environment, `${prefix}_FEISHU_APP_ID`) && optionalEnv(environment, `${prefix}_FEISHU_APP_SECRET`) ? {
       appId: requiredEnv(environment, `${prefix}_FEISHU_APP_ID`),
@@ -417,6 +463,7 @@ export function materializeProfile(
     modelNetworkRetryAttempts: modelRuntime.modelNetworkRetryAttempts,
     modelRetryDelayMs: modelRuntime.modelRetryDelayMs,
     imageGenerationTimeoutMs: modelRuntime.imageGenerationTimeoutMs ?? DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
+    imageGenerationRetryAttempts: modelRuntime.imageGenerationRetryAttempts ?? DEFAULT_IMAGE_GENERATION_RETRY_ATTEMPTS,
     videoGenerationTimeoutMs: positiveInteger(environment, `${prefix}_VIDEO_GENERATION_TIMEOUT_MS`, 300_000),
     memoryStoragePath: resolve(profile.storage.sqlite),
     longTermMemoryPath: resolve(profile.storage.longTermMemory),

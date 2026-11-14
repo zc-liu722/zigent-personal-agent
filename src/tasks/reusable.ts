@@ -218,9 +218,11 @@ export class ReusableTriggerStore {
   activeSource(scope: TaskScope, id: string): ReusableTriggerSpec["source"] | undefined {
     return this.reads.owned(scope, id)?.spec?.source;
   }
-  activeLocationScopes(): Array<Pick<TaskScope, "agentId" | "userId" | "principalId">> {
-    return this.reads.active().filter(record => record.spec?.source.type === "location")
-      .map(record => ({ agentId: this.agentId, userId: record.userId, principalId: record.principalId }));
+  /** Callers sharing this view must stay within one synchronous evaluation/transaction. */
+  evaluation(): TriggerEvaluationReads { return this.reads.evaluation(); }
+  activeLocationScopes(reads = this.evaluation(), unique = false): Array<Pick<TaskScope, "agentId" | "userId" | "principalId">> {
+    const scopes = unique ? reads.locationScopes() : reads.active().filter(record => record.spec?.source.type === "location");
+    return scopes.map(({ userId, principalId }) => ({ agentId: this.agentId, userId, principalId }));
   }
   stage(scope: TaskScope, input: { id?: string; title: string; spec: ReusableTriggerSpec; fixtures: TriggerFixture[] }, key?: string, now = Date.now()): SharedTrigger {
     const spec = parseReusableTriggerSpec(input.spec);
@@ -331,10 +333,9 @@ export class ReusableTriggerStore {
     }
     return count;
   }
-  accept(scope: Pick<TaskScope, "userId" | "principalId">, event: TriggerEvent, now: number): number {
+  accept(scope: Pick<TaskScope, "userId" | "principalId">, event: TriggerEvent, now: number, reads = this.evaluation()): number {
     let count = 0;
-    const reads = this.reads.evaluation();
-    for (const record of this.reads.active()) if (record.userId === scope.userId && record.principalId === scope.principalId) {
+    for (const record of reads.inScope(scope)) {
       const source = record.spec?.source;
       // Coordinate fences only consume fixes calculated for that fence, never unrelated named-region events.
       if (event.type === "location" && source?.type === "location" && source.center) continue;
@@ -344,8 +345,7 @@ export class ReusableTriggerStore {
   }
   observeLocation(scope: Pick<TaskScope, "userId" | "principalId">, point: StoredLocation & { id: number }, now: number): void {
     const reads = this.reads.evaluation();
-    for (const record of this.reads.active()) {
-      if (record.userId !== scope.userId || record.principalId !== scope.principalId) continue;
+    for (const record of reads.inScope(scope)) {
       const spec = record.spec!, source = spec.source;
       if (source.type !== "location" || !source.center) continue;
       if (record.activatedAt !== undefined && point.observedAt < record.activatedAt) continue;
@@ -372,7 +372,7 @@ export class ReusableTriggerStore {
   }
   collect(now: number, next: NextOccurrence = createNextOccurrenceResolver(now)): void {
     const reads = this.reads.evaluation();
-    for (const record of this.reads.active()) {
+    for (const record of reads.active()) {
       const spec = record.spec!;
       if (record.nextAt !== undefined && record.nextAt <= now && spec.source.type === "time") {
         this.process(record, { id: `time:${record.nextAt}`, type: "time", occurredAt: record.nextAt, scheduledAt: record.nextAt }, now, reads);

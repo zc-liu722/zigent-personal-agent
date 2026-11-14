@@ -4,7 +4,7 @@ import type { ProductivityIntegration } from "./config.js";
 import { ProductivityAuthorizationCoordinator } from "./authorization.js";
 
 export function createProductivityAuthorizationContext(settings: AgentToolSettings | undefined, communication: CommunicationAdapter) {
-  const coordinators = new Map((["google_calendar", "google_drive", "todoist"] as const).flatMap(integration => {
+  const coordinators = new Map((["google_calendar", "google_drive", "gmail", "todoist"] as const).flatMap(integration => {
     const config = settings?.[integration];
     if (!config) return [];
     const coordinator = new ProductivityAuthorizationCoordinator(integration, config);

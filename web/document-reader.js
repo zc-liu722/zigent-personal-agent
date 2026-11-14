@@ -1,4 +1,4 @@
-import { assetUrl, loadStyle } from './lazy-assets.js';
+import { assetUrl, loadStyle, versionsReady } from './lazy-assets.js';
 let library,worker,workerIdle;
 function pdfWorker(pdf) {
   clearTimeout(workerIdle);
@@ -14,6 +14,7 @@ function releaseWorkerLater() {
 }
 function libraries() {
   if (!library) library=(async()=>{
+    await versionsReady;
     const styles=loadStyle('./vendor/pdfjs/web/pdf_viewer.css');styles.catch(()=>{});
     // The compatibility builds include browser API polyfills needed on mobile Safari.
     const pdf=await import(assetUrl('./vendor/pdfjs/legacy/build/pdf.mjs'));

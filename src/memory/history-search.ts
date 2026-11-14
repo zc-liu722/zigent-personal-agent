@@ -59,7 +59,7 @@ function visibleContent(content: string, role: string, answerJson: string | null
 
 function indexMessage(db: DatabaseSync, id: string): number {
   const row = prepareSql(db, `SELECT id,role,substr(content,1,?) AS content,length(content) AS content_length,
-    question_answers_json FROM messages WHERE id=? AND deleted_at IS NULL AND role IN ('user','assistant')`)
+    question_answers_json FROM conversation_messages WHERE id=? AND deleted_at IS NULL AND role IN ('user','assistant')`)
     .get(MAX_INDEXED_CHARACTERS, id) as { id: string; role: string; content: string; content_length: number; question_answers_json: string | null } | undefined;
   prepareSql(db, "DELETE FROM history_search_documents_v1 WHERE message_id=?").run(id);
   if (row) {
@@ -89,7 +89,7 @@ function advance(db: DatabaseSync): boolean {
     const cursor = prepareSql(db, "SELECT last_id,complete FROM history_search_state_v1 WHERE singleton=1").get() as { last_id: string; complete: number };
     if (!cursor.complete) {
       // The primary-key cursor survives VACUUM. Inserts behind the cursor enter the trigger queue.
-      const rows = prepareSql(db, "SELECT id FROM messages WHERE id>? ORDER BY id LIMIT ?")
+      const rows = prepareSql(db, "SELECT id FROM conversation_messages WHERE id>? ORDER BY id LIMIT ?")
         .all(cursor.last_id, BATCH_SIZE) as Array<{ id: string }>;
       let lastId = cursor.last_id, processed = 0;
       for (const row of rows) {

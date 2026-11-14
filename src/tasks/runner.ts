@@ -8,6 +8,7 @@ import type { PerformanceStore } from "../performance/store.js";
 export type TaskRunnerOptions = {
   store: TaskStore;
   performance?: PerformanceStore;
+  onSettled?(run: TaskRun): void;
   execute(input: {
     task: ActiveTask;
     run: TaskRun;
@@ -29,7 +30,6 @@ export type TaskRunnerOptions = {
   scheduler?: BackgroundScheduler;
   concurrency?: number;
   leaseMs?: number;
-  timeoutMs?: number;
   maxAttempts?: number;
 };
 export class StaleTaskResultError extends Error {
@@ -124,10 +124,6 @@ export class TaskRunner {
       },
       Math.max(10, Math.floor(leaseMs / 3)),
     );
-    const deadline = setTimeout(
-      () => controller.abort(new Error("Task execution timed out")),
-      this.options.timeoutMs ?? 180000,
-    );
     let rejectAbort: (() => void) | undefined;
     const aborted = new Promise<never>((_, reject) => {
       rejectAbort = () =>
@@ -144,9 +140,13 @@ export class TaskRunner {
       signal.throwIfAborted();
       const result = await (this.options.performance ? this.options.performance.measure("task.execute", "background", execute) : execute());
       signal.throwIfAborted();
-      transcript.complete(result.summary ?? "执行完成");
+      if (result.outcome === "failed") transcript.fail(result.summary ?? "这次执行未完成。");
+      else transcript.complete(result.summary ?? "执行完成");
       saveActivity();
-      store.complete(run.id, token, result);
+      if (store.complete(run.id, token, result)) {
+        const committed = store.getRun(run.id);
+        if (committed && ["none","stale"].includes(committed.notificationStatus)) this.settled(committed);
+      }
     } catch (e) {
       transcript.fail("这次执行未完成。");
       saveActivity();
@@ -159,10 +159,12 @@ export class TaskRunner {
     } finally {
       recording = false; clearTimeout(activityTimer);
       clearInterval(heartbeat);
-      clearTimeout(deadline);
       if (rejectAbort)
         signal.removeEventListener("abort", rejectAbort);
     }
+  }
+  private settled(run: TaskRun): void {
+    try { this.options.onSettled?.(run); } catch { console.warn("TASK_EXECUTION_JOURNAL_SETTLEMENT_PENDING"); }
   }
   private async deliver(pending: TaskRun): Promise<void> {
     const { store } = this.options;
@@ -198,6 +200,7 @@ export class TaskRunner {
       });
       const link = await (this.options.performance ? this.options.performance.measure("task.delivery", "background", deliver) : deliver());
       store.markDelivered(pending.id, link);
+      this.settled(store.getRun(pending.id) ?? pending);
     } catch (e) {
       if (e instanceof StaleTaskResultError) store.refreshStale(pending.id);
       else if (e instanceof BackgroundDeliveryUncertainError)

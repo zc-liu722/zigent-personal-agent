@@ -18,10 +18,7 @@ export function estimateMessageTokens(message: ModelConversationMessage): number
 }
 
 export function estimateRequestTokens(request: ModelRoundRequest): number {
-  return 64 + estimateTextTokens(request.systemPrompt ?? "")
-    + estimateTextTokens(JSON.stringify(request.tools))
-    + (request.nativeContext ? estimateNativeTokens(request.nativeContext.items, 0)
-      : request.messages.reduce((total, message) => total + estimateMessageTokens(message), 0));
+  return new ContextAnalysis().requestTokens(request);
 }
 
 export function messageFingerprint(message: ModelConversationMessage): string {
@@ -47,7 +44,7 @@ export function estimateNativeTokens(items: readonly Record<string, unknown>[], 
 }
 
 /** Cut only after complete tool exchanges; prefer a user-turn boundary near the token budget. */
-export function safeCut(messages: readonly ModelConversationMessage[], keepTokens: number): number {
+export function safeCut(messages: readonly ModelConversationMessage[], keepTokens: number, tokensFor = estimateMessageTokens): number {
   const safe: number[] = [];
   const pending = new Set<string>();
   for (const [index, message] of messages.entries()) {
@@ -59,7 +56,7 @@ export function safeCut(messages: readonly ModelConversationMessage[], keepToken
   if (keepTokens === 0) return safe.at(-1) ?? 0;
   let tokens = 0, candidate = messages.length;
   for (let index = messages.length - 1; index >= 0; index--) {
-    tokens += estimateMessageTokens(messages[index]!);
+    tokens += tokensFor(messages[index]!);
     candidate = index;
     if (tokens >= keepTokens) break;
   }
@@ -67,14 +64,54 @@ export function safeCut(messages: readonly ModelConversationMessage[], keepToken
   const userBoundary = cuts.filter(index => messages[index]?.role === "user").at(-1);
   // A long single user turn may contain dozens of closed tool steps. Keep its
   // original user input separately while compacting an older closed prefix.
-  if (userBoundary && messages.slice(userBoundary).reduce((sum, message) => sum + estimateMessageTokens(message), 0) <= keepTokens * 1.5) return userBoundary;
+  if (userBoundary && messages.slice(userBoundary).reduce((sum, message) => sum + tokensFor(message), 0) <= keepTokens * 1.5) return userBoundary;
   return cuts.at(-1) ?? 0;
 }
 
-export function renderContextTranscript(messages: readonly ModelConversationMessage[]): string {
-  return messages.map(message => message.role === "tool"
-    ? `[tool result ${message.toolCallId}${message.failed ? " failed" : ""}]\n${message.value}`
-    : message.role === "user" ? `[user${message.sourceTurnId ? ` turn=${message.sourceTurnId}` : ""}]\n${message.text}${message.images?.length ? `\n[${message.images.length} images; originals retained separately]` : ""}`
-    : `[assistant]\n${assistantReplayText(message)}${message.toolCalls.length ? `\n[tool calls] ${JSON.stringify(message.toolCalls.map(call => ({ id: call.id, name: call.name, input: call.input })))}` : ""}`
-  ).join("\n\n");
+/** Reuse body analysis only within one synchronous context-preparation phase.
+ * Never retain this on a session/model: continuations and external callbacks can
+ * change messages, tool schemas, image bytes or native items in place. */
+export class ContextAnalysis {
+  private tokens = new WeakMap<ModelConversationMessage, number>();
+  private fingerprints = new WeakMap<ModelConversationMessage, string>();
+  private tools = new WeakMap<ModelRoundRequest["tools"], number>();
+  private native = new WeakMap<readonly Record<string, unknown>[], number>();
+  private system = new Map<string, number>();
+
+  clear(): void {
+    this.tokens = new WeakMap(); this.fingerprints = new WeakMap();
+    this.tools = new WeakMap(); this.native = new WeakMap(); this.system.clear();
+  }
+
+  readonly messageTokens = (message: ModelConversationMessage): number => {
+    let value = this.tokens.get(message);
+    if (value === undefined) { value = estimateMessageTokens(message); this.tokens.set(message, value); }
+    return value;
+  };
+
+  readonly fingerprint = (message: ModelConversationMessage): string => {
+    let value = this.fingerprints.get(message);
+    if (value === undefined) { value = messageFingerprint(message); this.fingerprints.set(message, value); }
+    return value;
+  };
+
+  requestTokens(request: ModelRoundRequest): number {
+    const prompt = request.systemPrompt ?? "";
+    let system = this.system.get(prompt);
+    if (system === undefined) { system = estimateTextTokens(prompt); this.system.set(prompt, system); }
+    let tools = this.tools.get(request.tools);
+    if (tools === undefined) { tools = estimateTextTokens(JSON.stringify(request.tools)); this.tools.set(request.tools, tools); }
+    let history: number;
+    if (request.nativeContext) {
+      const items = request.nativeContext.items;
+      let value = this.native.get(items);
+      if (value === undefined) { value = estimateNativeTokens(items, 0); this.native.set(items, value); }
+      history = value;
+    } else history = request.messages.reduce((total, message) => total + this.messageTokens(message), 0);
+    return 64 + system + tools + history;
+  }
+
+  cut(messages: readonly ModelConversationMessage[], keepTokens: number): number {
+    return safeCut(messages, keepTokens, this.messageTokens);
+  }
 }

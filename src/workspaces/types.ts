@@ -1,5 +1,7 @@
 export type WorkspaceOptions = { agentId: string; ownerUserId: string; stateDirectory: string; maxFileBytes?: number };
-export type Workspace = { id: string; name: string; createdAt: number; updatedAt: number };
+export type WorkspaceLifetime = "persistent" | "session" | "temporary" | "system" | "legacy";
+export type Workspace = { id: string; name: string; createdAt: number; updatedAt: number;
+  lifetime?: WorkspaceLifetime; sessionId?: string; expiresAt?: number };
 export type WorkspaceFile = { path: string; name: string; type: "file" | "directory"; size: number; modifiedAt: number; sha256?: string };
 export type FilePage = { workspaceId: string; path: string; files: WorkspaceFile[]; nextOffset?: number };
 export type WorkspaceRead = { workspaceId: string; path: string; name: string; mime: string; size: number; sha256: string; text: string; offset: number; nextOffset?: number };

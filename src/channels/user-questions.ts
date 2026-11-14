@@ -140,7 +140,7 @@ export class UserQuestions {
     }
     pending.inFlight = true;
     try {
-      if (action.cancel) this.settle(pending, "cancelled", pending.notice.purpose === "workspace" ? "项目区尚未选定，文件工作未开始。" : "已跳过这些问题，我会按现有信息继续。", { status: "cancelled" });
+      if (action.cancel) this.settle(pending, "cancelled", pending.notice.purpose === "workspace" ? "已取消本次项目区选择。" : "已跳过这些问题，我会按现有信息继续。", { status: "cancelled" });
       else {
         pending.notice.answers = answers;
         const resultAnswers: NonNullable<UserQuestionResult["answers"]> = Object.fromEntries(pending.notice.questions.map(item => {

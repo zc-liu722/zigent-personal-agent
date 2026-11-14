@@ -2,7 +2,6 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import type { CodexService } from "./service.js";
 import { PROJECT_LIMIT, projectSchema, workerEventSchema } from "./types.js";
-import { spaceReadiness } from "../project-spaces/service.js";
 
 function json(res: ServerResponse, status: number, value: unknown) { res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); res.end(JSON.stringify(value)); }
 async function body(req: IncomingMessage, limit = 65536) {
@@ -21,6 +20,7 @@ export function createCodexHttp(services: ReadonlyMap<string, CodexService>) {
     const match = /^\/v1\/codex\/([a-z][a-z0-9-]*)\/([a-z-]+)$/.exec(url.pathname);
     if (!match) return false;
     res.setHeader("Cache-Control", "no-store"); res.setHeader("X-Content-Type-Options", "nosniff");
+    if (match[1] !== "deepmind") { json(res, 403, { error: "codex_agent_forbidden" }); return true; }
     const service = services.get(match[1]!);
     if (!service) { json(res, 404, { error: "not_found" }); return true; }
     if (req.headers.origin || req.headers.cookie) { json(res, 403, { error: "device_endpoint_only" }); return true; }
@@ -36,7 +36,7 @@ export function createCodexHttp(services: ReadonlyMap<string, CodexService>) {
       const credential = /^Bearer ([A-Za-z0-9_-]{43,128})$/.exec(req.headers.authorization ?? "")?.[1] ?? "";
       const device = service.store.authenticate(credential, path === "pair-status");
       if (!device) { json(res, 401, { error: "unauthorized" }); return true; }
-      if (path === "pair-status" && req.method === "GET") { json(res, 200, { paired: service.store.paired(device.id), deviceId: device.id }); return true; }
+      if (path === "pair-status" && req.method === "GET") { json(res, 200, { paired: service.store.paired(device.id), deviceId: device.id, online: Date.now() - Number(device.lastSeenAt) < 90000 }); return true; }
       if (path === "events" && req.method === "GET") {
         if (streams.size >= 40) { json(res, 429, { error: "too_many_connections" }); return true; }
         res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no" });
@@ -52,31 +52,13 @@ export function createCodexHttp(services: ReadonlyMap<string, CodexService>) {
       }
       if (path === "commands" && req.method === "GET") { json(res, 200, { commands: service.store.commands(device.id) }); return true; }
       // Retired snapshot clients must not recreate the obsolete database or upload data.
-      if (path.startsWith("files-")) { json(res, 410, { error: "retired", replacement: "project_files uses registered bidirectional spaces" }); return true; }
+      if (path.startsWith("files-")) { json(res, 410, { error: "retired", replacement: "Use files or exec_command with the registered project environment" }); return true; }
       if (req.method !== "POST") { json(res, 405, { error: "method_not_allowed" }); return true; }
       const input = await body(req, path === "projects" ? 4 * 1024 * 1024 : path === "event" ? 1024 * 1024 : 65536);
-      if (path === "space-readiness") {
-        const parsed = z.object({ projectId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/) }).strict().parse(input);
-        if (!device.projects.some(p => p.id === parsed.projectId && p.executor === "windows-codex")) throw new Error("Unregistered executor project");
-        json(res, 200, await spaceReadiness(service.options.agentId, parsed.projectId)); return true;
-      }
+      if (path === "space-readiness") { json(res, 410, { error: "project_admission_retired" }); return true; }
       if (path === "projects") { const parsed = z.object({ projects: z.array(projectSchema).max(PROJECT_LIMIT) }).strict().parse(input); service.store.projects(device.id, parsed.projects); json(res, 200, { ok: true }); return true; }
       if (path === "claim") {
         z.object({ protocol: z.literal("text-v1") }).strict().parse(input);
-        const next = service.store.nextQueued(device.id);
-        if (next?.project?.executor) {
-          if (next.project.executor !== "windows-codex") throw new Error("Claude account admission is closed");
-          if (!service.store.executionGrant({ agentId: service.options.agentId, userId: service.options.ownerUserId, conversationKind: "p2p" }, next.deviceId, next.projectId)) {
-            if (next.phase !== "等待网页确认") service.store.update(next.id, task => { task.phase = "等待网页确认"; task.revision++; });
-            json(res, 200, { task: null }); return true;
-          }
-          const ready = await spaceReadiness(service.options.agentId, next.projectId);
-          if (ready.state !== "ready") {
-            const phase = ready.state === "conflict" ? "同步冲突" : "正在同步";
-            if (next.phase !== phase) service.store.update(next.id, task => { task.phase = phase; task.revision++; });
-            json(res, 200, { task: null }); return true;
-          }
-        }
         json(res, 200, { task: service.store.claim(device.id) ?? null }); return true;
       }
       if (path === "heartbeat") {

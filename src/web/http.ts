@@ -9,9 +9,8 @@ export function json(res: ServerResponse, status: number, value: unknown): void 
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(value));
 }
-/** Bound bootstrap transfer size before the edge; compression never blocks the JS thread. */
-export async function bootstrapJson(req: IncomingMessage, res: ServerResponse, value: unknown): Promise<void> {
-  const body = JSON.stringify(value);
+/** Bound large private responses before the edge without blocking the JS thread on compression. */
+export async function writeCompressedResponse(req: IncomingMessage, res: ServerResponse, body: string, contentType: string): Promise<void> {
   const encodings = (req.headers['accept-encoding'] ?? '').toLowerCase().split(',').map(part => {
     const [name, ...parameters] = part.trim().split(';');
     const quality = parameters.map(value => value.trim()).find(value => value.startsWith('q='));
@@ -19,25 +18,37 @@ export async function bootstrapJson(req: IncomingMessage, res: ServerResponse, v
   });
   const accepted = (encodings.find(value => value.name === 'gzip') ?? encodings.find(value => value.name === '*'))?.quality ?? 0;
   const bytes = Buffer.from(body);
-  res.setHeader('Vary', 'Accept-Encoding');
-  const compressed = bytes.length >= 8192 && accepted > 0 ? await compress(bytes, { level: 4 }) : undefined;
+  res.setHeader("Vary", "Accept-Encoding");
+  const compressed = bytes.length >= 8192 && accepted > 0 ? await compress(bytes, { level: 4 }).catch(() => undefined) : undefined;
   const output = compressed && compressed.length < bytes.length ? compressed : bytes;
   if (output === compressed) res.setHeader('Content-Encoding', 'gzip');
-  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': output.length });
+  res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': output.length });
   res.end(output);
+}
+export function bootstrapJson(req: IncomingMessage, res: ServerResponse, value: unknown): Promise<void> {
+  return writeCompressedResponse(req, res, JSON.stringify(value), "application/json; charset=utf-8");
 }
 const bodyEtag = (body: string) => `"${createHash("sha256").update(body).digest("hex")}"`;
 export const jsonEtag = (value: unknown): string => bodyEtag(JSON.stringify(value));
+function respondIfUnchanged(req: IncomingMessage, res: ServerResponse, etag: string): boolean {
+  res.setHeader("ETag", etag);
+  const canonical = etag.replace(/^W\//, "");
+  if (!req.headers["if-none-match"]?.split(",").some(value => value.trim().replace(/^W\//, "") === canonical || value.trim() === "*")) return false;
+  res.writeHead(304); res.end(); return true;
+}
 /** Conditional private reads; validators never bypass the authenticated route. */
 export function conditionalJson(req: IncomingMessage, res: ServerResponse, value: unknown): void {
   const body = JSON.stringify(value);
-  const etag = bodyEtag(body);
-  res.setHeader("ETag", etag);
-  if (req.headers["if-none-match"]?.split(",").some(value => value.trim().replace(/^W\//, "") === etag || value.trim() === "*")) {
-    res.writeHead(304); res.end(); return;
-  }
+  if (respondIfUnchanged(req, res, bodyEtag(body))) return;
   res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
   res.end(body);
+}
+export async function conditionalCompressedJson(req: IncomingMessage, res: ServerResponse, value: unknown): Promise<void> {
+  const body = JSON.stringify(value);
+  res.setHeader("Vary", "Accept-Encoding");
+  // The same JSON validator works across content encodings and bootstrap's inline page.
+  if (respondIfUnchanged(req, res, `W/${bodyEtag(body)}`)) return;
+  await writeCompressedResponse(req, res, body, "application/json; charset=utf-8");
 }
 export async function body(req: IncomingMessage, limit = 128_000): Promise<Buffer> {
   const chunks: Buffer[] = []; let size = 0;

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isConfirmedOperation } from "./confirmed-operation.js";
 import { waitForAccountAuthorization } from "./account-authorization.js";
 import type { AgentToolRegistration, ToolExecutionContext } from "./registry.js";
-import type { ToolActivityPresenter, ToolActivityResource } from "./activity-presentation.js";
+import { activitySubject, type ToolActivityPresentation, type ToolActivityPresenter, type ToolActivityResource } from "./activity-presentation.js";
 import {
   NotionAuthorizationRequiredError,
   safeNotionUrl,
@@ -80,13 +80,25 @@ function parseInput(value: unknown): NotionInput {
   throw new Error(`Unsupported notion action: ${action}`);
 }
 
-function operationLabel(value: unknown): string | undefined {
-  if (!isRecord(value) || typeof value.operation !== "string") return undefined;
-  const labels: Record<string, string> = {
-    "notion-search": "查找笔记", "notion-fetch": "阅读笔记", "notion-create-pages": "创建笔记",
-    "notion-update-page": "修改笔记", "notion-move-pages": "整理笔记位置"
+function notionHeading(input: unknown, result?: unknown): Pick<ToolActivityPresentation, "title" | "actionKind"> {
+  if (!isRecord(input)) return {};
+  if (input.action === "capabilities") return { title: "查看 Notion 可用操作" };
+  if (input.action === "describe") return { title: "查看 Notion 操作说明", actionKind: "read" };
+  if (input.action === "authorize") return { title: "连接 Notion 账号" };
+  if (input.action === "confirm") return { title: "执行已确认的 Notion 修改", actionKind: "edit" };
+  const operations: Readonly<Record<string, [string, ToolActivityPresentation["actionKind"]]>> = {
+    "notion-search": ["搜索 Notion 页面", "search"], "notion-fetch": ["阅读 Notion 页面", "read"],
+    "notion-create-pages": ["创建 Notion 页面", "edit"], "notion-update-page": ["编辑 Notion 页面", "edit"],
+    "notion-move-pages": ["移动 Notion 页面", "edit"]
   };
-  return Object.hasOwn(labels, value.operation) ? labels[value.operation] : undefined;
+  const operation = input.operation;
+  if (input.action !== "call" || typeof operation !== "string" || !Object.hasOwn(operations, operation)) return {};
+  const [label, actionKind] = operations[operation]!;
+  const target = isRecord(result) && Array.isArray(result.resources) && result.resources.length === 1 ? result.resources[0] : undefined;
+  const subject = actionKind === "search" ? isRecord(input.arguments) && input.arguments.query
+    : isRecord(target) && safeNotionUrl(target.url) && target.title !== "Notion 内容" && target.title;
+  const name = activitySubject(subject);
+  return { title: name ? `${label} · ${name}` : label, actionKind };
 }
 
 function safeResources(result: unknown): ToolActivityResource[] {
@@ -111,27 +123,30 @@ const activity: ToolActivityPresenter = {
     if (input.action === "describe") return { message: "我正在确认这一步笔记操作需要的信息。" };
     if (input.action === "authorize") return { message: "我正在为你准备 Notion 登录授权。" };
     if (input.action === "confirm") return { message: "我正在执行你已确认的 Notion 修改。" };
-    const operation = operationLabel(input);
+    const heading = notionHeading(input);
     return {
-      message: "我正在 Notion 中处理这项请求。",
-      ...(operation ? { details: [{ label: "操作", value: operation }] } : {})
+      ...heading,
+      message: heading.title ? `我正在${heading.title}。` : "我正在检查 Notion 操作。"
     };
   },
   completed: (input, result) => {
+    const heading = notionHeading(input, result);
     if (isRecord(result) && result.status === "authorization_pending") {
-      return { message: "我已启动 Notion 授权，你可以继续聊天；授权结果会另行通知。" };
+      return { ...heading, message: "我已启动 Notion 授权，你可以继续聊天；授权结果会另行通知。" };
     }
-    if (isConfirmationResult(result)) return { message: "这项 Notion 修改需要你明确确认后才会执行。" };
-    if (isRecord(input) && input.action === "capabilities") return { message: "Notion 当前可用的读写能力已经确认。" };
-    if (isRecord(input) && input.action === "describe") return { message: "这一步笔记操作需要的信息已经确认。" };
-    if (isRecord(input) && input.action === "authorize") return { message: "Notion 已经完成授权，可以继续访问笔记了。" };
+    if (isConfirmationResult(result)) return { ...heading, message: "这项 Notion 修改需要你明确确认后才会执行。" };
+    if (isRecord(input) && input.action === "capabilities") return { ...heading, message: "Notion 当前可用的读写能力已经确认。" };
+    if (isRecord(input) && input.action === "describe") return { ...heading, message: "这一步笔记操作需要的信息已经确认。" };
+    if (isRecord(input) && input.action === "authorize") return { ...heading, message: "Notion 已经完成授权，可以继续访问笔记了。" };
     const resources = safeResources(result);
     return {
+      ...heading,
       message: "Notion 中的这一步已经处理好了。",
       ...(resources.length > 0 ? { resources, resourcesLabel: "相关 Notion 内容" } : {})
     };
   },
-  failed: (_input, error) => ({
+  failed: (input, error) => ({
+    ...notionHeading(input),
     message: /授权|authoriz/i.test(error)
       ? "我暂时无法访问 Notion；当前授权缺失或已经失效。"
       : "这次没能完成 Notion 中的操作。"
@@ -245,7 +260,7 @@ export function createNotionTool(gateway: NotionMcpGateway): AgentToolRegistrati
       name: "notion",
       description: [
         "通过官方 Notion 云端 MCP 搜索、读取、创建、修改和移动笔记页面。仅开放这五项日常笔记操作。",
-        "用户说看笔记、查笔记、整理笔记、记笔记、把内容存到笔记等与笔记相关的工作时，优先连接 Notion 搜索并读取相关内容；用户明确指定其他来源时遵从其选择。只读请求不能修改笔记。",
+        "Notion 主要用于用户个人撰写的笔记；会议转录和纪要一般保存在项目空间，优先去对应项目查找。用户明确指定来源时遵从其选择。只读请求不能修改笔记。",
         "已给 Notion 页面链接时直接 fetch；否则先 search，再 fetch 相关页面。修改前读取现有内容，优先局部编辑，保留未要求改变的内容；读取分页或截断结果时不要假装已经读完。",
         "页面权限不足时引导检查共享权限和工作区，不要反复授权。写入结果不确定时先读取核实，不要盲目重试。",
         "当用户明确要求登录、连接、重新授权或重新显示 Notion 授权卡片时，必须再次调用 authorize；系统会复用仍有效的授权，不会因重复请求发生冲突。不要凭历史消息认定后台仍在授权，也不要建议去 Notion 设置代替当前连接流程。普通操作发现尚未授权时也会自动显示适合当前渠道的连接入口。",

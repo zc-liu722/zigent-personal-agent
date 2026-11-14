@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { HealthItemLimitError, MAX_HEALTH_OBSERVATIONS_PER_BATCH } from "./limits.js";
 
 export type HealthObservation = {
   id: string; seq: number; metric: string; stream: string;
@@ -96,7 +97,16 @@ export function normalizeHealthPayload(payload: unknown, metadata: HealthImportM
   const envelope = record(payload); const data = record(envelope.data);
   if (!Array.isArray(data.metrics) && !Array.isArray(data.workouts)) throw new Error("INVALID_PAYLOAD");
   if (data.metrics !== undefined && !Array.isArray(data.metrics) || data.workouts !== undefined && !Array.isArray(data.workouts)) throw new Error("INVALID_PAYLOAD");
-  text(metadata.automationId, 128); text(metadata.aggregation, 64); validateValues(payload);
+  text(metadata.automationId, 128); text(metadata.aggregation, 64);
+  // Each metric point/workout produces exactly one observation. Bound the batch
+  // before allocating and hashing normalized rows; never truncate a valid batch.
+  const itemCount = ((data.metrics ?? []) as unknown[]).reduce<number>((count, value) => {
+    const metric = record(value);
+    if (!Array.isArray(metric.data)) throw new Error("INVALID_METRIC");
+    return count + metric.data.length;
+  }, ((data.workouts ?? []) as unknown[]).length);
+  if (itemCount > MAX_HEALTH_OBSERVATIONS_PER_BATCH) throw new HealthItemLimitError(itemCount);
+  validateValues(payload);
   const rows: HealthObservation[] = [];
   for (const value of (data.metrics ?? []) as unknown[]) {
     const metric = record(value); const name = text(metric.name, 128); const units = text(metric.units, 64);
@@ -116,7 +126,9 @@ export function normalizeHealthPayload(payload: unknown, metadata: HealthImportM
       const source = metricSource(point.source);
       const stream = `${metadata.automationId}/${metadata.aggregation}/${kind}/${source ?? "unspecified"}`;
       // Values never enter the bucket identity: a revised aggregate replaces its prior value.
-      const id = hash(canonical([stream, name, point.id ?? observedAt]));
+      // In Bed and sleep stages can share a start. Do not let one erase the other.
+      const identity = point.id ?? (segment ? [observedAt, text(point.value)] : observedAt);
+      const id = hash(canonical([stream, name, identity]));
       rows.push({ id, seq: 0, metric: name, stream, kind, units, source, observedAt, endAt, receivedAt: now, values: measurementValues(point), provenance: "health_auto_export" });
     }
   }
@@ -130,6 +142,5 @@ export function normalizeHealthPayload(payload: unknown, metadata: HealthImportM
     rows.push({ id: hash(canonical([stream, "workout", workoutId])), seq: 0, metric: "workout", stream, kind: "workout", observedAt, endAt, receivedAt: now, values: summary, provenance: "health_auto_export" });
   }
   if (rows.some((row) => Buffer.byteLength(JSON.stringify(row.values)) > 8192)) throw new Error("INVALID_OBSERVATION_SIZE");
-  if (rows.length > 50_000) throw new Error("INVALID_ITEM_LIMIT");
   return rows;
 }

@@ -10,6 +10,7 @@ import { object } from "../tools/operation-policy.js";
 import { reusableTriggerDiagram, taskTriggerDiagram } from "../tasks/trigger-diagram.js";
 import { triggerTypes } from "./trigger-types.js";
 import { executeConfirmedOperation } from "../tools/confirmed-operation.js";
+import { isLegacyTaskJsonFailure, taskFormatFailureSummary } from "../tasks/decision.js";
 
 export const automationControlSchema = z.object({
   requestId: z.string().uuid(), id: z.string().uuid(), revision: z.number().int().positive(),
@@ -32,14 +33,16 @@ export class AutomationRequestError extends Error {
 const safeCount = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 function runMetadata(run: TaskRun) {
   const usage = run.result?.usage;
+  const formatValidationFailed = run.state === "failed" && (run.result?.formatValidationFailed === true || run.result?.summary === taskFormatFailureSummary);
   return { id: run.id, taskId: run.taskId, taskRevision: run.taskRevision, state: run.state,
     attempts: run.attempts, triggeredAt: run.triggeredAt, startedAt: run.startedAt, endedAt: run.endedAt,
     notificationStatus: run.notificationStatus, deliveredAt: run.deliveredAt,
     model: run.result?.model,
+    ...(formatValidationFailed ? { formatValidationFailed: true } : {}),
     ...(usage ? { tokens: { input: safeCount(usage.inputTokens), output: safeCount(usage.outputTokens), cached: safeCount(usage.cachedInputTokens) } } : {}) };
 }
 
-/** Browser-facing metadata excludes routing identities, credentials, event payloads and run content. */
+/** Task details are scoped to the authenticated owner. List responses contain metadata only. */
 export class WebAutomation {
   private readonly requests = new Map<string, Promise<Receipt>>();
   private readonly controls = new Map<string, Promise<unknown>>();
@@ -130,11 +133,18 @@ export class WebAutomation {
     this.runs(id); // Validate ownership before reading any execution content.
     const run = this.tasks().getRun(runId);
     if (!run || run.taskId !== id) throw new AutomationRequestError(404, "运行记录不存在。");
+    const metadata = runMetadata(run);
+    const legacyError = run.state === "failed" && !run.result ? run.error : undefined;
+    const rawOutput = run.sessionId && (metadata.formatValidationFailed || legacyError)
+      ? this.runtime.executionJournal.taskReplyText(this.runtime.config.id, run.sessionId, run.id) : undefined;
+    const formatValidationFailed = metadata.formatValidationFailed
+      || (legacyError !== undefined && rawOutput !== undefined && isLegacyTaskJsonFailure(rawOutput, legacyError));
     const delivered = run.messageId ? this.store.message(run.messageId) : undefined;
     const attempts = this.tasks().activity(run.id).map(item => ({ ...item,
       snapshot: { ...item.snapshot, answerDraft: "", ...(item.snapshot.status === "running" && (run.state !== "running" || item.attempt !== run.attempts)
         ? { status: run.state === "cancelled" ? "cancelled" as const : "failed" as const } : {}) } }));
-    return { ...runMetadata(run), attempts, summary: run.result?.summary,
+    return { ...metadata, attempts, summary: run.result?.summary,
+      ...(formatValidationFailed ? { formatValidationFailed: true, rawOutput } : {}),
       // Only the first task message belongs to this execution, never later chat turns.
       message: run.notificationStatus === "delivered" ? delivered?.text ?? run.result?.text : undefined,
       conversationId: delivered ? this.store.publicId(delivered.conversationId) : undefined,

@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import type { ModelCatalogSnapshot } from "../models/catalog.js";
+import type { ModelProtocolService } from "../plugins/model-http/entry.js";
+import type { ExecutionJournal } from "./execution-journal.js";
 import { SubagentTeam } from "./subagents.js";
 import type { SubagentStore } from "./subagent-store.js";
 import { delegationInstruction } from "../tools/subagents.js";
@@ -10,7 +14,8 @@ import {
 } from "../prompt/image-art-direction.js";
 import { assemblePrompt, type PromptAssembly } from "../prompt/assembler.js";
 import { renderTimeContext } from "../prompt/time-context.js";
-import { createContextRunState, type ContextPersistence, type ContextRunState } from "../models/context-manager.js";
+import { ModelHardStopError } from "../models/errors.js";
+import { createContextRunState, type ContextPersistence, type ContextRunState, type SavedContextCheckpoint } from "../models/context-manager.js";
 import { addTokenUsage } from "../models/context-summary.js";
 import { readContextToolResult } from "../models/context-evidence.js";
 import { searchEvidenceMessage } from "../models/search-evidence.js";
@@ -36,7 +41,7 @@ import type { AgentToolSet, ToolExecutionContext } from "../tools/registry.js";
 import { userQuestionInstruction } from "../tools/ask-user-question.js";
 import { isViewSessionImagesResult, type ViewedSessionImage } from "../tools/view-session-image.js";
 import type {
-  ModelConversationMessage, ModelRoundResult, ModelRouteMetadata, ModelTool, ModelToolCall, ModelUrlCitation, ModelWebSearchCall
+  AcpModelService, ModelConversationMessage, ModelRoundResult, ModelRouteMetadata, ModelTool, ModelToolCall, ModelUrlCitation, ModelWebSearchCall
 } from "../models/types.js";
 import {
   type WebSearchExecutionResult,
@@ -48,11 +53,17 @@ import {
 export type AgentExecutionOptions = {
   /** Trusted completion check; can request bounded continuation to finish file delivery. */
   beforeFinalReply?: () => string | undefined;
+  /** Retain the original versions for separately journaled result repair. */
+  pluginVersions?: Readonly<Record<string, string>>;
+  /** Use the current default when a previously selected route disappeared before a new web turn began. */
+  useDefaultIfUnavailable?: boolean;
   /** Internal child lifecycle hooks; not model-controlled. */
   subagentInstruction?: string;
   onUsage?: (usage: TokenUsage) => void;
   onTrace?: (trace: readonly ModelConversationMessage[]) => void;
   contextPersistence?: ContextPersistence;
+  acpChat?: import("../models/types.js").AcpChatRequest;
+  codexChat?: import("../models/types.js").CodexChatRequest;
   /** Machine-readable background decisions consume only the terminal model round. */
   finalTextOnly?: boolean;
   /** Pure text editing must not repeat task side effects or perform new research. */
@@ -67,6 +78,9 @@ export type AgentExecutionOptions = {
 };
 
 export type GeneratedReply = {
+  pluginVersions?: Readonly<Record<string, string>>;
+  acpSession?: import("../models/types.js").AcpChatSession;
+  codexThread?: import("../models/types.js").CodexChatThread;
   text: string;
   usage: TokenUsage;
   provider: Provider;
@@ -109,8 +123,13 @@ type AppliedToolResults = {
 
 type ExecutionState = {
   finalReplyChecks?: number;
+  journalId?: string;
+  pendingAdapterCalls?: ModelToolCall[];
+  teamState?: ReturnType<SubagentTeam["checkpoint"]>;
   team?: SubagentTeam;
   contextState: ContextRunState;
+  savedContext?: { checkpoints: [string, SavedContextCheckpoint["checkpoint"]][]; calibration: [string,number][];
+    nativeUnavailable: string[]; prunedResults: [string,string[]][]; reportedWindows: [string,number][] };
   compressionAnnounced?: boolean;
   provider: Provider;
   fallbackFrom?: Provider;
@@ -118,6 +137,7 @@ type ExecutionState = {
   messages: ModelConversationMessage[];
   currentInputIndex: number;
   baseSystemPrompt?: string;
+  instructionRevision?: string;
   imageGenerationPhase: ImageGenerationPhase;
   imageGenerationAttempt: { started: boolean };
   imageGenerationAction?: "generate" | "edit";
@@ -146,7 +166,8 @@ export class AgentExecutionFallbackRequiredError extends Error {
 
   constructor(
     readonly modelError: ModelFallbackRequiredError,
-    readonly resumeWithProvider: (provider?: Provider) => Promise<GeneratedReply>
+    readonly resumeWithProvider: (provider?: Provider) => Promise<GeneratedReply>,
+    readonly catalog?: ModelCatalogSnapshot
   ) {
     super(modelError.message);
     this.name = "AgentExecutionFallbackRequiredError";
@@ -189,7 +210,7 @@ function resultContent(value: unknown): string {
   });
   if (typeof value === "string") return value;
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(value) ?? "null";
   } catch {
     return "Tool returned a non-serializable result";
   }
@@ -270,8 +291,13 @@ function prepareImageGeneration(input: unknown): Record<string, unknown> {
 }
 
 function toolOperationIdentity(call: ModelToolCall): { operationKey?: string } {
-  if (call.name !== "present_output" || !call.input || typeof call.input !== "object") return {};
-  const id = (call.input as { id?: unknown }).id;
+  if (!call.input || typeof call.input !== "object") return {};
+  const input = call.input as { action?: unknown; id?: unknown };
+  // image_assets inspect and webpage may carry the same figure id before delivery.
+  // Only the call that presents the output shares its identity; present_output is itself a delivery.
+  const deliversOutput = call.name === "present_output" || (call.name === "image_assets" && input.action === "present");
+  if (!deliversOutput) return {};
+  const id = input.id;
   return typeof id === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(id) ? { operationKey: `output:${id}` } : {};
 }
 
@@ -283,7 +309,8 @@ async function executeToolCalls(
   imageGenerationPhase: ImageGenerationPhase,
   imageGenerationAttempt: { started: boolean },
   imageGenerationAction?: "generate" | "edit",
-  executeWebSearch?: (call: ModelToolCall) => Promise<WebSearchExecutionResult>
+  executeWebSearch?: (call: ModelToolCall) => Promise<WebSearchExecutionResult>,
+  durable?: { reuse(call: ModelToolCall): ExecutedToolResult | undefined; before(call: ModelToolCall): void; complete(result: ExecutedToolResult): void }
 ): Promise<ExecutedToolResult[]> {
   if (!context && calls.some((call) =>
     call.name !== PREPARE_IMAGE_GENERATION_TOOL && call.name !== "web_search"
@@ -304,6 +331,7 @@ async function executeToolCalls(
     });
   }
   const executeCall = async (call: ModelToolCall): Promise<ExecutedToolResult> => {
+    const callContext = context ? { ...context, operationId: context.operationId ?? `${context.agentId}:${context.sessionId}:${context.turnId}:${call.id}` } : undefined;
     try {
       const capabilityName = call.name === PREPARE_IMAGE_GENERATION_TOOL ? "image_generation" : call.name;
       if (tools.isAvailable ? !tools.isAvailable(capabilityName, context) : !tools.allows(capabilityName)) {
@@ -325,17 +353,18 @@ async function executeToolCalls(
           ? prepareImageGeneration(call.input)
           : context
             ? await tools.execute(call.name, call.input, call.name === "image_generation"
-                ? { ...context, imageGenerationAction, claimImageGeneration: () => {
+                ? { ...callContext!, imageGenerationAction, claimImageGeneration: () => {
                     if (imageGenerationAttempt.started) throw new Error("这轮图片请求已经执行，不能在同一轮自动重新生成。请说明结果，等待用户决定是否重试。");
                     imageGenerationAttempt.started = true;
                   } }
-                : context)
+                : callContext!)
             : (() => { throw new ModelError("Model requested a tool but no tool execution context was provided"); })();
       if (call.name === "web_search" && !tools.isLocal(call.name) && !search) {
         throw new ModelError("No web_search executor is available");
       }
+      const failed = tools.resultFailed?.(call.name, result) ?? false;
       onEvent?.({
-        type: "tool.completed",
+        type: failed ? "tool.failed" : "tool.completed",
         itemId: call.id,
         name: call.name,
         ...toolOperationIdentity(call),
@@ -347,7 +376,7 @@ async function executeToolCalls(
       return {
         call,
         result,
-        failed: false,
+        failed,
         preparesImageGeneration,
         images: isImageGenerationResult(result) ? [...result.images] : [],
         videos: isVideoGenerationResult(result) ? [...result.videos] : [],
@@ -388,9 +417,25 @@ async function executeToolCalls(
   const requiresSequentialExecution = calls.some((call) =>
     call.name === PREPARE_IMAGE_GENERATION_TOOL || tools.executionMode?.(call.name) === "sequential"
   );
-  if (!requiresSequentialExecution) return Promise.all(calls.map(executeCall));
+  const executeDurably = async (call: ModelToolCall) => {
+    context?.signal?.throwIfAborted();
+    const saved = durable?.reuse(call);
+    if (saved) {
+      onEvent?.({ type: saved.failed ? "tool.failed" : "tool.completed", itemId: call.id, name: call.name,
+        ...toolOperationIdentity(call), durationMs: 0,
+        presentation: tools.presentActivity(call.name, "completed", call.input, saved.result, {
+          referenceImageCount: context?.referenceImages?.length
+        }) });
+      return saved;
+    }
+    durable?.before(call);
+    const result = await executeCall(call);
+    durable?.complete(result);
+    return result;
+  };
+  if (!requiresSequentialExecution) return Promise.all(calls.map(executeDurably));
   const results: ExecutedToolResult[] = [];
-  for (const call of calls) results.push(await executeCall(call));
+  for (const call of calls) results.push(await executeDurably(call));
   return results;
 }
 
@@ -490,17 +535,163 @@ function generatedReplyForState(
   };
 }
 
+function instructionRevision(context?: ModelMemoryContext): string | undefined {
+  if (!context) return;
+  // Persistent profile and loaded instruction skills must remain compatible.
+  // Project references, attachment extracts and time are refreshed per prompt.
+  const skill = context.workspaceContext?.match(/<!-- current-skill-context -->\s*([\s\S]*?)\s*<!-- \/current-skill-context -->/)?.[1];
+  return createHash("sha256").update(JSON.stringify([context.longTermMemory.revision, context.longTermMemory.content, skill || ""])).digest("hex");
+}
+
+function modelInstructions(prompt: PromptAssembly, tools: AgentToolSet, initialDefinitions: readonly ModelTool[],
+  delegates: boolean, subagentInstruction?: string): string | undefined {
+  const hasWebSearchTool = initialDefinitions.some((tool) => tool.type === "web_search");
+  const progressInstruction = prompt.tools.length > 0
+    ? "Before potentially long-running work, give one concise sentence describing the intended work. After that, send progress text only for a new finding, a meaningful change of phase, or a blocker requiring the user's attention. Tool activities already show routine reading, editing, checking and running: do not announce each call, repeat the same plan, or keep saying you will now start, modify, check, commit or push. Continue directly from confirmed tool results; do not reread or rerun a completed operation without new evidence. Retain the active workspace, command session and exact commit across continuations. Reconcile uncertain writes through their saved command or remote state before retrying; a successful write must not be repeated as a check. Ordinary assistant text remains visible across tool calls: do not repeat earlier paragraphs in updates or the final answer. Do not invent results or promise completion times. Continue authorized work until the goal is handled, respecting cancellation, deadlines and access restrictions; do not invent tool-call or time budgets. Before claiming evidence is unavailable, reconcile that claim with successful tool results already received and name the specific gap. Do not reveal private chain-of-thought."
+    : undefined;
+  const webSearchInstruction = hasWebSearchTool
+    ? [
+        "You have web search on the current model route.",
+        "Use it for current information, news, prices, rules, time-sensitive facts, or whenever the user explicitly asks you to search.",
+        "When the user provides one or more URLs, include each exact URL in the web retrieval request together with the user's information need and any useful keywords; when no URL is provided, use an appropriate keyword query.",
+        "For stable questions, decide normally whether search is useful; do not search every question.",
+        "Do not claim that you lack search capability while this tool is mounted.",
+        "Every factual claim based on search must include a clickable source citation."
+      ].join(" ")
+    : undefined;
+  return [prompt.systemPrompt, ...Object.entries(tools.pluginPrompts ?? {}).filter(([name]) => initialDefinitions.some(tool => tool.type === "function" && tool.name === name)).map(([, text]) => text), subagentInstruction, delegates ? delegationInstruction : undefined, progressInstruction, webSearchInstruction,
+        ...(initialDefinitions.some(tool => tool.type === "function" && tool.name === "ask_user_question") ? [userQuestionInstruction] : [])
+      ].filter(Boolean).join("\n\n") || undefined;
+}
+
 export class AgentExecutor {
   private readonly teams = new Set<SubagentTeam>();
-  async close(): Promise<void> { await Promise.all([...this.teams].map(team => team.close())); this.teams.clear(); }
+  private readonly toolLeases = new Set<() => void>();
+  async close(): Promise<void> { await Promise.all([...this.teams].map(team => team.close())); this.teams.clear(); for (const release of this.toolLeases) release(); }
   constructor(
     private readonly model: ModelGateway,
     private readonly tools: AgentToolSet,
     private readonly retainRunResources?: (context: ToolExecutionContext | undefined) => (() => void) | undefined,
-    private readonly subagentStore?: SubagentStore
+    private readonly subagentStore?: SubagentStore,
+    private readonly journal?: ExecutionJournal
   ) {}
 
+  /** Predict the ordinary web turn's stable instruction/tool configuration
+   * without creating a run, granting a tool, or allocating user history. */
+  async prepareNativeConversation(provider: Provider, conversationKey: string, context: ModelMemoryContext,
+    scope: ToolExecutionContext, reasoningEfforts: AgentExecutionOptions["reasoningEfforts"], signal: AbortSignal): Promise<void> {
+    const lease = this.tools.lease?.();
+    try {
+      const tools = lease?.tools ?? this.tools;
+      const delegates = Boolean(this.subagentStore && tools.allows("subagents"));
+      const catalog = lease?.tools.pluginServices?.modelCatalog as ModelCatalogSnapshot | undefined;
+      const availableModels = catalog ? this.model.withCatalog(catalog, () => this.model.availableModels) : this.model.availableModels;
+      const initialDefinitions = tools.definitionsFor?.({ ...scope, pluginVersions: lease?.versions,
+        skillCatalog: tools.pluginServices?.skillCatalog as import("../skills/catalog.js").SkillCatalog | undefined, preparedSubagentModels: delegates ? availableModels : undefined }) ?? tools.definitions;
+      const skill = lease && tools.skillContextFor ? await tools.skillContextFor({ ...scope, pluginVersions: lease.versions,
+        skillCatalog: tools.pluginServices?.skillCatalog as import("../skills/catalog.js").SkillCatalog | undefined }) : "";
+      context = { ...context, workspaceContext: `<!-- current-skill-context -->\n${skill}\n<!-- /current-skill-context -->` };
+      const mounted = toolsForPhase(initialDefinitions, "decision", 0, undefined, Boolean(scope.imageGenerator?.conversation));
+      const prompt = assemblePrompt("", context, mounted);
+      const performance = this.model.performance;
+      await this.model.warmConversation(provider, {
+        conversationKey, sessionKey: scope.turnId === 0 && scope.sessionId === conversationKey ? undefined : scope.sessionId, tools: mounted, adapterTools: mounted, reasoningEfforts,
+        systemPrompt: modelInstructions(prompt, tools, initialDefinitions, delegates),
+        capabilityVersions: lease?.versions,
+        instructionRevision: instructionRevision(context),
+        measureNative: performance ? (metric, ms, outcome) => { performance.record(metric, ms, provider, outcome); } : undefined
+      }, signal);
+    } finally { lease?.release(); }
+  }
+
   async run(
+    userText: string,
+    context?: ModelMemoryContext,
+    provider: Provider = this.model.defaultProvider,
+    options: AgentExecutionOptions = {}
+  ): Promise<GeneratedReply> {
+    const scope = options.toolContext;
+    const previous = scope ? this.journal?.resume(this.journal.key(scope)) : undefined;
+    if (previous?.stage === "cancelled") throw new Error("EXECUTION_CANCELLED_REQUIRES_NEW_TURN");
+    if (previous?.reply && ["generated", "completed"].includes(previous.stage)) return previous.reply as GeneratedReply;
+    if (previous && this.journal?.nativePromptPending(previous.id)) {
+      throw new ModelHardStopError("result-unknown", "上次原生模型请求的结果尚未确认。请核对已完成的操作后重新发送。");
+    }
+    const versions = previous?.versions ?? options.pluginVersions;
+    const lease = versions && Object.keys(versions).length && this.tools.leaseVersions
+      ? await this.tools.leaseVersions(versions) : this.tools.lease?.();
+    const catalog = (lease?.tools.pluginServices?.modelCatalog as ModelCatalogSnapshot | undefined) ?? this.model.catalog;
+    const order = catalog?.providerOrder;
+    if (!previous && options.useDefaultIfUnavailable && order && !order.includes(provider)) {
+      provider = this.model.withCatalog(catalog, () => this.model.defaultProvider);
+    }
+    let saved;
+    try { saved = scope ? this.journal?.begin(scope, lease?.versions ?? versions ?? scope.pluginVersions ?? {}, { includeBodies: false }) : undefined; }
+    catch (error) { lease?.release(); throw error; }
+    if (!lease) {
+      try {
+        const work = () => this.runWithTools(userText, context, provider, options);
+        const result = await (catalog ? this.model.withCatalog(catalog, work) : work());
+        const reply = scope?.pluginVersions ? { ...result, pluginVersions: scope.pluginVersions } : result;
+        if (saved) this.journal!.update(saved.id, { stage: "generated", reply });
+        return reply;
+      } catch (error) {
+        // The task lease owns cancellation and recovery of text-only calls.
+        if (saved && (!options.signal?.aborted || !scope?.taskRunId)) {
+          this.journal!.update(saved.id, { stage: options.signal?.aborted ? "cancelled" : "failed" });
+        }
+        throw error;
+      }
+    }
+    options = { ...options, toolContext: scope ? { ...scope, pluginVersions: lease.versions,
+      skillCatalog: lease.tools.pluginServices?.skillCatalog as import("../skills/catalog.js").SkillCatalog | undefined } : undefined };
+    // Context preparation can await file/network services. Re-resolve instruction
+    // resources only after acquiring the exact journaled version lease.
+    if (!options.disableTools && context && options.toolContext && lease.tools.skillContextFor) {
+      try {
+        const current = await lease.tools.skillContextFor(options.toolContext);
+        const block = `<!-- current-skill-context -->\n${current}\n<!-- /current-skill-context -->`;
+        const previousContext = context.workspaceContext ?? "";
+        context = { ...context, workspaceContext: previousContext.includes("<!-- current-skill-context -->")
+          ? previousContext.replace(/<!-- current-skill-context -->[\s\S]*?<!-- \/current-skill-context -->/, () => block)
+          : `${previousContext}\n\n${block}` };
+      } catch (error) { if (saved) this.journal!.update(saved.id, { stage: "failed" }); lease.release(); throw error; }
+    }
+    let released = false;
+    const release = () => {
+      if (released) return; released = true;
+      lease.release(); this.toolLeases.delete(release); options.signal?.removeEventListener("abort", abort);
+    };
+    // An abort during a tool call must not unload it before its result is saved.
+    let suspended = false;
+    const abort = () => { if (suspended) release(); };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    this.toolLeases.add(release);
+    const executor = new AgentExecutor(this.model, lease.tools, this.retainRunResources, this.subagentStore, this.journal);
+    const settle = async (work: () => Promise<GeneratedReply>): Promise<GeneratedReply> => {
+      suspended = false;
+      try {
+        const result = await (catalog ? this.model.withCatalog(catalog, work) : work());
+        const reply = { ...result, pluginVersions: lease.versions };
+        if (saved) this.journal!.update(saved.id, { stage: "generated", reply });
+        release();
+        return reply;
+      }
+      catch (error) {
+        if (error instanceof AgentExecutionFallbackRequiredError && !options.signal?.aborted) {
+          suspended = true;
+          if (saved) this.journal!.update(saved.id, { stage: "suspended" });
+          throw new AgentExecutionFallbackRequiredError(error.modelError, selected => settle(() => error.resumeWithProvider(selected)), catalog);
+        }
+        if (saved && options.signal?.aborted && ["user_stop", "new_message", "session_change", "interaction_failed"].includes((options.signal.reason as {kind?:string})?.kind ?? "")) this.journal!.update(saved.id, {stage:"cancelled"});
+        if (saved && !options.signal?.aborted) this.journal!.update(saved.id, {stage:"failed"});
+        release(); throw error;
+      }
+    };
+    return settle(() => executor.runWithTools(userText, context, provider, options));
+  }
+
+  private async runWithTools(
     userText: string,
     context?: ModelMemoryContext,
     provider: Provider = this.model.defaultProvider,
@@ -523,7 +714,7 @@ export class AgentExecutor {
           finalTextOnly: true, automaticFallback: false,
           reasoningEfforts: options.reasoningEfforts ? { ...options.reasoningEfforts } : undefined,
           signal: child.signal, onEvent: child.onEvent, onUsage: child.onUsage, onTrace: child.onTrace,
-          toolContext: { ...scope, model: child.model, signal: child.signal, subagent: true, subagents: undefined,
+          toolContext: { ...scope, executionId: `subagent:${child.id}:${child.generation}`, model: child.model, signal: child.signal, subagent: true, subagents: undefined,
             presentOutput: undefined, replyId: undefined, presentImages: undefined, askUserQuestion: undefined },
           subagentInstruction: [
             `Your assigned English personal name is ${JSON.stringify(child.name)} and your professional identity is ${JSON.stringify(child.profession)}.`,
@@ -533,10 +724,13 @@ export class AgentExecutor {
             "Report findings with evidence, source links, changed files, pending jobs/confirmations, uncertainty and remaining work. Never claim pending work completed. Return your final report to the coordinator.",
             `Original user request (reference): ${JSON.stringify(userText)}`
           ].join("\n")
+        }).then(reply => {
+          this.journal?.complete({...scope,executionId:`subagent:${child.id}:${child.generation}`});
+          return reply;
         }), options.onEvent,
         usage => { state.usage = addUsage(state.usage, usage); },
         result => { state.citations.push(...result.citations); state.webSearchCalls.push(...result.webSearchCalls); },
-        closedTeam => this.teams.delete(closedTeam))
+        closedTeam => this.teams.delete(closedTeam), this.model.availableModels)
       : undefined;
     if (team) { this.teams.add(team); options = { ...options, toolContext: { ...scope!, subagents: team } }; }
     const inputImages = options.inputImages ?? [];
@@ -558,20 +752,6 @@ export class AgentExecutor {
             undefined, Boolean(options.toolContext?.imageGenerator?.conversation)
           )
         };
-    const hasWebSearchTool = initialDefinitions.some((tool) => tool.type === "web_search");
-    const progressInstruction = prompt.tools.length > 0
-      ? "Before starting potentially long-running work, such as generating an image or performing multi-step research, first give the user one concise, relevant progress sentence describing the intended work. Do not invent results or promise a completion time. For quick tool calls, explain the next action only when that context helps the user. Ordinary assistant text stays visible in the reply across tool calls: continue from it without repeating earlier paragraphs. Continue the requested work while an available, authorized next step can resolve the missing evidence. Do not invent a tool-call or time budget, assume the user is in a hurry, or stop merely because earlier attempts took effort. Honor actual cancellation, deadlines and access restrictions. Before claiming information is unavailable, reconcile that claim with successful tool results and images already received; use supported facts and identify the specific unresolved gap. Do not reveal private chain-of-thought."
-      : undefined;
-    const webSearchInstruction = hasWebSearchTool
-      ? [
-          "You have web search on the current model route.",
-          "Use it for current information, news, prices, rules, time-sensitive facts, or whenever the user explicitly asks you to search.",
-          "When the user provides one or more URLs, include each exact URL in the web retrieval request together with the user's information need and any useful keywords; when no URL is provided, use an appropriate keyword query.",
-          "For stable questions, decide normally whether search is useful; do not search every question.",
-          "Do not claim that you lack search capability while this tool is mounted.",
-          "Every factual claim based on search must include a clickable source citation."
-        ].join(" ")
-      : undefined;
     state = {
       team,
       contextState,
@@ -579,9 +759,8 @@ export class AgentExecutor {
       round: 0,
       messages: initialMessages(prompt, inputImages),
       currentInputIndex: (prompt.contextFrame ? 1 : 0) + (prompt.sessionSummary ? 1 : 0) + prompt.history.length,
-      baseSystemPrompt: [prompt.systemPrompt, options.subagentInstruction, team ? delegationInstruction : undefined, progressInstruction, webSearchInstruction,
-        ...(initialDefinitions.some(tool => tool.type === "function" && tool.name === "ask_user_question") ? [userQuestionInstruction] : [])
-      ].filter(Boolean).join("\n\n") || undefined,
+      instructionRevision: instructionRevision(context),
+      baseSystemPrompt: modelInstructions(prompt, this.tools, initialDefinitions, Boolean(team), options.subagentInstruction),
       imageGenerationPhase: "decision",
       imageGenerationAttempt: { started: false },
       referenceImages: [...(options.toolContext?.referenceImages ?? inputImages)],
@@ -596,7 +775,104 @@ export class AgentExecutor {
       answerParts: [],
       options
     };
+    const journalId = options.toolContext && this.journal ? this.journal.key(options.toolContext) : undefined;
+    const checkpoint = journalId ? this.journal?.checkpoint(journalId) as Partial<ExecutionState> | undefined : undefined;
+    if (checkpoint) {
+      if (checkpoint.savedContext) {
+        const saved = checkpoint.savedContext;
+        contextState.checkpoints = new Map(saved.checkpoints); contextState.calibration = new Map(saved.calibration);
+        contextState.nativeUnavailable = new Set(saved.nativeUnavailable); contextState.prunedResults = new Map(saved.prunedResults.map(([key,values])=>[key,new Set(values)]));
+        contextState.reportedWindows = new Map(saved.reportedWindows);
+      }
+      Object.assign(state, checkpoint, { options, contextState, team });
+      // A checkpoint resumes a new provider invocation; it cannot reconnect a lost network stream.
+      options.onEvent?.({ type:"response.reset", prefixes:[`${state.provider}-response-${state.round}`,`${state.provider}-thought-${state.round}`] });
+      state.journalId = journalId;
+      team?.restore(checkpoint.teamState);
+      const pendingAdapterCalls = state.pendingAdapterCalls?.filter(call => !state.messages.some(message =>
+        message.role === "assistant" && message.toolCalls?.some(existing => existing.id === call.id)));
+      if (pendingAdapterCalls?.length) state.messages.push({ role: "assistant", text: "", toolCalls: pendingAdapterCalls });
+      state.pendingAdapterCalls = undefined;
+      // Older adapter checkpoints may have journaled a callback before saving its request.
+      for (const savedCall of this.journal!.toolCalls(journalId!)) {
+        if (!state.messages.some(message => message.role === "assistant" && message.toolCalls?.some(call => call.id === savedCall.id))) {
+          state.messages.push({ role: "assistant", text: "", toolCalls: [savedCall] });
+        }
+      }
+      const answered = new Set(state.messages.filter(message => message.role === "tool").map(message => message.toolCallId));
+      const requests = state.messages.filter(message => message.role === "assistant" && message.toolCalls?.length);
+      for (const request of requests) {
+        if (request.role !== "assistant") continue;
+        const pending = request.toolCalls!.filter(call => !answered.has(call.id));
+        if (!pending.length) continue;
+        // Reuse committed results, reconcile claimed calls, and execute only never-claimed calls.
+        const executed = await this.executeCalls(state, pending);
+        const applied = applyExecutedResults(state, executed);
+        const position = state.messages.indexOf(request) + 1;
+        state.messages.splice(position, 0, ...applied.messages);
+        appendViewedImages(state, applied.viewedImages);
+        if (!state.toolTrace.some(message => message.role === "assistant" && message.toolCalls?.some(call => pending.some(item => item.id === call.id)))) {
+          state.toolTrace.push({ ...request, toolCalls: pending });
+        }
+        state.toolTrace.push(...applied.messages);
+        for (const call of pending) answered.add(call.id);
+        this.checkpoint(state);
+      }
+      options.onTrace?.(state.toolTrace);
+      state.round++;
+      options.onEvent?.({type:"response.completed",itemId:"execution-recovery",role:"commentary",text:"正在从已保存的进度继续处理。"});
+    }
+    state.journalId=journalId;
     return this.continue(state);
+  }
+
+  private checkpoint(state: ExecutionState): void {
+    if (!state.journalId || !this.journal) return;
+    const { options, contextState, team, ...checkpoint } = state;
+    this.journal.update(state.journalId, {stage:"running",checkpoint: { ...checkpoint, teamState: team?.checkpoint(), savedContext: {
+      checkpoints:[...contextState.checkpoints], calibration:[...contextState.calibration], nativeUnavailable:[...contextState.nativeUnavailable],
+      prunedResults:[...contextState.prunedResults].map(([key,values])=>[key,[...values]]), reportedWindows:[...contextState.reportedWindows]
+    } }});
+  }
+  private durableTools(state: ExecutionState) {
+    if (!state.journalId || !this.journal) return undefined;
+    return {
+      reuse: (call: ModelToolCall): ExecutedToolResult | undefined => {
+        const saved = this.journal!.tool(state.journalId!, call.id);
+        if (!saved) return;
+        if (saved.call.name !== call.name || JSON.stringify(saved.call.input) !== JSON.stringify(call.input)) throw new Error("TOOL_CALL_ID_CONFLICT");
+        if (["image_generation", "video_generation"].includes(call.name)) state.imageGenerationAttempt.started = true;
+        if (saved.state === "completed") {
+          const result=saved.result as ExecutedToolResult;
+          this.journal!.commitMessage(state.journalId!,`call:${call.id}`,{role:'assistant',text:'',toolCalls:[call]});
+          this.journal!.commitMessage(state.journalId!,`tool:${call.id}`,{role:'tool',toolCallId:call.id,value:resultContent(result.result),failed:result.failed});
+          return result;
+        }
+        // A claimed call may have performed a write before the host stopped. Never retry it.
+        const uncertain: ExecutedToolResult = {
+          call, result: { status: "outcome_uncertain", operation_id: saved.operationId,
+            message: "The host lost this call before its result was committed. Do not repeat a write or notification. Inspect the saved operation or remote target using read-only tools; request a fresh confirmation if a new write is needed." },
+          failed: true, preparesImageGeneration: false, images: [], videos: [], imageUsages: [], videoUsages: [], viewedImages: [], webSearchCalls: [], citations: []
+        };
+        this.journal!.completeTool(state.journalId!, call, uncertain,{role:'tool',toolCallId:call.id,value:resultContent(uncertain.result),failed:true});
+        return uncertain;
+      },
+      before: (call: ModelToolCall) => { this.checkpoint(state); this.journal!.startTool(state.journalId!,call); },
+      complete: (result: ExecutedToolResult) => this.journal!.completeTool(state.journalId!,result.call,result,
+        {role:'tool',toolCallId:result.call.id,value:resultContent(result.result),failed:result.failed})
+    };
+  }
+
+  private executeCalls(state: ExecutionState, calls: readonly ModelToolCall[]): Promise<ExecutedToolResult[]> {
+    return executeToolCalls(this.tools, calls, state.options.toolContext ? {
+      ...state.options.toolContext, model: state.provider, referenceImages: state.referenceImages,
+      reasoningEfforts: state.options.reasoningEfforts,
+      readLiveToolOutput: input => {
+        state.options.signal?.throwIfAborted();
+        return readContextToolResult(state.messages, input);
+      }
+    } : undefined, state.options.onEvent, state.imageGenerationPhase, state.imageGenerationAttempt,
+    state.imageGenerationAction, call => this.model.executeWebSearch(state.provider, call.input, state.options.signal), this.durableTools(state));
   }
 
   async generateReplyWithMetadata(
@@ -633,6 +909,7 @@ export class AgentExecutor {
     // Continue until the model finishes or the owning run is cancelled.
     while (true) {
       state.options.signal?.throwIfAborted();
+      this.checkpoint(state);
       const round = state.round;
       const hostedToolStartedAt = new Map<string, number>();
       const availableDefinitions = state.options.disableTools ? [] : this.tools.definitionsFor?.(state.options.toolContext) ?? this.tools.definitions;
@@ -648,8 +925,22 @@ export class AgentExecutor {
       const adapterTools = roundTools;
       let adapterCapabilitiesChanged = false;
       let invocation;
+      const cursor = this.tools.pluginServices?.cursorModel as AcpModelService | undefined;
+      const antigravity = this.tools.pluginServices?.antigravityModel as AcpModelService | undefined;
       try {
         invocation = await this.model.invokeRound(state.provider, {
+          ...(state.options.codexChat ? { codexChat: state.round === 0 ? state.options.codexChat : {
+            consumePrevious: state.options.codexChat.consumePrevious
+          } } : {}),
+          acpChat: state.options.acpChat && (state.round === 0 && !state.pendingAdapterCalls?.length
+            ? state.options.acpChat : { ...state.options.acpChat, previous: undefined }),
+          codexModel: (this.tools.pluginServices?.codexModel as import("../models/types.js").NativeModelService | undefined)?.invoke,
+          capabilityVersions: state.options.toolContext?.pluginVersions,
+          instructionRevision: state.instructionRevision,
+          beforeNativePrompt: state.journalId && state.options.acpChat ? () => this.journal!.markNativePromptPending(state.journalId!, true) : undefined,
+          cursorModel: cursor?.invoke ?? cursor?.invokeCursorRound,
+          antigravityModel: antigravity?.invoke ?? antigravity?.invokeAntigravityRound,
+          protocolAdapter: (this.tools.pluginServices?.modelProtocol as ModelProtocolService | undefined)?.buildProtocolRequest,
           contextState: state.contextState,
           onContextProgress: () => {
             if (state.compressionAnnounced) return;
@@ -681,31 +972,25 @@ export class AgentExecutor {
           signal: state.options.signal,
           executeTool: async (call) => {
             if (state.options.disableTools) return { text: "Tools are disabled for this text-only edit.", failed: true };
+            if (adapterCapabilitiesChanged) return {
+              text: "The tool catalog changed. Continue with the saved tool results in a new invocation.",
+              failed: true, refreshTools: true
+            };
             state.options.signal?.throwIfAborted();
-            const executed = await executeToolCalls(
-              this.tools,
-              [call],
-              state.options.toolContext
-                ? { ...state.options.toolContext, model: state.provider, referenceImages: state.referenceImages, reasoningEfforts: state.options.reasoningEfforts,
-                  readLiveToolOutput: input => {
-                    state.options.signal?.throwIfAborted();
-                    return readContextToolResult(state.messages, input);
-                  } }
-                : undefined,
-              state.options.onEvent,
-              state.imageGenerationPhase,
-              state.imageGenerationAttempt,
-              state.imageGenerationAction,
-              (requested) => this.model.executeWebSearch(state.provider, requested.input, state.options.signal)
-            );
+            if (state.journalId) this.journal?.adapterBoundary(state.journalId,call.id);
+            const assistantCall: ModelConversationMessage = { role: "assistant", text: "", toolCalls: [call] };
+            (state.pendingAdapterCalls ??= []).push(call);
+            this.checkpoint(state);
+            const executed = await this.executeCalls(state, [call]);
+            state.pendingAdapterCalls = state.pendingAdapterCalls?.filter(pending => pending.id !== call.id);
             const previousPhase = state.imageGenerationPhase;
             const applied = applyExecutedResults(state, executed);
-            const assistantCall: ModelConversationMessage = { role: "assistant", text: "", toolCalls: [call] };
             // Preserve callback results for the next catalog round and route fallback replay.
             state.messages.push(assistantCall);
             appendToolResults(state, applied.messages, applied.viewedImages);
             state.toolTrace.push(assistantCall, ...applied.messages);
             state.options.onTrace?.(state.toolTrace);
+            state.options.signal?.throwIfAborted();
             const latestDefinitions = state.options.disableTools ? [] : this.tools.definitionsFor?.(state.options.toolContext) ?? this.tools.definitions;
             adapterCapabilitiesChanged ||= previousPhase !== state.imageGenerationPhase
               || latestDefinitions.some((definition) => definition.type === "function"
@@ -714,22 +999,32 @@ export class AgentExecutor {
             return {
               text: resultContent(entry.result),
               failed: entry.failed,
+              ...(adapterCapabilitiesChanged ? { refreshTools: true } : {}),
               // The official image conversation owns visual interpretation.
               // Generated bytes go to delivery, not back through the routing model.
               images: call.name === "image_generation" && state.options.toolContext?.imageGenerator?.conversation
                 ? entry.viewedImages : [...entry.images, ...entry.viewedImages]
             };
           },
-          ...(state.options.onEvent ? { onUpdate: (update: import("../models/types.js").ModelRoundUpdate) => {
+          ...(state.options.onEvent || state.journalId ? { onUpdate: (update: import("../models/types.js").ModelRoundUpdate) => {
+            if (state.journalId) this.journal?.output(state.journalId,update,round);
+            if (update.type === "wait") {
+              const itemId = `${update.provider}-commentary-${round}-wait`;
+              state.options.onEvent?.(update.message
+                ? { type: "response.completed", itemId, role: "commentary", text: update.message }
+                : { type: "response.reset", prefixes: [itemId] });
+            }
             if (update.type === "visual.preparing" && !adapterCapabilitiesChanged) {
               state.options.onEvent?.({ type: "visual.preparing", itemId: `${update.provider}-commentary-${round}-visual-${update.itemId}` });
             }
             if (update.type === "attempt.reset") {
-              state.options.onEvent?.({ type: "response.reset", prefixes: [
+              state.options.onEvent?.({ type: "response.reset", prefixes: update.itemIds
+                ? update.itemIds.map(id => `${update.provider}-response-${round}-${id}`) : [
                 `${update.provider}-thought-${round}`, `${update.provider}-response-${round}`, `${update.provider}-commentary-${round}`
               ] });
             }
             if (update.type === "route") {
+              if (state.journalId) this.journal?.route(state.journalId,update,round);
               state.options.onEvent?.({
                 type: "model.route",
                 itemId: `${update.name}-${round}-${update.status}`,
@@ -797,6 +1092,12 @@ export class AgentExecutor {
       }
 
       const result = invocation.value;
+      if (state.journalId) this.journal?.roundComplete(state.journalId,round,{
+        role:'assistant',text:result.text,provider:invocation.provider,modelProtocol:invocation.route.protocol,
+        reasoningContent:result.reasoningContent,textItems:result.textItems,nativeState:result.nativeState,
+        searchEvidence:result.webSearchCalls.length ? {version:1,model:invocation.route.name,origin:'provider',calls:result.webSearchCalls,citations:result.citations} : undefined,
+        toolCalls:result.toolCalls
+      });
       state.options.signal?.throwIfAborted();
       const actualProvider = invocation.provider;
       const actualRoute = invocation.route;
@@ -814,9 +1115,14 @@ export class AgentExecutor {
         state.toolTrace.push(searchRecord);
         state.options.onTrace?.(state.toolTrace);
       }
-      if (adapterCapabilitiesChanged && result.toolCalls.length === 0) {
+      if ((adapterCapabilitiesChanged || result.requiresContinuation) && result.toolCalls.length === 0) {
         // Do not finish after an adapter loaded a project or prepared image generation:
         // its thread was created before those capabilities were available.
+        // A supplier that finished with host tools still pending also needs to
+        // consume those results, including the real user's question answers.
+        if (result.requiresContinuation) state.options.onEvent?.({
+          type: "response.reset", prefixes: [`${actualProvider}-response-${round}`]
+        });
         state.round += 1;
         continue;
       }
@@ -832,6 +1138,9 @@ export class AgentExecutor {
             { role: "tool", toolCallId: id, value: content, failed: false }
           ];
           state.messages.push(...collected); state.toolTrace.push(...collected);
+          collected.forEach((message,index)=>{
+            if (state.journalId) this.journal?.commitMessage(state.journalId,`${id}:${index}`,message);
+          });
           state.options.onTrace?.(state.toolTrace);
           state.round += 1;
           continue;
@@ -863,7 +1172,9 @@ export class AgentExecutor {
           ? classifiedText.filter(item => item.role === "answer").map(item => item.text).join("\n\n")
           : state.answerParts.join("\n\n");
         if (state.team) { await state.team.close(); this.teams.delete(state.team); }
-        return generatedReplyForState(state, actualProvider, actualRoute, answer);
+        const reply = generatedReplyForState(state, actualProvider, actualRoute, answer);
+        return { ...reply, ...(answer && result.codexThread ? { codexThread: result.codexThread } : {}),
+          ...(answer && result.acpSession ? { acpSession: result.acpSession } : {}) };
       }
 
       // Enforce the boundary locally even if a supplier ignores tool_choice=none.
@@ -884,22 +1195,11 @@ export class AgentExecutor {
       // superseded this run. Tools already in flight are allowed to settle,
       // then the next boundary below prevents another model round.
       state.options.signal?.throwIfAborted();
-      const executed = await executeToolCalls(
-        this.tools,
-        result.toolCalls,
-        state.options.toolContext
-          ? { ...state.options.toolContext, model: actualProvider, referenceImages: state.referenceImages, reasoningEfforts: state.options.reasoningEfforts,
-            readLiveToolOutput: input => {
-              state.options.signal?.throwIfAborted();
-              return readContextToolResult(state.messages, input);
-            } }
-          : undefined,
-        state.options.onEvent,
-        state.imageGenerationPhase,
-        state.imageGenerationAttempt,
-        state.imageGenerationAction,
-        (call) => this.model.executeWebSearch(actualProvider, call.input, state.options.signal)
-      );
+      this.checkpoint(state);
+      if (state.journalId && ["cursor-acp", "antigravity-acp", "codex-app-server"].includes(actualRoute.protocol)) {
+        this.journal!.markNativePromptPending(state.journalId, false);
+      }
+      const executed = await this.executeCalls(state, result.toolCalls);
       const applied = applyExecutedResults(state, executed);
       const toolResultMessages = applied.messages;
       appendToolResults(state, toolResultMessages, applied.viewedImages);

@@ -32,14 +32,14 @@ export function isContextEvidence(value: unknown): value is ContextEvidence {
 }
 
 /** A bounded, deterministic index of the actual source, not a claim that its summary is lossless. */
-export function contextEvidence(messages: readonly ModelConversationMessage[]): ContextEvidence {
+export function contextEvidence(messages: readonly ModelConversationMessage[], fingerprint = messageFingerprint): ContextEvidence {
   const turns = [...new Set(messages.flatMap(message => message.role === "user" && message.sourceTurnId !== undefined
     ? [message.sourceTurnId] : []))];
   const calls = new Map(messages.flatMap(message => message.role === "assistant"
     ? message.toolCalls.map(call => [call.id, call.name] as const) : []));
   const results = messages.flatMap(message => message.role === "tool" ? [{ callId: message.toolCallId,
     name: calls.get(message.toolCallId), hash: hashText(message.value), chars: [...message.value].length, failed: message.failed }] : []);
-  return { version: 1, sourceHash: hashText(messages.map(messageFingerprint).join("\n")), messageCount: messages.length,
+  return { version: 1, sourceHash: hashText(messages.map(fingerprint).join("\n")), messageCount: messages.length,
     turnIds: turns.slice(-64), omittedTurnCount: Math.max(0, turns.length - 64),
     toolResults: results.slice(-64), omittedToolCount: Math.max(0, results.length - 64) };
 }

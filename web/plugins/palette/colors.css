@@ -1,0 +1,644 @@
+/* Zigent color palette. The default values apply before the theme is selected. */
+:root {
+  --palette-page: #faf9f5;
+  --palette-surface: #ffffff;
+  --palette-ink: #141413;
+  --palette-muted: #66645e;
+  --palette-line: color-mix(in srgb, var(--palette-ink) 13%, var(--palette-page));
+  --palette-brown-accent: #d97757;
+  --palette-ins-blue-accent: #336981;
+  --palette-light-pink-accent: #832d48;
+  --palette-lipstick-red-accent: #8c1a1b;
+  --palette-accent: var(--palette-brown-accent);
+  --palette-accent-strong: var(--palette-accent);
+  --palette-selection: #f0e1d8;
+  --palette-soft: var(--palette-selection);
+  --palette-support: #805a25;
+  --palette-detail: #376b78;
+  --palette-on-accent: var(--palette-ink);
+  --palette-action-hover: color-mix(in srgb, var(--palette-accent) 90%, var(--palette-on-accent));
+  --palette-link: var(--palette-support);
+  --palette-hover: var(--palette-soft);
+  --palette-track: #938f84;
+  --palette-warning: #8f603c;
+  --palette-warning-surface: #f1e9dc;
+  --palette-danger: #b5463b;
+  --palette-danger-surface: #fbe8e4;
+  --palette-success: #61866a;
+  --palette-focus: var(--palette-accent);
+  --palette-mask: #000000;
+  --palette-white: #ffffff;
+  --palette-glass: color-mix(in srgb, var(--palette-page) 50%, transparent);
+  --palette-glass-shadow: #24231b14;
+
+  --ui-bg: var(--palette-page);
+  --ui-surface: var(--palette-surface);
+  --ui-text: var(--palette-ink);
+  --ui-muted: var(--palette-muted);
+  --ui-line: var(--palette-line);
+  --ui-accent: var(--palette-accent-strong);
+  --ui-soft: var(--palette-soft);
+  --ui-support: var(--palette-support);
+  --ui-detail: var(--palette-detail);
+  --ui-on-accent: var(--palette-on-accent);
+  --ui-track: var(--palette-track);
+  --ui-series-1: var(--ui-accent);
+  --ui-series-2: var(--ui-support);
+  --ui-series-3: var(--ui-detail);
+  --ui-series-4: #876937;
+  --ui-series-5: #815d70;
+  --ui-series-6: #675e54;
+  --ui-series-7: #916248;
+  --ui-series-8: #436d72;
+  --ui-series-9: #6b713f;
+  --ui-series-10: #915663;
+  --ui-series-11: #576b7d;
+  --ui-series-12: #805f4c;
+
+  --palette-sleep-awake: #c77950;
+  --palette-sleep-rem: #9273c8;
+  --palette-sleep-core: #4b96b6;
+  --palette-sleep-deep: #5667b5;
+  --palette-sleep-asleep: #568f80;
+  --palette-sleep-conflict: #c85d77;
+}
+
+::selection {
+  background-color: var(--palette-selection);
+  color: var(--palette-ink);
+}
+
+:root[data-theme="dark"] {
+  --palette-page: #000000;
+  /* Night cards mix a little of the active accent into black. The page stays black. */
+  --palette-surface: color-mix(in srgb, var(--palette-accent) 6%, #000000);
+  --palette-ink: #f2f2f2;
+  --palette-muted: #b5b5b5;
+  --palette-ins-blue-accent: #9bd0f5;
+  --palette-light-pink-accent: #ff9dca;
+  --palette-lipstick-red-accent: #f06a68;
+  --palette-selection: #33221c;
+  --palette-reply-selection: color-mix(in srgb, var(--palette-accent) 48%, var(--palette-page));
+  --palette-support: #d5b575;
+  --palette-detail: #8fc5d1;
+  --palette-on-accent: var(--palette-page);
+  --palette-link: var(--palette-accent);
+  --palette-track: #78746a;
+  --palette-warning: #e1b887;
+  --palette-warning-surface: #3b3023;
+  --palette-danger: #efa28d;
+  --palette-danger-surface: #52312a;
+  --palette-success: #91b99a;
+  --palette-glass-shadow: #00000030;
+
+  --ui-series-4: #ceb075;
+  --ui-series-5: #bf98ac;
+  --ui-series-6: #ad9f90;
+  --ui-series-7: #caa18a;
+  --ui-series-8: #83adaf;
+  --ui-series-9: #a6ad79;
+  --ui-series-10: #d1979f;
+  --ui-series-11: #a1acbd;
+  --ui-series-12: #c2a186;
+
+  --palette-sleep-awake: #e8a383;
+  --palette-sleep-rem: #c4a8e6;
+  --palette-sleep-core: #80bccc;
+  --palette-sleep-deep: #8895dc;
+  --palette-sleep-asleep: #83bdab;
+  --palette-sleep-conflict: #e993a7;
+}
+
+/* Component colors that have their own light and dark treatments. */
+:root {
+  --palette-calendar-accent: var(--palette-accent);
+  --palette-calendar-faint: var(--palette-soft);
+  --palette-mindmap-map-sheet: var(--palette-page);
+  --palette-mindmap-map-dot: #c9c3b547;
+  --palette-mindmap-map-root: var(--palette-accent);
+  --palette-mindmap-map-root-ink: var(--palette-on-accent);
+  --palette-mindmap-map-fill: var(--palette-surface);
+  --palette-mindmap-branch-1: #ad765b;
+  --palette-mindmap-branch-2: #7e927a;
+  --palette-mindmap-branch-3: #8295a3;
+  --palette-mindmap-branch-4: #ad9664;
+  --palette-mindmap-branch-5: #99869a;
+  --palette-todo-sheet: #fffdf8;
+  --palette-todo-wash: #f4f1e8;
+  --palette-todo-green: #617562;
+  --palette-todo-priority: #9a9384;
+  --palette-todo-priority-2: #60839b;
+  --palette-todo-priority-3: #bb8b39;
+  --palette-todo-priority-4: #b65a49;
+  --palette-dashboard-paper: #f6f5f1;
+  --palette-dashboard-surface: #fffefa;
+  --palette-dashboard-ink: #242925;
+  --palette-dashboard-muted: #777e76;
+  --palette-dashboard-line: #dedfd7;
+  --palette-dashboard-green: #307357;
+  --palette-dashboard-green-soft: #e8eee6;
+  --palette-dashboard-orange: #bc633d;
+  --palette-dashboard-red: #b5463b;
+  --palette-document-reader-highlight-bg-color: #ffc40066;
+  --palette-document-reader-highlight-selected-bg-color: #ff8c0088;
+  --palette-syntax-comment: #586959;
+  --palette-syntax-keyword: #8b268d;
+  --palette-syntax-string: #176d39;
+  --palette-syntax-number: #a43e0b;
+  --palette-syntax-title: #0754a5;
+  --palette-syntax-attribute: #a12c30;
+  --palette-syntax-deletion: #ac2424;
+  --palette-writing-paper: var(--palette-surface);
+  --palette-writing-sheen: #ffffff45;
+  --palette-writing-shadow: #40351c0d;
+  --palette-studio-paper: #f6f5f1;
+  --palette-studio-surface: #fffefa;
+  --palette-studio-ink: #262923;
+  --palette-studio-muted: #85877e;
+  --palette-studio-line: #dedfd6;
+  --palette-studio-soft: #eeeee7;
+  --palette-studio-accent: #b54d32;
+  --palette-studio-green: #43745c;
+}
+:root[data-theme="dark"] {
+  --palette-mindmap-map-dot: #9e958534;
+  --palette-mindmap-branch-1: #c7977c;
+  --palette-mindmap-branch-2: #99ad90;
+  --palette-mindmap-branch-3: #8fabbc;
+  --palette-mindmap-branch-4: #c5ad7b;
+  --palette-mindmap-branch-5: #b5a1b6;
+  --palette-todo-sheet: #25241f;
+  --palette-todo-wash: #302e28;
+  --palette-todo-green: #89a18a;
+  --palette-todo-priority-2: #8eafc6;
+  --palette-todo-priority-3: #d2ad68;
+  --palette-todo-priority-4: #e49280;
+  --palette-syntax-comment: #a5b6a3;
+  --palette-syntax-keyword: #e3a4ef;
+  --palette-syntax-string: #8de0a5;
+  --palette-syntax-number: #ffb581;
+  --palette-syntax-title: #8ec5ff;
+  --palette-syntax-attribute: #ffaaa4;
+  --palette-syntax-deletion: #ff9999;
+  --palette-writing-sheen: #ffffff04;
+  --palette-writing-shadow: #00000024;
+}
+
+/* Browser workspace */
+:root {
+  --palette-browser-editor-ink: #222222;
+  --palette-browser-workspace-fill: #191b19;
+  --palette-browser-workspace-text: #292722;
+  --palette-browser-workspace-fill-2: #0008;
+  --palette-browser-workspace-border: #dedcd4;
+  --palette-browser-workspace-fill-3: #eeece5;
+  --palette-browser-workspace-outline: #8a5c47;
+  --palette-browser-workspace-browser-heading-fill: #faf9f5;
+  --palette-browser-workspace-browser-status-text: #77736b;
+  --palette-browser-workspace-browser-status-fill: #999;
+  --palette-browser-workspace-browser-status-shadow: #9991;
+  --palette-browser-workspace-fill-4: #53836b;
+  --palette-browser-workspace-shadow: #53836b18;
+  --palette-browser-workspace-fill-5: #b4853c;
+  --palette-browser-workspace-shadow-2: #b4853c18;
+  --palette-browser-workspace-text-2: #fff;
+  --palette-browser-workspace-browser-viewport-fill: #2a2d2a;
+  --palette-browser-workspace-browser-viewport-fill-2: #181a18;
+  --palette-browser-workspace-browser-viewport-scrollbar-color: #555;
+  --palette-browser-workspace-browser-surface-shadow: #0005;
+  --palette-browser-workspace-browser-drawer-shadow: #0004;
+  --palette-browser-workspace-browser-feedback-border: #ffffff18;
+  --palette-browser-workspace-browser-feedback-fill: #20231fee;
+  --palette-browser-workspace-browser-feedback-shadow: #0003;
+  --palette-browser-workspace-browser-feedback-text: #f6f5f1;
+  --palette-browser-workspace-browser-dialog-actions-shadow: #0001;
+}
+
+/* Activity */
+:root {
+  --palette-activity-process-text: #aaa396;
+  --palette-activity-process-border: #e6c2b1;
+  --palette-activity-diff-add-text: #398744;
+  --palette-activity-diff-remove-text: #c74c5c;
+  --palette-activity-diff-card-fill: #faf9f6;
+  --palette-activity-diff-hunk-text: #a15b9f;
+}
+
+/* Document card */
+:root {
+  --palette-document-card-document-file-card-text: var(--palette-support);
+  --palette-document-card-document-file-card-text-2: var(--palette-link);
+  --palette-document-card-memory-diff-line-text: #655c50;
+  --palette-document-card-memory-diff-line-text-2: #805035;
+  --palette-document-card-memory-diff-line-fill: #f3e6dc;
+  --palette-document-card-memory-diff-line-text-3: #756d62;
+  --palette-document-card-memory-diff-line-fill-2: #eeece5;
+  --palette-document-card-memory-diff-line-text-4: #80786b;
+}
+
+/* Operations */
+:root {
+  --palette-operations-model-sheet-fill: #f0ede6;
+  --palette-operations-model-sheet-fill-2: #f3eae1;
+  --palette-operations-model-reasoning-slider-shadow: #0002;
+  --palette-operations-model-option-price-text: #746e63;
+  --palette-operations-border: #e4e0d6;
+  --palette-operations-deployment-progress-text: #b34436;
+  --palette-operations-deployment-progress-text-2: #e58e83;
+  --palette-operations-description-text: #655c50;
+  --palette-operations-control-text: #6d6255;
+  --palette-operations-control-fill: #ad5739;
+  --palette-operations-control-text-2: #fffaf4;
+  --palette-operations-control-fill-2: #a45032;
+  --palette-operations-control-outline: #b7684c;
+  --palette-operations-link-border: #d7d1c4;
+  --palette-operations-task-plan-schedule-text: #443a2e;
+  --palette-operations-codex-phase-text: #dc906d;
+  --palette-operations-codex-item-text: #a55f52;
+  --palette-operations-codex-item-text-2: #e88f7f;
+  --palette-operations-codex-item-fill: rgba(127,127,127,.07);
+  --palette-operations-codex-dispatch-field-border: #8885;
+  --palette-operations-codex-dispatch-field-outline: #458578;
+}
+
+/* Operation preview */
+:root {
+  --palette-operation-preview-operation-view-todo-border: #61866a;
+  --palette-operation-preview-operation-view-todo-border-2: #91b99a;
+}
+
+/* Todo */
+:root {
+  --palette-todo-preview-task-todo-delete: #a55f52;
+  --palette-todo-preview-task-todo-delete-2: #e49280;
+}
+
+/* Output */
+:root {
+  --palette-output-css-text: var(--palette-ink);
+  --palette-output-card-open-border: var(--palette-line);
+  --palette-output-card-open-border-2: var(--palette-support);
+  --palette-output-card-open-fill-2: var(--palette-soft);
+  --palette-output-card-meta-text: var(--palette-muted);
+  --palette-output-card-preview-text: var(--palette-muted);
+  --palette-output-sheet-fill: var(--palette-surface);
+  --palette-output-sheet-shadow: #0003;
+  --palette-output-sheet-fill-2: #17160f66;
+  --palette-output-kicker-text: var(--palette-muted);
+  --palette-output-close-fill: var(--palette-soft);
+  --palette-output-chart-grid-stroke: var(--palette-line);
+  --palette-output-table-fill: var(--palette-soft);
+  --palette-output-step-mark-border: var(--palette-line);
+  --palette-output-step-fill: #647b6812;
+  --palette-output-step-border: #647b6830;
+  --palette-output-step-text: #55765c;
+  --palette-output-toolbar-border: var(--palette-line);
+  --palette-output-toolbar-fill: var(--palette-surface);
+  --palette-output-toolbar-text: var(--palette-muted);
+  --palette-output-toolbar-fill-2: var(--palette-soft);
+  --palette-output-artifact-actions-text: var(--palette-accent);
+}
+
+/* Subagent */
+:root {
+  --palette-subagent-mochi-shadow-fill: #0003;
+}
+
+/* Trigger */
+:root {
+  --palette-trigger-map-building-fill: #e5e1d7;
+  --palette-trigger-map-green-fill: #e0e3d7;
+  --palette-trigger-map-water-fill: #e0e7e5;
+  --palette-trigger-map-path-stroke: #dad7cd;
+  --palette-trigger-map-dialog-fill: #17161180;
+  --palette-trigger-map-building-fill-2: #39362e;
+  --palette-trigger-map-green-fill-2: #30392e;
+  --palette-trigger-map-water-fill-2: #2b3638;
+  --palette-trigger-map-major-stroke: #4b473e;
+  --palette-trigger-map-path-stroke-2: #403e36;
+}
+
+/* Dashboard */
+:root {
+  --palette-dashboard-sidebar-fill: #efefe8;
+  --palette-dashboard-sidebar-text: #636b63;
+  --palette-dashboard-sidebar-fill-2: #e6e7df;
+  --palette-dashboard-switch-fill: white;
+  --palette-dashboard-feedback-fill: #f0e9dc;
+  --palette-dashboard-feedback-text: #85563b;
+  --palette-dashboard-memory-key-fill: #a3b195;
+  --palette-dashboard-chart-stroke: #e9eae3;
+  --palette-dashboard-chart-fill: #e6eee4;
+  --palette-dashboard-td-border-top: #e7e8e0;
+  --palette-dashboard-page-foot-text: #92968e;
+  --palette-dashboard-dialog-shadow: #18231925;
+  --palette-dashboard-dialog-fill: #20271f55;
+  --palette-dashboard-lab-scenario-fill: #eeeae1;
+  --palette-dashboard-lab-stage-fill: #e7e4dd;
+  --palette-dashboard-lab-stage-background-image: #bfb9ae;
+  --palette-dashboard-lab-frame-fill: #faf9f5;
+  --palette-dashboard-lab-frame-shadow: #24201612;
+  --palette-dashboard-lab-editor-fill: #fcfbf8;
+  --palette-dashboard-lab-feedback-text: #a6472b;
+}
+
+/* Document reader */
+:root {
+  --palette-document-reader-dr-surface: #fff;
+  --palette-document-reader-dr-line: #e9e9e7;
+  --palette-document-reader-border: #ffffff40;
+  --palette-document-reader-text: #222;
+  --palette-document-reader-shadow: #0003;
+  --palette-document-reader-fill: #24262859;
+  --palette-document-reader-fill-2: #f0f0ee;
+  --palette-document-reader-outline: #687d6d;
+  --palette-document-reader-fill-3: #f3f3f1;
+  --palette-document-reader-dr-container-shadow: #0000000c;
+  --palette-document-reader-dr-container-fill: white;
+  --palette-document-reader-dr-status-text: #777;
+  --palette-document-reader-dr-spinner-border-top-color: #888;
+  --palette-document-reader-dr-container-shadow-2: #0001;
+}
+
+/* Document workspace */
+:root {
+  --palette-document-workspace-paper-fill: #d9775720;
+  --palette-document-workspace-feedback-text: #aa543c;
+}
+
+/* File workbench */
+:root {
+  --palette-file-workbench-border: #ddd9cf;
+  --palette-file-workbench-fill: #faf9f5;
+  --palette-file-workbench-text: #292722;
+  --palette-file-workbench-shadow: #0003;
+  --palette-file-workbench-fill-2: #0005;
+  --palette-file-workbench-fill-3: #efede6;
+  --palette-file-workbench-outline: #8a5c47;
+  --palette-file-workbench-fw-feedback-fill: #f2f0e9;
+  --palette-file-workbench-fw-sidebar-fill: #f1efe8;
+  --palette-file-workbench-fw-sidebar-heading-text: #77736b;
+}
+
+/* Reply */
+:root {
+  --palette-reply-message-context-dialog-fill: rgb(30 28 24 / 17%);
+  --palette-reply-message-context-preview-shadow: rgb(20 18 14 / 10%);
+  --palette-reply-message-context-menu-fill: rgb(253 252 248 / 96%);
+  --palette-reply-message-context-menu-border: rgb(255 255 255 / 70%);
+  --palette-reply-message-context-menu-shadow: rgb(27 24 18 / 16%);
+  --palette-reply-message-context-menu-shadow-2: rgb(27 24 18 / 4%);
+  --palette-reply-message-context-item-border-top: rgb(45 40 30 / 7%);
+  --palette-reply-message-context-item-fill: rgb(40 34 22 / 5%);
+  --palette-reply-message-context-item-fill-2: rgb(40 34 22 / 9%);
+  --palette-reply-message-selection-dialog-fill: rgb(25 23 18 / 20%);
+  --palette-reply-selection: var(--palette-selection);
+  --palette-reply-selection-toolbar-text: color-mix(in srgb, var(--palette-accent) 82%, var(--palette-ink));
+  --palette-reply-selection-toolbar-divider: color-mix(in srgb, var(--palette-accent) 32%, transparent);
+  --palette-reply-selection-toolbar-hover: color-mix(in srgb, var(--palette-accent) 20%, var(--palette-surface));
+  --palette-reply-annotation-dialog-fill: #ffffff66;
+}
+
+/* Schedule */
+:root {
+  --palette-schedule-tab-shadow: #0000000a;
+  --palette-schedule-menu-popup-shadow: #0002;
+  --palette-schedule-delete-text: #bd6e5b;
+  --palette-schedule-check-border: #89a18a;
+}
+
+/* Shell */
+:root {
+  --palette-shell-icon-button-fill: #eae8e080;
+  --palette-shell-password-field-border: var(--palette-line);
+  --palette-shell-login-error-text: #a0442f;
+  --palette-shell-conversation-sidebar-border-right: var(--palette-line);
+  --palette-shell-history-search-border: var(--palette-line);
+  --palette-shell-history-search-text: var(--palette-muted);
+  --palette-shell-avatar-fill: #e5dfd2;
+  --palette-shell-connection-status-shadow: #24231b0a;
+  --palette-shell-connection-status-text: #835d3b;
+  --palette-shell-connection-status-border: #dfceb7;
+  --palette-shell-dismiss-notice-fill: #835d3b12;
+  --palette-shell-composer-border: #e5e2d9;
+  --palette-shell-composer-shadow: #24231b07;
+  --palette-shell-composer-border-2: #ccc7bb;
+  --palette-shell-attach-button-fill: #f5f4ef;
+  --palette-shell-attach-button-fill-2: #eceae2;
+  --palette-shell-microphone-button-text: #b7443a;
+  --palette-shell-send-fill: #d3cfc5;
+  --palette-shell-attachment-fill: #4c4a44;
+  --palette-shell-attachment-status-fill: #34322ed9;
+  --palette-shell-attachment-fill-2: #8c302de6;
+  --palette-shell-task-check-border: #b9b5aa;
+  --palette-shell-task-check-border-2: #777365;
+  --palette-shell-message-text-border-left: var(--palette-support);
+  --palette-shell-message-text-text: var(--palette-muted);
+  --palette-shell-message-text-fill: #f0eee7;
+  --palette-shell-code-block-border: var(--palette-line);
+  --palette-shell-code-block-fill: #f3f2ed;
+  --palette-shell-code-heading-border-bottom: var(--palette-line);
+  --palette-shell-mermaid-viewer-fill: #171611;
+  --palette-shell-message-text-fill-2: #f3f1ea;
+  --palette-shell-image-viewer-fill: #171817;
+  --palette-shell-image-viewer-toolbar-border: #ffffff40;
+  --palette-shell-message-action-text: #777166;
+  --palette-shell-scrim-fill: #17161159;
+  --palette-shell-sheet-shadow: #0002;
+  --palette-shell-dialog-heading-fill: #edebe4;
+  --palette-shell-sheet-border: var(--palette-line);
+  --palette-shell-logout-text: #a24d37;
+  --palette-shell-logout-fill: #efe8dd;
+  --palette-shell-conversation-sidebar-shadow: #00000010;
+  --palette-shell-sheet-handle-fill: #d4d0c7;
+}
+
+/* Night */
+:root {
+  --palette-night-placeholder-text: var(--palette-muted);
+  --palette-night-send-fill: #48453d;
+  --palette-night-send-text: #bdb5a5;
+  --palette-night-microphone-button-text: #f6ac9f;
+  --palette-night-task-check-fill: #aba18a;
+  --palette-night-activity-border: #777062;
+  --palette-night-activity-border-2: #76533f;
+  --palette-night-connection-status-border: #655039;
+  --palette-night-model-sheet-fill: #463329;
+  --palette-night-output-card-open-border: var(--palette-support);
+  --palette-night-output-step-fill: #2b382c;
+  --palette-night-output-step-border: #526b50;
+  --palette-night-output-step-text: #b0c8a4;
+  --palette-night-memory-diff-line-text: #e9b696;
+  --palette-night-memory-diff-line-fill: #423028;
+  --palette-night-memory-diff-line-text-2: #bab3a4;
+  --palette-night-memory-diff-line-fill-2: #302e28;
+  --palette-night-sheet-fill-3: #08070480;
+}
+
+/* Usage */
+:root {
+  --palette-usage-segments-shadow: #0000000d;
+  --palette-usage-chart-targets-fill: #a5907220;
+}
+
+/* Studio */
+:root {
+  --palette-studio-primary-fill: #42483c;
+  --palette-studio-quiet-border: #b9bcb0;
+  --palette-studio-scene-fill: #e7e9df;
+  --palette-studio-scene-text: #263527;
+  --palette-studio-scene-count-text: white;
+  --palette-studio-pane-index-text: #afb1a5;
+  --palette-studio-stage-background-image: #cbd0c5;
+  --palette-studio-stage-fill: #eeeee8;
+  --palette-studio-stage-fill-2: #faf9f5;
+  --palette-studio-stage-shadow: #24292109;
+  --palette-studio-pane-error-text: #a7432d;
+  --palette-studio-code-comparison-fill: #eeeeea;
+  --palette-studio-code-comparison-text: #7c8173;
+}
+
+/* Mermaid surfaces and edges. Chart series use the shared --ui-series-* colors. */
+:root {
+  --palette-mermaid-edge: var(--palette-muted);
+  --palette-mermaid-border: var(--palette-muted);
+  --palette-mermaid-node: var(--palette-soft);
+  --palette-mermaid-node-border: var(--palette-accent);
+  --palette-mermaid-critical: #a3483d;
+  --palette-mermaid-critical-fill: #f4ddd5;
+}
+:root[data-theme="dark"] {
+  --palette-mermaid-critical: #dd887c;
+  --palette-mermaid-critical-fill: #54302b;
+}
+
+/* Canvas artwork and SVG accents for the image-generation waiting view. */
+:root {
+  --palette-photon-1: #66d9bb;
+  --palette-photon-2: #f4a69e;
+  --palette-photon-3: #b3a1ed;
+  --palette-photon-4: #f0cc83;
+  --palette-photon-glow: #fffef2;
+  --palette-arrow-trail-start: #acb6d000;
+  --palette-arrow-tip-glow: #ffd1d680;
+  --palette-arrow-tip-shine: #ffffffb3;
+  --palette-mochi-face: #203c36;
+  --palette-mochi-face-luminous: #f4e5df;
+  --palette-mochi-cheek: #f5b9ad;
+  --palette-mochi-rim: #e4fff1;
+  --palette-mochi-shadow: #277a6616;
+  --palette-mochi-tear: #9ecfe6a6;
+  --palette-mochi-highlight-hsl: 78% 89%;
+  --palette-mochi-body-hsl: 66% 76%;
+  --palette-mochi-base-hsl: 54% 60%;
+}
+:root {
+  --palette-arrow-trail-end: #8c98ba50;
+  --palette-arrow-metal-edge: #8793ae;
+  --palette-arrow-metal-highlight: #e0e5f3;
+  --palette-arrow-metal-face: #b2bdd7;
+  --palette-arrow-metal-shadow: #74819e;
+  --palette-arrow-vane: #a8b2d0a6;
+  --palette-arrow-vane-rib: #f5f6ffcc;
+  --palette-arrow-head-highlight: #fbfcff99;
+  --palette-arrow-tip-light: #e56f79;
+  --palette-arrow-tip-shadow: #b9435c;
+  --palette-arrow-head-outline: #7d8ba580;
+  --palette-arrow-facet: #c28686;
+  --palette-arrow-shaft-inlay: #c298a3;
+  --palette-game-gesture: #808694;
+  --palette-game-chapter: #6a7688;
+  --palette-game-stream: #718295;
+}
+:root[data-theme="dark"] {
+  --palette-arrow-trail-end: #c3cce480;
+  --palette-arrow-metal-edge: #8796b8;
+  --palette-arrow-metal-highlight: #eef0fc;
+  --palette-arrow-metal-face: #bdc8e5;
+  --palette-arrow-metal-shadow: #7383a9;
+  --palette-arrow-vane: #aab6d9ba;
+  --palette-arrow-vane-rib: #eef1ff99;
+  --palette-arrow-head-highlight: #eff2ff66;
+  --palette-arrow-tip-light: #f68d91;
+  --palette-arrow-tip-shadow: #c94c64;
+  --palette-arrow-head-outline: #dfe7ffb3;
+  --palette-arrow-facet: #f2b4ad;
+  --palette-arrow-shaft-inlay: #e6b4b7;
+  --palette-game-gesture: #bac4d4;
+  --palette-game-chapter: #c1cbda;
+  --palette-game-stream: #a8bacb;
+}
+
+/* Theme roles are shared by the shell and rendered content. */
+:root[data-palette="ins-blue"] {
+  --palette-page: #f4f8fc;
+  --palette-ink: #1e3545;
+  --palette-muted: #4a6275;
+  --palette-selection: #dceaf4;
+  --palette-accent: var(--palette-ins-blue-accent);
+  --palette-on-accent: var(--palette-page);
+  --palette-support: #665982;
+  --palette-detail: #875414;
+}
+
+:root[data-palette="ins-blue"][data-theme="dark"] {
+  --palette-page: #000000;
+  --palette-selection: #1c2d3a;
+  --palette-support: #b5a9d8;
+  --palette-detail: #e7b967;
+}
+
+:root[data-palette="light-pink"] {
+  --palette-page: #fbf5f2;
+  --palette-ink: #342e2b;
+  --palette-muted: #70605b;
+  --palette-selection: #efdeda;
+  --palette-accent: var(--palette-light-pink-accent);
+  --palette-on-accent: var(--palette-page);
+  --palette-support: #725573;
+  --palette-detail: #4e652e;
+}
+:root[data-palette="light-pink"][data-theme="dark"] {
+  --palette-page: #000000;
+  --palette-selection: #38252e;
+  --palette-support: #caa9ce;
+  --palette-detail: #adc484;
+}
+
+:root[data-palette="lipstick-red"] {
+  --palette-page: #fbf5ee;
+  --palette-ink: #34241d;
+  --palette-muted: #71574d;
+  --palette-selection: #f5ddd2;
+  --palette-accent: var(--palette-lipstick-red-accent);
+  --palette-on-accent: var(--palette-page);
+  --palette-support: #8a4b25;
+  --palette-detail: #296454;
+}
+:root[data-palette="lipstick-red"][data-theme="dark"] {
+  --palette-page: #000000;
+  --palette-selection: #371f1c;
+  --palette-support: #e0a37b;
+  --palette-detail: #8cc8b1;
+}
+
+/* Keep the mode's foregrounds when a palette has a more specific light rule. */
+:root[data-palette][data-theme="dark"] {
+  --palette-ink: #f2f2f2;
+  --palette-muted: #b5b5b5;
+}
+
+/* Shell surfaces follow the selected palette in both modes. */
+:root {
+  --palette-shell-icon-button-fill: var(--palette-soft);
+  --palette-shell-history-fill: var(--palette-selection);
+  --palette-shell-avatar-fill: var(--palette-soft);
+  --palette-shell-attach-button-fill: var(--palette-soft);
+  --palette-shell-attach-button-fill-2: var(--palette-soft);
+  --palette-shell-message-text-fill: var(--palette-soft);
+  --palette-shell-code-block-fill: var(--palette-surface);
+  --palette-shell-message-text-fill-2: var(--palette-soft);
+  --palette-shell-dialog-heading-fill: var(--palette-soft);
+  --palette-shell-logout-fill: var(--palette-soft);
+  --palette-night-model-sheet-fill: var(--palette-soft);
+}

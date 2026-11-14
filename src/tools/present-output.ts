@@ -23,7 +23,7 @@ export function createPresentOutputTool(): AgentToolRegistration {
       return { status: "presented", blockCount: parsed.data.blocks.length, continuation: outputContinuationInstruction,
         ...(parsed.data.blocks.some(block => block.type === "document") ? {
           memoryChanged: false,
-          message: "Documents were displayed as conversation artifacts. No personal memory was changed. Use long_term_memory for personal memory and its confirmation component before claiming a save."
+          message: "Documents were displayed as conversation artifacts. No personal memory was changed. Use markdown for personal memory and its confirmation component before claiming a save."
         } : {}) };
     }
   };

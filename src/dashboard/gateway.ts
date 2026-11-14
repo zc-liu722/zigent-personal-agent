@@ -9,6 +9,7 @@ import { readManifest } from '../config/manifest.js';
 import type { Manifest } from '../config/schemas.js';
 import { data, json } from '../web/http.js';
 import { prepareStaticAssets } from '../web/static-assets.js';
+import { paletteAsset } from '../web/palette.js';
 import { DashboardAuth } from './auth.js';
 import { DashboardData } from './data.js';
 
@@ -29,7 +30,9 @@ export async function createDashboardGateway(manifest?: Manifest, environment = 
   ].map(file => [file, [file, 'text/javascript; charset=utf-8']])), {
     'component-preview.html': ['component-preview.html', 'text/html; charset=utf-8'],
     'component-preview.css': ['component-preview.css', 'text/css; charset=utf-8'],
-    'style.css': ['style.css', 'text/css; charset=utf-8'], 'theme.css': ['theme.css', 'text/css; charset=utf-8']
+    'style.css': ['style.css', 'text/css; charset=utf-8'], 'theme.css': ['theme.css', 'text/css; charset=utf-8'],
+    [paletteAsset]: [paletteAsset, 'text/css; charset=utf-8'],
+    'plugins/palette/read-colors.js': ['plugins/palette/read-colors.js', 'text/javascript; charset=utf-8']
   });
   const files = new Map<string, Buffer>();
   for (const [route, [file]] of Object.entries(types)) files.set(route, await readFile(new URL(`../../web/${file}`, import.meta.url)));
@@ -75,7 +78,7 @@ export async function createDashboardGateway(manifest?: Manifest, environment = 
       const tokens = files.get('components/interactive-tokens.css')!.toString('utf8');
       const pages = Object.fromEntries(input.output.blocks.flatMap((block, index) =>
         block.type === 'interactive' || block.type === 'animation'
-          ? [[index, interactiveOutputPage(block, origin, input.theme, tokens)]] : []));
+          ? [[index, interactiveOutputPage(block, origin, input.theme, tokens, files.get(paletteAsset)!.toString('utf8'))]] : []));
       json(res, 200, { pages }); return;
     }
     if (path === 'api/report' && req.method === 'GET') {
@@ -86,6 +89,7 @@ export async function createDashboardGateway(manifest?: Manifest, environment = 
     json(res, 404, { error: '页面不存在。' });
   };
   return {
+    reports,
     async handle(req: IncomingMessage, res: ServerResponse) {
       const url = new URL(req.url ?? '/', 'http://localhost');
       if (url.pathname !== '/dashboard' && !url.pathname.startsWith(base)) return false;

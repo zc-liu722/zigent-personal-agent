@@ -3,7 +3,7 @@ import type { PersonalIntegrationConfig } from "./config.js";
 import type { ToolExecutionContext } from "../tools/registry.js";
 import { ProductivityAuthorizationRequiredError } from "./credentials.js";
 
-const OAUTH_ERRORS = ["invalid_scope", "invalid_client_metadata", "invalid_client", "invalid_grant", "access_denied", "temporarily_unavailable", "server_error", "unauthorized_client", "unsupported_grant_type", "incorrect_application_credentials", "bad_authorization_code"] as const;
+export const OAUTH_ERRORS = ["invalid_scope", "invalid_client_metadata", "invalid_client", "invalid_grant", "access_denied", "temporarily_unavailable", "server_error", "unauthorized_client", "unsupported_grant_type", "incorrect_application_credentials", "bad_authorization_code"] as const;
 export type OAuthResponseError = typeof OAUTH_ERRORS[number];
 export type NetworkFailure = "timeout" | "tls" | "dns" | "connect" | "network";
 export function networkFailure(error: unknown): NetworkFailure {

@@ -1,3 +1,4 @@
+import { CodePointText } from "../text/code-points.js";
 import { randomUUID } from "node:crypto";
 import { pick, record } from "./http.js";
 
@@ -8,8 +9,8 @@ const text = (value: unknown): string => typeof value === "string" ? value : "";
 const endpoint = (service: "docs" | "sheets" | "slides", kind: string, id: string) => `https://${service}.googleapis.com/${service === "sheets" ? "v4" : "v1"}/${kind}/${encodeURIComponent(id)}`;
 
 function chunk(content: string, offset: number, limit: number) {
-  const chars = Array.from(content);
-  return { content: chars.slice(offset, offset + limit).join(""), offset, total_characters: chars.length, next_offset: offset + limit < chars.length ? offset + limit : null };
+  const chars = new CodePointText(content);
+  return { content: chars.slice(offset, offset + limit), offset, total_characters: chars.length, next_offset: offset + limit < chars.length ? offset + limit : null };
 }
 function documentText(value: unknown): string {
   return array(value).map(value => {
@@ -93,7 +94,7 @@ export class GoogleWorkspaceEditor {
       ? { insertText: { text: input.content, endOfSegmentLocation: { ...(tab.id ? { tabId: tab.id } : {}) } } }
       : { replaceAllText: { containsText: { text: input.find_text, matchCase: true }, replaceText: input.content, ...(tab.id ? { tabsCriteria: { tabIds: [tab.id] } } : {}) } };
     const result = record(await this.call(`${endpoint("docs", "documents", id)}:batchUpdate`, "POST", { requests: [request], writeControl: { requiredRevisionId: input.revision_id } }, signal));
-    return { status: "updated", document_id: id, tab_id: tab.id, revision_id: record(result.writeControl).requiredRevisionId,
+    return { status: "updated", document_id: id, title: doc.title, tab_id: tab.id, revision_id: record(result.writeControl).requiredRevisionId,
       occurrences_changed: input.mode === "replace_text" ? record(record(array(result.replies)[0]).replaceAllText).occurrencesChanged : undefined };
   }
 
@@ -152,7 +153,7 @@ export class GoogleWorkspaceEditor {
         { insertText: { objectId: shapeId, insertionIndex: 0, text: input.content } }];
     }
     const result = record(await this.call(`${endpoint("slides", "presentations", id)}:batchUpdate`, "POST", { requests, writeControl: { requiredRevisionId: input.revision_id } }, signal));
-    return { status: "updated", presentation_id: id, page_id: pageId, revision_id: record(result.writeControl).requiredRevisionId,
+    return { status: "updated", presentation_id: id, title: presentation.title, page_id: pageId, revision_id: record(result.writeControl).requiredRevisionId,
       occurrences_changed: input.mode === "replace_text" ? record(record(array(result.replies)[0]).replaceAllText).occurrencesChanged : undefined };
   }
 }

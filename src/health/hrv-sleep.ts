@@ -2,17 +2,18 @@ import type { HealthObservation, HealthStore } from "./store.js";
 import { timestamp } from "./normalize.js";
 import { createLocalTaskClock } from "../tasks/schedule.js";
 import { hrvMilliseconds } from "./hrv-measurements.js";
+import { stageOf } from "./sleep-summary.js";
 import { deviceTimeIsUsable, deviceTimeQueryEnd } from "../time-policy.js";
+import { sleepPeriodIndex, type SleepInterval } from "./sleep-period-index.js";
 
 const DAY = 86400_000;
-type SleepInterval = { start: number; end: number; state: "asleep" | "awake"; source?: string; precision: "segment" | "summary" };
 export type HrvPeriod = {
   state: "awake" | "asleep" | "unknown";
   reason: "received_before_0400" | "sleep_record" | "awake_record" | "outside_sleep_record" | "sleep_data_missing" | "conflicting_sleep_records";
   receivedAt: number; receivedLocalTime: string; interval?: { start: number; end: number };
 };
 export type SleepHrvGroup = { stream: string; start: number; end: number; samples: number; medianMs: number; minMs: number; maxMs: number };
-const asleepStages = new Set(["asleep", "core", "deep", "rem", "asleepcore", "asleepdeep", "asleeprem", "asleepunspecified"]);
+const asleepStages = new Set(["asleep", "core", "deep", "rem"]);
 
 function sleepIntervals(rows: readonly HealthObservation[], now: number): SleepInterval[] {
   const intervals: SleepInterval[] = [];
@@ -20,7 +21,7 @@ function sleepIntervals(rows: readonly HealthObservation[], now: number): SleepI
     if (row.metric !== "sleep_analysis" || row.provenance !== "health_auto_export" || row.receivedAt > now) continue;
     let start: number | undefined, end: number | undefined, state: "asleep" | "awake" = "asleep";
     if (row.kind === "sleep_segment") {
-      const stage = String(row.values.value ?? "").toLowerCase().replace(/[ _-]/g, "");
+      const stage = stageOf(row.values.value);
       if (stage === "awake") state = "awake";
       else if (!asleepStages.has(stage)) continue; // In Bed alone does not establish sleep or wakefulness.
       start = row.observedAt; end = row.endAt;
@@ -36,26 +37,19 @@ function sleepIntervals(rows: readonly HealthObservation[], now: number): SleepI
 
 /** The cutoff is receipt time in the declared zone, never measurement time or the time a retry runs. */
 export function hrvPeriodClassifier(sleepRows: readonly HealthObservation[], now = Date.now(), timezone = "Asia/Shanghai") {
-  const all = sleepIntervals(sleepRows, now), receiptTimes = new Map<number, string>();
+  const periods = sleepPeriodIndex(sleepIntervals(sleepRows, now)), receiptTimes = new Map<number, string>();
   const localTime = createLocalTaskClock(timezone);
   return (row: HealthObservation): HrvPeriod => {
     const receivedLocalTime = receiptTimes.get(row.receivedAt) ?? localTime(row.receivedAt).time;
     receiptTimes.set(row.receivedAt, receivedLocalTime);
     const base = { receivedAt: row.receivedAt, receivedLocalTime };
     if (receivedLocalTime < "04:00") return { ...base, state: "awake", reason: "received_before_0400" };
-    const covering = all.filter(interval => interval.start <= row.observedAt && row.observedAt < interval.end);
-    const sameSource = row.source ? covering.filter(interval => interval.source === row.source) : [];
-    const selected = sameSource.length ? sameSource : covering;
-    const segments = selected.filter(interval => interval.precision === "segment");
-    const evidence = segments.length ? segments : selected;
-    if (evidence.some(interval => interval.state === "awake") && evidence.some(interval => interval.state === "asleep"))
+    const evidence = periods.covering(row.observedAt, row.source);
+    if (evidence?.state === "unknown")
       return { ...base, state: "unknown", reason: "conflicting_sleep_records" };
-    if (evidence.some(interval => interval.state === "awake")) return { ...base, state: "awake", reason: "awake_record" };
-    if (evidence.some(interval => interval.state === "asleep")) {
-      const bounds = selected.filter(interval => interval.state === "asleep").sort((a, b) => (b.end - b.start) - (a.end - a.start))[0]!;
-      return { ...base, state: "asleep", reason: "sleep_record", interval: { start: bounds.start, end: bounds.end } };
-    }
-    const nearby = all.some(interval => interval.start <= row.observedAt + DAY && interval.end >= row.observedAt - DAY);
+    if (evidence?.state === "awake") return { ...base, state: "awake", reason: "awake_record" };
+    if (evidence?.state === "asleep") return { ...base, state: "asleep", reason: "sleep_record", interval: { ...evidence.interval } };
+    const nearby = periods.nearby(row.observedAt, DAY);
     return { ...base, state: nearby ? "awake" : "unknown", reason: nearby ? "outside_sleep_record" : "sleep_data_missing" };
   };
 }

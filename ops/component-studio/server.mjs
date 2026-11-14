@@ -8,6 +8,7 @@ import { ComponentStudioChat } from './codex-chat.mjs';
 import { ComponentStudioStore } from './store.mjs';
 import { conversationOutputSchema } from '../../src/channels/output.ts';
 import { interactiveOutputPage } from '../../src/web/interactive-output.ts';
+import { paletteAsset } from '../../src/web/palette.ts';
 const directory = dirname(fileURLToPath(import.meta.url)), root = await realpath(resolve(directory, '../..'));
 const port = Number(process.env.COMPONENT_STUDIO_PORT || 4317), previewPort = Number(process.env.COMPONENT_STUDIO_PREVIEW_PORT || 4318);
 if (![port, previewPort].every(value => Number.isInteger(value) && value > 1024 && value <= 65535) || port === previewPort) throw new Error('本地工作台端口配置无效');
@@ -74,6 +75,7 @@ const app = createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', Connection: 'keep-alive' }); res.write(`data: ${JSON.stringify({ revision })}\n\n`); streams.add(res); req.on('close', () => streams.delete(res)); return;
     }
     if (path === '/studio.js' || path === '/studio.css' || path === '/chat.js') { if (!['GET', 'HEAD'].includes(req.method)) { json(res, 405, { error: '请求方法无效' }); return; } await serve(res, join(directory, path.slice(1)), req.method); return; }
+    if (path === '/' + paletteAsset && ['GET', 'HEAD'].includes(req.method)) { await serve(res, join(root, 'web', paletteAsset), req.method); return; }
     if (path === '/fixtures.js' && req.method === 'GET') { await serve(res, join(root, 'web/components/fixtures.js'), req.method); return; }
     if (path === '/api/state' && req.method === 'GET') { json(res, 200, { root, origin, previewOrigin, revision, chatting: [...chat.runs].filter(([, run]) => !run.done).map(([id]) => id), proposals: await store.serial(() => store.list()) }); return; }
     if (path === '/api/proposals' && req.method === 'POST') {
@@ -117,8 +119,10 @@ const app = createServer(async (req, res) => {
       if (!output.success || !['light', 'dark'].includes(input.theme)) throw Object.assign(new Error('可视化 mock 数据无效'), { status: 400 });
       if (!/^[a-f0-9-]{36}$/.test(input.id || '') || !/^[a-f0-9]{24}$/.test(input.version || '') || !['before', 'after'].includes(input.side)) throw Object.assign(new Error('预览版本无效'), { status: 400 });
       store.get(input.id);
-      const tokens = await readFile(await store.safePath(join(store.directory, 'renders', input.id, input.version, input.side), 'components/interactive-tokens.css'), 'utf8');
-      json(res, 200, { pages: Object.fromEntries(output.data.blocks.flatMap((block, index) => ['interactive', 'animation'].includes(block.type) ? [[index, interactiveOutputPage(block, previewOrigin, input.theme, tokens)]] : [])) }); return;
+      const snapshot = join(store.directory, 'renders', input.id, input.version, input.side);
+      const [tokens, palette] = await Promise.all(['components/interactive-tokens.css', paletteAsset]
+        .map(async file => readFile(await store.safePath(snapshot, file), 'utf8')));
+      json(res, 200, { pages: Object.fromEntries(output.data.blocks.flatMap((block, index) => ['interactive', 'animation'].includes(block.type) ? [[index, interactiveOutputPage(block, previewOrigin, input.theme, tokens, palette)]] : [])) }); return;
     }
     json(res, 404, { error: '页面不存在' });
   } catch (cause) { if (!res.headersSent) json(res, cause.status || 500, { error: cause.code === 'ENOENT' ? '文件不存在' : cause.message || '操作失败' }); else res.end(); }

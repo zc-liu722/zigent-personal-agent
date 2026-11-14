@@ -39,7 +39,7 @@ export class WebMessageStream {
         if (!fullFrame) {
           const message = current ? current() : value;
           if (!message) return;
-          fullFrame = `event: message\ndata: ${JSON.stringify({ ...message, ...state })}\n\n`;
+          fullFrame = `event: message\ndata: ${JSON.stringify({ ...message, ...state, annotations: this.store.replyAnnotations(message.id) })}\n\n`;
         }
         frame = fullFrame;
       }

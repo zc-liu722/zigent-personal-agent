@@ -17,7 +17,8 @@ import type { WebTaskProposals } from "../task-proposals.js";
 
 import { data, json, type WebRoute } from "../http.js";
 
-export function createInteractionsRoutes({ store, runtime, owner, coordinator, controller, communication, browsers, codex, memoryProposals, taskProposals, authorizations, tasks }: {
+export function createInteractionsRoutes({ store, runtime, owner, coordinator, controller, communication, browsers, codex, memoryProposals, taskProposals, authorizations, tasks, meetings }: {
+  meetings: import("../meetings.js").WebMeetings;
   store: WebStore;
   runtime: AgentRuntime;
   owner: string;
@@ -41,8 +42,24 @@ export function createInteractionsRoutes({ store, runtime, owner, coordinator, c
         id = store.resolveConversation(input.conversationId); notice = store.message(input.messageId);
         interaction = notice?.interactions?.find(item => item.id === input.interactionId);
         const action = interaction?.actions.find(action => action.id === input.actionId);
+        if (id && notice?.conversationId === id && interaction?.kind === "authorization" && interaction.service === "feishu"
+          && !action && /^(?:retry|switch)(?::[a-f0-9-]{36}:(?:pending|failed|expired|completed))?$/.test(input.actionId)) {
+          // Duplicate or stale card submission. Return the saved state without starting another attempt.
+          json(res, 202, { ok: true, interaction }); return true;
+        }
         if (!id || notice?.conversationId !== id || !interaction || action?.kind !== "submit") { json(res, 404, { error: "交互请求已失效。" }); return true; }
         value = action.value;
+        if (value.type === "meeting") {
+          if (interaction.kind !== "meeting" || interaction.id !== value.id) { json(res,404,{error:"会议已失效。"}); return true; }
+          try {
+            if(value.action==="accept"){
+              const pending=meetings.action(value.id,id,value.action).catch(()=>{});tasks.add(pending);void pending.finally(()=>tasks.delete(pending));
+              json(res,202,{ok:true});
+            }else{await meetings.action(value.id,id,value.action);json(res,200,{ok:true,...(value.action==="join"?{mediaTransport:meetings.mediaTransport()}:{})});}
+          } catch { json(res,409,{error:"会议状态已更新，请刷新。"}); }
+          return true;
+        }
+        if (value.type === "deployment-retry") { json(res, 404, { error: "部署卡片不可用。" }); return true; }
         if (value.type === "file-delivery-retry") {
           const deliveries = runtime.fileWorkbench?.deliveries;
           if (!deliveries) { json(res,503,{error:"文件交付暂不可用。"}); return true; }
@@ -68,15 +85,20 @@ export function createInteractionsRoutes({ store, runtime, owner, coordinator, c
           if (!runtime.codex || interaction.id !== "codex:" + value.taskId) { json(res, 404, { error: "任务不可用。" }); return true; }
           const scope = { agentId: runtime.config.id, userId: owner, conversationKind: "p2p" as const };
           const task = runtime.codex.store.owned(scope, value.taskId);
-          if (store.conversationForSessionId(task.sessionId) !== id || task.revision !== value.revision) { json(res, 409, { error: "任务状态已更新，请重试。" }); return true; }
+          if (store.conversationForSessionId(task.sessionId) !== id) { json(res, 409, { error: "任务状态已更新，请重试。" }); return true; }
           if (value.action !== "interrupt") { json(res, 409, { error: "请重新确认要发送的消息。" }); return true; }
-          runtime.codex.interrupt(scope, task.id, `${task.id}:${value.revision}:interrupt`);
+          // Progress revisions never revoke the owner's request to stop this
+          // exact task UUID. A completed turn cannot become a new task in place.
+          const reviewing = task.review && ["pending", "running", "continued"].includes(task.review.state);
+          const finished = ["succeeded", "cancelled"].includes(task.state) && !reviewing;
+          if (!finished) runtime.codex.interrupt(scope, task.id, `${task.id}:${task.revision}:interrupt`);
           communication.interaction(id, codexInteraction(runtime.codex.store.get(task.id)!), "codex:" + task.id);
           void codex?.tick().catch(() => {}); json(res, 200, { ok: true }); return true;
         }
         if (value.type === "question-answer") {
           if (interaction.kind !== "user-question" || interaction.id !== value.requestId) { json(res, 404, { error: "这次提问已失效。" }); return true; }
-          if (interaction.resumeAfterRestart) {
+          const chatId = store.conversationInfo(id)!.chatId;
+          if (interaction.resumeAfterRestart || !coordinator.hasTask(chatId)) {
             if (interaction.status === "completed" || interaction.status === "cancelled") { json(res, 200, { ok: true }); return true; }
             const expired = !interaction.expiresAt || interaction.expiresAt <= Date.now();
             const questionCreatedAt = notice.createdAt;
@@ -99,18 +121,20 @@ export function createInteractionsRoutes({ store, runtime, owner, coordinator, c
             }) : undefined;
             const workspaceChoice = interaction.questionPurpose === "workspace";
             const continuation: QueuedWebMessage = { id: `question-answer:${interaction.id}`, conversationId: id,
-              text: value.cancel ? workspaceChoice ? "暂不开始上次文件任务，项目区尚未选定；不要自行选择项目区或执行文件工作。" : "跳过上次提问，请按现有信息继续原来的请求。"
+              text: value.cancel ? workspaceChoice ? "取消上次项目区选择，不切换或退出原项目区；暂不开始该次归属待定的文件任务，不要将取消视为新的项目授权。" : "跳过上次提问，请按现有信息继续原来的请求。"
                 : `${workspaceChoice ? "补充上次项目区选择，请先据此完成具体项目选择，再继续原来的文件任务。" : "回答上次提问，请据此继续原来的请求。"}\n\n${JSON.stringify(details)}`,
               assets: [], createdAt: Date.now(), model: coordinator.selectedModel(id), reasoningEfforts: coordinator.currentReasoningEfforts(), status: "queued" };
             const status = value.cancel ? "cancelled" as const : "completed" as const;
-            const statusMessage = value.cancel ? workspaceChoice ? "项目区尚未选定，文件工作未开始。" : "已跳过这些问题。" : workspaceChoice ? "项目选择已收到。" : "回答已收到。";
+            const statusMessage = value.cancel ? workspaceChoice ? "已取消本次项目区选择。" : "已跳过这些问题。" : workspaceChoice ? "项目选择已收到。" : "回答已收到。";
             store.completeRecoveredQuestion({ ...notice, interactions: notice.interactions!.map(item => item.id === interaction!.id
               ? { ...item, answers, status, statusMessage }
               : item) }, continuation);
+            // Release an orphaned in-process waiter as well. The durable queue
+            // owns continuation; duplicate card callbacks cannot enqueue twice.
+            if (!interaction.resumeAfterRestart) void controller.handleAction(owner, chatId, { ...value, answers });
             json(res, 200, { ok: true }); return true;
           }
           // A question pauses the active run. Resolve it directly while that run still owns the queue.
-          const chatId = store.conversationInfo(id)!.chatId;
           const result = await controller.handleAction(owner, chatId, { ...value, answers: input.answers });
           json(res, result.ok ? 200 : 409, result.ok ? { ok: true } : { error: result.message }); return true;
         }
@@ -136,13 +160,17 @@ export function createInteractionsRoutes({ store, runtime, owner, coordinator, c
         if (value.type === "model-picker") { json(res, 400, { error: "请从模型库选择模型。" }); return true; }
         if (value.type === "authorization-retry") {
           const expired = interaction.status === "pending" && interaction.expiresAt !== undefined && interaction.expiresAt <= Date.now();
-          if (interaction.kind !== "authorization" || interaction.service !== value.service || !expired && interaction.status !== "failed" && interaction.status !== "expired") {
+          const liveFeishu = value.service === "feishu" && (interaction.status === "pending" || interaction.status === "completed");
+          if (interaction.kind !== "authorization" || interaction.service !== value.service || !liveFeishu && !expired && interaction.status !== "failed" && interaction.status !== "expired") {
             json(res, 409, { error: "此连接请求仍在处理或已经结束。" }); return true;
           }
           try {
-            if (!authorizations.retry(value.service, id, notice.id, interaction.id)) { json(res, 409, { error: authorizationSetupRequiredText(value.service) }); return true; }
+            // Legacy retry cards also resume safely; only the explicit switch action changes apps.
+            const switchAccount = value.switchAccount === true;
+            if (!authorizations.retry(value.service, id, notice.id, interaction.id, switchAccount)) { json(res, 409, { error: authorizationSetupRequiredText(value.service) }); return true; }
           } catch { json(res, 409, { error: "上次授权仍在处理，请稍后重试。" }); return true; }
-          json(res, 202, { ok: true }); return true;
+          const current = store.message(notice.id)?.interactions?.find(item => item.id === interaction!.id);
+          json(res, 202, { ok: true, ...(value.service === "feishu" && current ? { interaction: current } : {}) }); return true;
         }
         if (interaction.status !== "pending") { json(res, 409, { error: "此操作已经处理。" }); return true; }
       } else {

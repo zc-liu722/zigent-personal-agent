@@ -1,18 +1,22 @@
+import { spaces } from "../project-spaces/policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, readdir } from "node:fs/promises";
 import { join, resolve, win32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { WorkspaceService } from "../workspaces/service.js";
 import { AgentRunInterruption } from "../agent/interruption.js";
 import { closeSqlite, prepareSql, sqliteTransaction } from "../sqlite.js";
-import { applySnapshot, decodeSnapshot, makeSnapshot, safeRelative } from "./snapshot.js";
+import { applySnapshot, decodeSnapshot, makeSnapshot, safeRelative, snapshotDirectory, PROJECT_METADATA } from "./snapshot.js";
+import { ordinaryPath } from "../workspaces/paths.js";
 import type { ExecutionContext, ExecutionEvent, ExecutionInput, ExecutionJob, ExecutionResult, WorkerIdentity } from "./types.js";
+import { executionPolicy, initialYieldTime, inputYieldTime } from './policy.js';
 export type { ExecutionContext, ExecutionInput, ExecutionJob, ExecutionResult, ExecutionEvent } from "./types.js";
 
 export type ExecutionOptions = {
   agentId: string; ownerUserId: string; stateDirectory: string; workspaces: WorkspaceService;
   endpoint?: string; previousEndpoint?:string; token?: string; maxSnapshotBytes?: number; onSynchronized?:(workspaceId:string)=>Promise<void>;
+  nativeStateDirectory?: string;
   recoverState?: boolean;
 };
 type Row = { id: string; workspace_id: string; state: ExecutionJob["state"]; created_at: number; updated_at: number;
@@ -24,7 +28,7 @@ type RemoteJob = { id: string; state: ExecutionJob["state"]; exitCode?: number; 
   offset?: number; nextOffset?: number; outputBytes?: number; truncated?: boolean };
 type AdmissionPhase = "prepared" | "submitting" | "accepted" | "rejected" | "uncertain";
 type Admission = { phase: AdmissionPhase; first_error: string | null };
-const rejectedAdmission = (error: unknown) => /EXECUTION_HTTP_(400|401|403|404|405|409|413|415|422):/.test(String(error));
+const rejectedAdmission = (error: unknown) => /EXECUTION_HTTP_(400|401|403|404|405|409|413|415|422|429):/.test(String(error));
 const rejectedSnapshotConflict = (error: unknown) => /EXECUTION_HTTP_409:.*(?:Remote workspace (?:already exists|changed)|Workspace is running a program)/.test(String(error));
 const terminal = (state: ExecutionJob["state"]) => ["completed", "failed", "cancelled", "interrupted"].includes(state);
 const sleep = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
@@ -48,9 +52,13 @@ export class ExecutionService {
   private draining = false;
   private closed = false;
   private readonly terminalReads = new Map<number,Promise<unknown>>();
+  private readonly terminalOperations = new Map<number,Promise<unknown>>();
+  private readonly terminalAdmissions = new Map<string,Promise<unknown>>();
   private readonly runBindings = new Map<string, { signal: AbortSignal; abort: () => void }>();
   private readonly cancellations = new Map<string, Promise<void>>();
   private readonly admissions = new Map<string,Promise<void>>();
+  private readonly registeredAttachments = new Map<string, string>();
+  private readonly migrations = new Map<string,Promise<boolean>>();
   private readonly syncing = new Map<string, Promise<void>>();
   private readonly starting = new Set<string>();
   private readonly leases = new Map<string, ReturnType<WorkspaceService["acquireLease"]>>();
@@ -68,12 +76,14 @@ export class ExecutionService {
       title TEXT,text TEXT,next_attempt_at INTEGER NOT NULL DEFAULT 0,message_id TEXT);
       CREATE TABLE IF NOT EXISTS execution_polling(job_id TEXT PRIMARY KEY,last_polled_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS terminal_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL UNIQUE,owner_session TEXT NOT NULL,output_offset INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS terminal_retention(job_id TEXT PRIMARY KEY,last_used INTEGER NOT NULL,retained INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS workspace_sync(workspace_id TEXT PRIMARY KEY,remote_revision TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS execution_origins(job_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workspace_sync_origins(workspace_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS job_repairs(job_id TEXT PRIMARY KEY,parent_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS execution_admissions(job_id TEXT PRIMARY KEY,phase TEXT NOT NULL,first_error TEXT);
       CREATE TABLE IF NOT EXISTS execution_cancellations(job_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS shared_execution_jobs(job_id TEXT PRIMARY KEY,log_saved INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS execution_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,
       workspace_id TEXT NOT NULL,type TEXT NOT NULL,created_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS execution_jobs_workspace ON jobs(workspace_id,created_at DESC)`);
@@ -94,6 +104,10 @@ export class ExecutionService {
       prepareSql(this.db,"INSERT OR IGNORE INTO workspace_sync_origins SELECT workspace_id,? FROM workspace_sync").run(previous);
     }
     this.token = options.token;
+    // Existing durable history is not a live-process cache. Adopt only live
+    // terminals; never delete historical sessions/logs when releasing handles.
+    if(options.recoverState!==false)this.db.exec(`INSERT OR IGNORE INTO terminal_retention SELECT t.job_id,j.updated_at,1 FROM terminal_sessions t
+      JOIN jobs j ON j.id=t.job_id WHERE j.state IN ('starting','running')`);
     this.maxBytes = Math.min(Math.max(options.maxSnapshotBytes ?? 512 * 1024 * 1024, 1024 * 1024), 2 * 1024 * 1024 * 1024);
     for (const row of (options.recoverState===false?[]:prepareSql(this.db, "SELECT id,workspace_id FROM jobs WHERE state IN ('starting','running') OR snapshot_state='pending'").all()) as Array<{ id: string; workspace_id: string }>) {
       this.leases.set(row.id, options.workspaces.acquireLease(row.workspace_id, row.id));
@@ -149,7 +163,9 @@ export class ExecutionService {
         throw new Error("Execution worker identity does not match this Agent");
       return { available: true, backend: identity.backend, protocol: identity.protocol, image: identity.image, persistentWorkspace: true, arbitraryCodeOnHost: identity.backend==="windows-native",permissions:identity.permissions,
         admissionTracking: identity.admissionTracking === true,
-        instanceId:identity.instanceId,hostEpoch:identity.hostEpoch,runtimeIdentity:identity.runtimeIdentity, capabilities:identity.capabilities, githubSshConfigured: identity.githubSshConfigured === true };
+        executionPolicy: identity.executionPolicy, sessionProcessManagement: identity.sessionProcessManagement === true,
+        sharedFilesystem: identity.sharedFilesystem === true,
+        instanceId:identity.instanceId,hostEpoch:identity.hostEpoch,runtimeIdentity:identity.runtimeIdentity, capabilities:identity.capabilities, githubSshConfigured: identity.githubSshConfigured === true, githubTokenConfigured: identity.githubTokenConfigured === true };
     } catch (error) { return { available: false, backend: "unavailable", protocol: 1, reason: String(error instanceof Error ? error.message : error) }; }
   }
 
@@ -175,6 +191,144 @@ export class ExecutionService {
     return this.endpoint!;
   }
   private rememberBackend(workspaceId:string,id?:string) {prepareSql(this.db,"INSERT OR REPLACE INTO workspace_sync_origins VALUES (?,?)").run(workspaceId,id?this.origin(id):this.endpoint!);}
+
+  private sharedJob(id: string) { return Boolean(prepareSql(this.db,"SELECT 1 FROM shared_execution_jobs WHERE job_id=?").get(id)); }
+  private nativeDirectory(workspaceId: string) {
+    if(process.platform!=="win32" || !this.options.nativeStateDirectory)return undefined;
+    const scope=createHash("sha256").update(JSON.stringify([this.options.agentId,this.options.ownerUserId])).digest("hex");
+    return win32.join(this.options.nativeStateDirectory,"workspaces",scope,workspaceId);
+  }
+  private async authorizedRegisteredDirectory(workspaceId: string) {
+    const directory = this.options.workspaces.registeredDirectory(workspaceId);
+    if (!directory) return undefined;
+    const space = (await spaces(this.options.agentId)).find(space => space.workspaceId === workspaceId);
+    if (!space?.windows || win32.normalize(space.windows).toLowerCase() !== win32.normalize(directory).toLowerCase())
+      throw new Error("登记项目的目录授权已变化。");
+    return directory;
+  }
+
+  async releaseTemporaryWorkspace(workspaceId: string) {
+    if (this.options.workspaces.workspace(workspaceId).lifetime !== "temporary") throw new Error("只能清理临时工作区。");
+    const jobs = prepareSql(this.db, "SELECT * FROM jobs WHERE workspace_id=?").all(workspaceId) as Row[];
+    if (jobs.some(job => !terminal(job.state) || !["saved", "superseded"].includes(job.snapshot_state)))
+      throw new Error("临时工作区仍在运行或同步。");
+    if (this.configured) {
+      try { await this.request("DELETE", `/v1/workspaces/${workspaceId}`); }
+      catch (error) { if (!String(error).includes("EXECUTION_HTTP_404:")) throw error; }
+    }
+    for (const path of new Set(jobs.map(job => job.snapshot_path).filter((path): path is string => Boolean(path)))) {
+      const name = path.replaceAll("\\", "/").split("/").at(-1)!;
+      const expected = join(this.directory, "snapshots", name);
+      if (!/^[a-f0-9-]{36}\.zip$/.test(name) || resolve(path) !== resolve(expected)) throw new Error("快照归档路径无效。");
+      const shared = prepareSql(this.db, "SELECT 1 FROM jobs WHERE snapshot_path=? AND workspace_id<>? LIMIT 1").get(path, workspaceId);
+      if (!shared) await rm(await ordinaryPath(expected, ".", true), { force: true });
+    }
+    prepareSql(this.db, "UPDATE jobs SET snapshot_path=NULL,snapshot_state='superseded' WHERE workspace_id=?").run(workspaceId);
+    this.registeredAttachments.delete(workspaceId);
+  }
+  /** Adopt the native directory once; no deletion is part of migration. */
+  async ensureSharedWorkspace(workspaceId: string): Promise<boolean> {
+    this.options.workspaces.workspace(workspaceId);
+    const registered = await this.authorizedRegisteredDirectory(workspaceId);
+    if (registered) {
+      const identity = await this.describe();
+      const advertised = identity.available ? identity.capabilities?.registeredWorkspaces?.[workspaceId] : undefined;
+      if (!advertised || win32.normalize(advertised).toLowerCase() !== win32.normalize(registered).toLowerCase())
+        throw new Error("登记项目的执行权限尚未就绪或目录已变化；未复制项目文件。");
+      await ordinaryPath(registered);
+      if (this.registeredAttachments.get(workspaceId) !== identity.instanceId) {
+        await this.request("POST", `/v1/native-workspaces/${workspaceId}/open`, {});
+        this.registeredAttachments.set(workspaceId, identity.instanceId!);
+      }
+      return true;
+    }
+    const directory=this.nativeDirectory(workspaceId);
+    if(!directory)return false;
+    const attached=this.options.workspaces.executionDirectory(workspaceId);
+    if(attached) {
+      if(win32.normalize(attached).toLowerCase()!==win32.normalize(directory).toLowerCase())throw new Error("项目执行目录配置已改变，请先迁移保留的文件。");
+      return true;
+    }
+    const pending=this.migrations.get(workspaceId);if(pending)return pending;
+    const operation=this.migrateSharedWorkspace(workspaceId,directory).finally(()=>this.migrations.delete(workspaceId));
+    this.migrations.set(workspaceId,operation);return operation;
+  }
+  private async migrateSharedWorkspace(workspaceId: string, directory: string): Promise<boolean> {
+    const identity=await this.describe();
+    if(!identity.available || !identity.sharedFilesystem || identity.backend!=="windows-native"
+      || win32.normalize(identity.capabilities?.workspaceRoot??"").toLowerCase()!==win32.dirname(directory).toLowerCase())
+      throw new Error("同机持久工作区尚未就绪，请等待执行器更新。");
+    return this.options.workspaces.withMigrationLock(workspaceId,async legacy=>{
+      if(this.options.workspaces.executionDirectory(workspaceId))return true;
+      const busy=prepareSql(this.db,"SELECT id FROM jobs WHERE workspace_id=? AND state IN ('starting','running') LIMIT 1").get(workspaceId);
+      if(busy)throw new Error("请先等待现有程序结束，再切换持久工作区。");
+      const state=await this.request<{exists:boolean}>("GET",`/v1/native-workspaces/${workspaceId}`);
+      const entries=(await readdir(legacy)).filter(name=>name!==PROJECT_METADATA);
+      if(entries.length) {
+        const local=await snapshotDirectory(legacy,this.maxBytes);
+        if(!state.exists) {
+          await (await this.response("PUT",`/v1/native-workspaces/${workspaceId}/snapshot`,local.bytes,{"x-expected-revision":"new"})).json();
+        } else {
+          const remote=await snapshotDirectory(directory,this.maxBytes);
+          const baseline=prepareSql(this.db,"SELECT s.remote_revision FROM workspace_sync s JOIN workspace_sync_origins o USING(workspace_id) WHERE s.workspace_id=? AND o.endpoint=?").get(workspaceId,this.endpoint!) as {remote_revision:string}|undefined;
+          if(local.revision!==remote.revision && local.revision!==baseline?.remote_revision) {
+            if(remote.revision===baseline?.remote_revision) {
+              await (await this.response("PUT",`/v1/native-workspaces/${workspaceId}/snapshot`,local.bytes,{"x-expected-revision":remote.revision})).json();
+            } else {
+              await this.options.workspaces.retainLegacyDirectory(workspaceId);
+            }
+          }
+        }
+      }
+      await this.request("POST",`/v1/native-workspaces/${workspaceId}/open`,{});
+      await ordinaryPath(directory);
+      this.options.workspaces.bindExecutionDirectory(workspaceId,directory);
+      prepareSql(this.db,`UPDATE jobs SET snapshot_state='superseded',snapshot_error='项目已切换为持久工作目录；旧快照仍保留用于恢复。'
+        WHERE workspace_id=? AND state NOT IN ('starting','running') AND snapshot_state IN ('pending','conflict','failed')`).run(workspaceId);
+      for(const [id] of this.leases)if(this.row(id).workspace_id===workspaceId && terminal(this.row(id).state))this.releaseLease(id);
+      return true;
+    });
+  }
+
+  private async startSharedJob(workspaceId: string,input: ExecutionInput,context: ExecutionContext,admittedGate:()=>void): Promise<ExecutionResult> {
+    const health=await this.describe();
+    if(!health.available || !health.sharedFilesystem)throw new Error("持久执行器尚未就绪。");
+    const id=randomUUID(),now=Date.now();
+    this.starting.add(workspaceId);
+    try {
+      await this.options.workspaces.withWriteLock(workspaceId,async()=>{
+        context.signal?.throwIfAborted();
+        sqliteTransaction(this.db,()=>{
+          prepareSql(this.db,"INSERT INTO jobs VALUES (?,?,?,?,?,NULL,NULL,'pending',NULL,NULL,?,NULL,?,?)")
+            .run(id,workspaceId,"starting",now,now,"shared",context.sessionId??null,context.turnId??null);
+          prepareSql(this.db,"INSERT INTO execution_origins VALUES (?,?)").run(id,this.endpoint!);
+          prepareSql(this.db,"INSERT INTO shared_execution_jobs(job_id) VALUES (?)").run(id);
+          if(input.terminal)prepareSql(this.db,"INSERT INTO terminal_sessions(job_id,owner_session) VALUES (?,?)").run(id,context.sessionId??"");
+          this.event(id,workspaceId,"shared_directory_ready");
+          this.recordAdmission(id,"prepared");
+        });
+        this.leases.set(id,this.options.workspaces.acquireLease(workspaceId,id));this.bindRun(id,context.signal);
+        try {
+          this.recordAdmission(id,"submitting");
+          await this.request("POST","/v1/jobs",{id,workspaceId,command:input.command,cwd:safeRelative(input.cwd??"",true),
+            timeoutMs:input.timeoutMs ?? (input.terminal && health.sessionProcessManagement ? null : 24*60*60_000),terminal:input.terminal,workspaceMode:"shared"});
+          this.recordAdmission(id,"accepted");
+        } catch(error) {
+          const rejected=rejectedAdmission(error);this.recordAdmission(id,rejected?"rejected":"uncertain",error);
+          prepareSql(this.db,"UPDATE jobs SET state=?,snapshot_state=?,error=?,updated_at=? WHERE id=?")
+            .run(rejected?"failed":"starting",rejected?"saved":"pending",String(error),Date.now(),id);
+          if(rejected){this.unbindRun(id);this.releaseLease(id);}
+        }
+      });
+    } finally {
+      this.starting.delete(workspaceId);admittedGate();
+      if(!this.closed && prepareSql(this.db,"SELECT job_id FROM execution_cancellations WHERE job_id=?").get(id))await this.cancel(id).catch(()=>{});
+    }
+    const until=Date.now()+Math.min(Math.max(input.waitMs??1000,0),30_000);
+    let result=await this.read(id);
+    while(!terminal(result.state) && Date.now()<until && !context.signal?.aborted){await sleep(Math.min(200,until-Date.now()));result=await this.read(id);}
+    return result;
+  }
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const response = await this.response(method, path, body);
     const text = await this.boundedText(response, 2 * 1024 * 1024);
@@ -231,7 +385,8 @@ export class ExecutionService {
     if (!input.command?.trim() || input.command.length > 64_000 || input.command.includes("\0")) throw new Error("执行命令无效。");
     const cwd = safeRelative(input.cwd ?? "", true);
     if (context.signal?.aborted) throw new Error("任务已取消。");
-    this.options.workspaces.workspace(workspaceId);
+    this.options.workspaces.assertSessionAccess(workspaceId,context.sessionId);
+    if(await this.ensureSharedWorkspace(workspaceId))return this.startSharedJob(workspaceId,input,context,admittedGate);
     await Promise.all([...this.syncing.values()]);
     // Old versions left a missing remote job permanently attached to its project.
     // Reconcile its files before considering a repair; a repair requires a real parent.
@@ -363,6 +518,10 @@ export class ExecutionService {
     if (terminal(remote.state)) {
       this.unbindRun(id);
       prepareSql(this.db, "DELETE FROM execution_cancellations WHERE job_id=?").run(id);
+      if(this.sharedJob(id)) {
+        prepareSql(this.db,"UPDATE jobs SET snapshot_state='saved',snapshot_error=NULL WHERE id=?").run(id);
+        this.releaseLease(id);
+      }
     }
     sqliteTransaction(this.db, () => {
       prepareSql(this.db, "UPDATE jobs SET state=?,exit_code=?,error=?,updated_at=? WHERE id=?")
@@ -374,7 +533,7 @@ export class ExecutionService {
         this.releaseLease(repair.parent_id);
       }
     });
-    if (terminal(remote.state) && !["saved", "superseded"].includes(this.row(id).snapshot_state)) await this.synchronize(id);
+    if (terminal(remote.state) && !["saved", "superseded"].includes(this.row(id).snapshot_state) && !this.sharedJob(id)) await this.synchronize(id);
     return { ...this.view(this.row(id)), output: remote.output ?? "", offset: remote.offset ?? offset,
       nextOffset: remote.nextOffset ?? offset, outputBytes: remote.outputBytes ?? offset, truncated: remote.truncated ?? false };
   }
@@ -454,6 +613,12 @@ export class ExecutionService {
       if (logDigest) await this.request("POST", `/v1/jobs/${encodeURIComponent(id)}/acknowledge`, {
         snapshotSha256: createHash("sha256").update(bytes).digest("hex"), logSha256: logDigest
       }).catch(() => {});
+      // Shared working bytes are already authoritative. Explicit recovery can
+      // retain an archive, but must never apply an old snapshot to the live tree.
+      if(this.options.workspaces.executionDirectory(row.workspace_id)) {
+        prepareSql(this.db,"UPDATE jobs SET snapshot_state='saved',snapshot_error=NULL,updated_at=? WHERE id=?").run(Date.now(),id);
+        this.releaseLease(id);return;
+      }
       const revision = await applySnapshot(this.options.workspaces, row.workspace_id, bytes, row.local_revision, this.maxBytes);
       if (this.closed) return;
       sqliteTransaction(this.db, () => {
@@ -570,7 +735,7 @@ export class ExecutionService {
         } else {
           // No common baseline: keep the local tree and retain a separate remote copy.
           const source = this.options.workspaces.workspace(row.workspace_id);
-          const recovered = await this.options.workspaces.createWorkspace({ name: `${source.name.slice(0, 100)} · 恢复结果` });
+          const recovered = await this.options.workspaces.createWorkspace({ name: `${source.name.slice(0, 100)} · 恢复结果`, lifetime: "system" });
           const empty = await makeSnapshot(this.options.workspaces, recovered.id, this.maxBytes);
           await applySnapshot(this.options.workspaces, recovered.id, bytes, empty.revision, this.maxBytes);
           this.event(id, row.workspace_id, "snapshot_recovered");
@@ -676,7 +841,7 @@ export class ExecutionService {
     }
     const bytes = await readFile(row.snapshot_path), snapshot = decodeSnapshot(bytes, this.maxBytes);
     const source = this.options.workspaces.workspace(row.workspace_id);
-    const workspace = await this.options.workspaces.createWorkspace({ name: `${source.name.slice(0, 100)} · 恢复结果` });
+    const workspace = await this.options.workspaces.createWorkspace({ name: `${source.name.slice(0, 100)} · 恢复结果`, lifetime: "persistent" });
     const empty = await makeSnapshot(this.options.workspaces, workspace.id, this.maxBytes);
     await applySnapshot(this.options.workspaces, workspace.id, bytes, empty.revision, this.maxBytes);
     if (this.closed) throw new Error("执行服务已关闭。");
@@ -689,49 +854,99 @@ export class ExecutionService {
     return { jobId: id, workspace, recovered: true };
   }
 
+  hasSessionWorkspace(sessionId: string, workspaceId: string): boolean {
+    return Boolean(prepareSql(this.db, "SELECT 1 FROM jobs WHERE session_id=? AND workspace_id=? LIMIT 1").get(sessionId, workspaceId));
+  }
   terminalSessions(owner:string) {
-    return (prepareSql(this.db,"SELECT t.id,j.workspace_id,j.state,j.exit_code,j.updated_at FROM terminal_sessions t JOIN jobs j ON j.id=t.job_id WHERE t.owner_session=? ORDER BY j.updated_at DESC LIMIT 20").all(owner) as Array<{id:number;workspace_id:string;state:string;exit_code:number|null;updated_at:number}>)
+    return (prepareSql(this.db,"SELECT t.id,j.workspace_id,j.state,j.exit_code,j.updated_at FROM terminal_sessions t JOIN jobs j ON j.id=t.job_id WHERE t.owner_session=? ORDER BY CASE WHEN j.state IN ('starting','running') THEN 0 ELSE 1 END,j.updated_at DESC LIMIT 64").all(owner) as Array<{id:number;workspace_id:string;state:string;exit_code:number|null;updated_at:number}>)
       .map(row=>({session_id:row.id,environment_id:row.workspace_id,state:row.state,...(row.exit_code===null?{}:{exit_code:row.exit_code}),updated_at:row.updated_at}));
   }
   private terminalSession(id:number,owner:string) {
     const row=prepareSql(this.db,"SELECT * FROM terminal_sessions WHERE id=? AND owner_session=?").get(id,owner) as {id:number;job_id:string;output_offset:number}|undefined;
     if(!row)throw new Error("找不到当前会话的命令进程。");return row;
   }
-  async execCommand(workspaceId:string,input:{cmd:string;workdir?:string;shell?:string;login?:boolean;tty?:boolean;timeout_ms?:number;yield_time_ms?:number;max_output_tokens?:number},context:ExecutionContext) {
+  private retainTerminal(jobId: string, retained = true) {
+    prepareSql(this.db, `INSERT INTO terminal_retention VALUES (?,?,?)
+      ON CONFLICT(job_id) DO UPDATE SET last_used=excluded.last_used,retained=excluded.retained`).run(jobId, Date.now(), retained ? 1 : 0);
+  }
+  private async admitTerminal<T>(owner: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.terminalAdmissions.get(owner) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(async () => { await this.pruneTerminals(owner); return operation(); });
+    this.terminalAdmissions.set(owner, current);
+    try { return await current; } finally { if (this.terminalAdmissions.get(owner) === current) this.terminalAdmissions.delete(owner); }
+  }
+  private async pruneTerminals(owner: string) {
+    const entries = prepareSql(this.db, `SELECT t.id,t.job_id,j.state FROM terminal_retention r
+      JOIN terminal_sessions t ON t.job_id=r.job_id JOIN jobs j ON j.id=t.job_id
+      WHERE t.owner_session=? AND r.retained=1 ORDER BY r.last_used DESC,t.id DESC`).all(owner) as Array<{ id: number; job_id: string; state: ExecutionJob['state'] }>;
+    if (entries.length < executionPolicy.processSoftLimit) return;
+    // Codex protects the eight most recently used handles and skips active
+    // interactions. Our persistent job/log records survive handle eviction.
+    const candidates = entries.slice(executionPolicy.protectedRecentProcesses).reverse()
+      .filter(entry => !this.terminalReads.has(entry.id) && !this.terminalOperations.has(entry.id));
+    const candidate = candidates.find(entry => terminal(entry.state)) ?? candidates.find(entry => !this.starting.has(this.row(entry.job_id).workspace_id));
+    if (!candidate) return; // Soft cap: never interrupt an in-flight interaction.
+    if (!terminal(candidate.state)) {
+      // Preserve the durable cancellation protocol and require confirmed stop.
+      const retiring=Promise.resolve().then(()=>this.cancel(candidate.job_id));
+      this.terminalOperations.set(candidate.id,retiring);
+      try{await retiring;}catch{return;}finally{if(this.terminalOperations.get(candidate.id)===retiring)this.terminalOperations.delete(candidate.id);}
+    }
+    this.event(candidate.job_id, this.row(candidate.job_id).workspace_id, 'terminal_retired');
+    this.retainTerminal(candidate.job_id, false);
+  }
+  async execCommand(workspaceId:string,input:{cmd:string;workdir?:string;shell?:string;login?:boolean;tty?:boolean;timeout_ms?:number;yield_time_ms?:number;max_output_tokens?:number},context:ExecutionContext,internalWaitMs?:number) {
     const health=await this.describe();
     if(!health.available || !('capabilities' in health) || health.capabilities?.commandRuntime?.engine!=='zigent-native')throw new Error('独立执行环境尚未就绪，请先完成运行时更新。');
     const windows=health.backend==='windows-native';
     const cwd=await this.workspaceRelativePath(workspaceId,input.workdir??(windows?'.':'/workspace'),true);
-    const result=await this.start(workspaceId,{command:input.cmd,cwd,timeoutMs:input.timeout_ms,waitMs:input.yield_time_ms ?? 10_000,terminal:{tty:input.tty??false,shell:input.shell??(windows?'pwsh':'/bin/bash'),login:input.login??!windows}},context);
-    const row=prepareSql(this.db,"SELECT id FROM terminal_sessions WHERE job_id=?").get(result.id) as {id:number};
-    return this.terminalOutput(row.id,context.sessionId??'',input.max_output_tokens??10_000,0,context.signal);
+    const row=await this.admitTerminal(context.sessionId??'',async()=>{
+      const result=await this.start(workspaceId,{command:input.cmd,cwd,timeoutMs:input.timeout_ms,waitMs:0,terminal:{tty:input.tty??false,shell:input.shell??(windows?'pwsh':'/bin/bash'),login:input.login??!windows}},context);
+      const handle=prepareSql(this.db,"SELECT id FROM terminal_sessions WHERE job_id=?").get(result.id) as {id:number};
+      this.retainTerminal(result.id);return handle;
+    });
+    const result = await this.terminalOutput(row.id,context.sessionId??'',input.max_output_tokens??executionPolicy.defaultMaxOutputTokens,internalWaitMs??initialYieldTime(input.yield_time_ms,windows),context.signal);
+    const root = windows && health.capabilities.workspaceRoot
+      ? health.capabilities.registeredWorkspaces?.[workspaceId] ?? win32.join(health.capabilities.workspaceRoot, workspaceId)
+      : windows ? "." : "/workspace";
+    return { ...result, cwd: (windows ? win32.join : join)(root, cwd), workspace_root: root };
   }
   async workspaceRelativePath(workspaceId:string,path:string,empty=false):Promise<string> {
-    const health=await this.describe();
-    if(health.available && health.backend==='windows-native' && 'capabilities' in health){
-      const root=health.capabilities?.workspaceRoot;
-      if(win32.isAbsolute(path)){
-        if(!root || path.startsWith('\\\\'))throw new Error('文件路径必须属于当前执行工作区。');
-        path=win32.relative(win32.join(root,workspaceId),path);
-      }
-      return safeRelative(path.replaceAll('\\','/'),empty);
+    if (!win32.isAbsolute(path) && !path.startsWith("/")) return safeRelative(path.replaceAll("\\", "/"), empty);
+    if (/^[a-z]:[\\/]/i.test(path)) {
+      const local = this.options.workspaces.registeredDirectory(workspaceId) ?? this.options.workspaces.executionDirectory(workspaceId);
+      const health = local ? undefined : await this.describe();
+      const capabilities = health?.available && health.backend === "windows-native" ? health.capabilities : undefined;
+      const root = local ?? capabilities?.registeredWorkspaces?.[workspaceId]
+        ?? (capabilities?.workspaceRoot ? win32.join(capabilities.workspaceRoot, workspaceId) : undefined);
+      if (!root) throw new Error("找不到该文件的执行目录。");
+      return safeRelative(win32.relative(root, path).replaceAll("\\", "/"), empty);
     }
     if(path==='/workspace')return safeRelative('',empty);
     return safeRelative(path.startsWith('/workspace/')?path.slice(11):path,empty);
   }
-  private async terminalOutput(sessionId:number,owner:string,tokens:number,wait:number,signal?:AbortSignal):Promise<{chunk_id:string;wall_time_seconds:number;output:string;session_id?:number;exit_code?:number;workspace_state?:string;error?:string;workspace_error?:string;truncated:boolean}> {
+  private async terminalOutput(sessionId:number,owner:string,tokens:number,wait:number,signal?:AbortSignal):Promise<{chunk_id:string;wall_time_seconds:number;output:string;environment_id:string;process_id:number;session_id?:number;exit_code?:number;workspace_state?:string;error?:string;workspace_error?:string;truncated:boolean}> {
     const previous=this.terminalReads.get(sessionId)??Promise.resolve();
     const operation=previous.catch(()=>{}).then(()=>this.readTerminalOutput(sessionId,owner,tokens,wait,signal));this.terminalReads.set(sessionId,operation);
     try{return await operation;}finally{if(this.terminalReads.get(sessionId)===operation)this.terminalReads.delete(sessionId);}
   }
   private async readTerminalOutput(sessionId:number,owner:string,tokens:number,wait:number,signal?:AbortSignal) {
-    const session=this.terminalSession(sessionId,owner),started=Date.now(),limit=Math.max(4,Math.min(64_000,tokens*4));
-    let result=await this.read(session.job_id,session.output_offset,limit);
-    while(!signal?.aborted && !terminal(result.state) && result.nextOffset===session.output_offset && Date.now()-started<wait) {
-      await sleep(Math.min(200,wait-(Date.now()-started)));result=await this.read(session.job_id,session.output_offset,limit);
+    const session=this.terminalSession(sessionId,owner),started=Date.now(),limit=Math.max(4,Math.min(executionPolicy.maxOutputBytes,tokens*4));
+    this.retainTerminal(session.job_id);
+    let cursor=session.output_offset,output='',remaining=limit;
+    let result=await this.read(session.job_id,cursor,Math.min(64_000,remaining));
+    for (;;) {
+      output+=result.output;remaining-=result.nextOffset-cursor;cursor=result.nextOffset;
+      if (signal?.aborted || remaining<4 || terminal(result.state) && !result.truncated) break;
+      if (!result.truncated && Date.now()-started>=wait) break;
+      if (!result.truncated) await sleep(Math.min(200,Math.max(0,wait-(Date.now()-started))));
+      const next=await this.read(session.job_id,cursor,Math.min(64_000,remaining));
+      if(next.nextOffset===cursor && result.truncated) break; // incomplete UTF-8 tail
+      result=next;
     }
     prepareSql(this.db,"UPDATE terminal_sessions SET output_offset=? WHERE id=?").run(result.nextOffset,session.id);
-    return {chunk_id:randomUUID().slice(0,8),wall_time_seconds:(Date.now()-started)/1000,output:result.output,
+    this.retainTerminal(session.job_id,!terminal(result.state)||result.truncated);
+    return {chunk_id:randomUUID().slice(0,8),wall_time_seconds:(Date.now()-started)/1000,output,environment_id:result.workspaceId,process_id:session.id,
       ...(!terminal(result.state)||result.truncated?{session_id:session.id}:{}),
       execution_state:result.state,
       ...(terminal(result.state)&&result.exitCode!==undefined?{exit_code:result.exitCode}:{}),
@@ -744,7 +959,9 @@ export class ExecutionService {
     const program=`import sys,subprocess;patch=sys.stdin.buffer.read(${length});sys.exit(subprocess.run(['apply_patch'],input=patch).returncode)`;
     const health=await this.describe();const windows=health.available && health.backend==='windows-native';
     const cmd=windows?"python -c '"+program.replaceAll("'","''")+"'":"python3 -c '"+program.replaceAll("'","'\\''")+"'";
-    const started=await this.execCommand(workspaceId,{cmd,login:false,yield_time_ms:250},context);
+    // This helper is waiting for patch bytes, so it cannot produce output until
+    // we write stdin. It is not a model-requested initial terminal wait.
+    const started=await this.execCommand(workspaceId,{cmd,login:false,timeout_ms:300_000},context,250);
     if(!('session_id' in started) || !started.session_id)return started;
     const session=this.terminalSession(started.session_id,context.sessionId??'');
     await this.writeStdin(session.job_id,patch);
@@ -752,9 +969,14 @@ export class ExecutionService {
   }
   async terminalInput(sessionId:number,chars:string,owner:string,tokens=10_000,wait?:number,signal?:AbortSignal) {
     const session=this.terminalSession(sessionId,owner);
-    if(chars)await this.writeStdin(session.job_id,chars);
-    const result=await this.terminalOutput(sessionId,owner,tokens,Math.min(wait??(chars?250:5000),300_000),signal);
-    return {...result,...(chars.includes('\u0003')?{interrupt_requested:true}:{})};
+    const previous=this.terminalOperations.get(sessionId)??Promise.resolve();
+    const operation=previous.catch(()=>{}).then(async()=>{
+      if(chars)await this.writeStdin(session.job_id,chars);
+      const result=await this.terminalOutput(sessionId,owner,tokens,inputYieldTime(wait,!chars),signal);
+      return {...result,...(chars.includes('\u0003')?{interrupt_requested:true}:{})};
+    });
+    this.terminalOperations.set(sessionId,operation);
+    try{return await operation;}finally{if(this.terminalOperations.get(sessionId)===operation)this.terminalOperations.delete(sessionId);}
   }
   async derivePreview(bytes:Buffer,name:string,sha256:string) {
     for(let attempt=0;attempt<2;attempt++){
@@ -766,24 +988,37 @@ export class ExecutionService {
     }
     throw new Error('渲染环境已改变，请重试。');
   }
+  hasWorkspaceActivity(workspaceId: string) {
+    return this.admissions.has(workspaceId) || this.starting.has(workspaceId) || this.syncing.has(workspaceId) || this.hasPendingWorkspace(workspaceId);
+  }
   hasPendingWorkspace(workspaceId:string) {
     return Boolean(prepareSql(this.db,"SELECT id FROM jobs WHERE workspace_id=? AND (state IN ('starting','running') OR snapshot_state IN ('pending','conflict','failed'))").get(workspaceId));
   }
   async listWorkingFiles(workspaceId:string,path='.',offset=0,limit=100) {
-    if(!this.hasPendingWorkspace(workspaceId))return this.options.workspaces.listFiles(workspaceId,path,offset,limit);
+    if(await this.authorizedRegisteredDirectory(workspaceId) || this.options.workspaces.executionDirectory(workspaceId) || !this.hasPendingWorkspace(workspaceId))
+      return this.options.workspaces.listFiles(workspaceId,path,offset,limit,undefined,false);
     const relative=safeRelative(path,true);
     return this.request<import('../workspaces/types.js').FilePage>('GET',`/v1/workspaces/${workspaceId}/files?path=${encodeURIComponent(relative)}&offset=${offset}&limit=${limit}`);
   }
   async readRemoteFile(workspaceId:string,path:string) {
-    if(!this.hasPendingWorkspace(workspaceId))return (await this.options.workspaces.readFileBytes(workspaceId,path)).bytes;
+    if(await this.authorizedRegisteredDirectory(workspaceId) || this.options.workspaces.executionDirectory(workspaceId) || !this.hasPendingWorkspace(workspaceId))
+      return (await this.options.workspaces.readFileBytes(workspaceId,path,undefined,false)).bytes;
     const response=await this.response("GET",`/v1/workspaces/${encodeURIComponent(workspaceId)}/file?path=${encodeURIComponent(safeRelative(path))}`);
     const length=Number(response.headers.get('content-length'));if(length>256*1024*1024)throw new Error('文件过大。');
     const bytes=Buffer.from(await response.arrayBuffer());if(bytes.length>256*1024*1024)throw new Error('文件过大。');return bytes;
   }
 
   async writeStdin(id: string, text: string) {
-    this.row(id);
+    const job = this.row(id);
+    if (text && text !== "\u0003") this.options.workspaces.assertSessionAccess(job.workspace_id, job.session_id ?? undefined);
     if (text.length > 1_000_000 || text.includes("\0")) throw new Error("输入内容过长或无效。");
+    if(text==='\u0003') {
+      const health=await this.describe();
+      if(health.available && health.sessionProcessManagement) {
+        await this.request('POST',`/v1/jobs/${encodeURIComponent(id)}/interrupt`,{});
+        return this.read(id);
+      }
+    }
     let chunk = "", bytes = 0;
     for (const character of text) {
       const length = Buffer.byteLength(character);
@@ -838,9 +1073,20 @@ export class ExecutionService {
     return result;
   }
   /** Poll all durable active jobs, independently of the recent-jobs UI limit. */
+  async reconcile(id: string) {
+    const result=await this.read(id,0,1);
+    if(this.sharedJob(id) && terminal(result.state) && this.admission(id)?.phase!=="rejected") {
+      await this.saveLog(id);
+      prepareSql(this.db,"UPDATE shared_execution_jobs SET log_saved=1 WHERE job_id=?").run(id);
+      await this.options.onSynchronized?.(result.workspaceId).catch(()=>{});
+    }
+    return result;
+  }
   reconciliationCandidates(limit = 4): ExecutionJob[] {
     const rows = prepareSql(this.db, `SELECT j.* FROM jobs j LEFT JOIN execution_polling p ON p.job_id=j.id
       WHERE j.state IN ('starting','running') OR j.snapshot_state='pending' OR (j.state='interrupted' AND j.snapshot_state='failed')
+        OR (j.state NOT IN ('starting','running') AND EXISTS (SELECT 1 FROM shared_execution_jobs s JOIN execution_admissions a ON a.job_id=s.job_id
+          WHERE s.job_id=j.id AND s.log_saved=0 AND a.phase<>'rejected'))
         OR (j.snapshot_state IN ('conflict','failed') AND EXISTS (
           SELECT 1 FROM execution_admissions a WHERE a.job_id=j.id AND a.phase='rejected'
             AND (a.first_error LIKE '%EXECUTION_HTTP_409:%Remote workspace %'

@@ -1,3 +1,4 @@
+import { CodePointText } from "../text/code-points.js";
 import { randomUUID } from "node:crypto";
 import type { GoogleDriveConfig } from "./config.js";
 import { GoogleOAuthClient } from "./google-auth.js";
@@ -171,8 +172,8 @@ export class GoogleDriveClient extends GoogleOAuthClient {
     if (Number(file.size) > DRIVE_TEXT_MAX_BYTES) return { status: "too_large", file, message: "Content has not been read; this reader is limited to 1 MiB of UTF-8 text." };
     const path = `files/${encodeURIComponent(id)}${exportType ? "/export" : ""}`;
     const content = await this.get(path, exportType ? { mimeType: exportType.mimeType } : { alt: "media", supportsAllDrives: "true" }, true, signal, { id, key: resourceKey });
-    const characters = Array.from(content as string);
-    return { status: "read", file, content: characters.slice(offset, offset + limit).join(""), content_scope: exportType?.scope ?? "file_text",
+    const characters = new CodePointText(content as string);
+    return { status: "read", file, content: characters.slice(offset, offset + limit), content_scope: exportType?.scope ?? "file_text",
       content_mime_type: exportType?.mimeType ?? mimeType, offset, total_characters: characters.length, next_offset: offset + limit < characters.length ? offset + limit : null,
       ...(exportType?.scope === "first_sheet_only" ? { limitation: "Only the first sheet was exported. Other tabs, formatting, formulas and comments have not been read." } : {}) };
   }

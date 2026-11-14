@@ -1,0 +1,7 @@
+@import url("./plugins/palette/colors.css");
+
+:root { color-scheme: light; font-family: system-ui, sans-serif; color: var(--ui-text); }
+:root[data-theme="dark"] { color-scheme: dark; }
+html, body { height: 100%; margin: 0; overflow: hidden; background: transparent; }
+#diagram { width: 100%; height: 100%; }
+#diagram > svg { display: block; width: 100% !important; height: 100% !important; max-width: none !important; max-height: none !important; }

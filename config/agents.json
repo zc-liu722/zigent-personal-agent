@@ -61,13 +61,15 @@
           "confidence": "verified",
           "sources": [
             "https://api-docs.deepseek.com/quick_start/pricing/",
-            "https://api-docs.deepseek.com/api/list-models/"
+            "https://api-docs.deepseek.com/api/list-models/",
+            "https://api-docs.deepseek.com/guides/responses_api/",
+            "https://github.com/deepseek-ai/deepseek-harness/blob/e8f7b93a344964de3dca1ace9e72b6e4d6de87cb/packages/compaction/compaction-basic/src/summarizer.ts"
           ],
           "checkedAt": "2026-10-28",
           "maxOutputTokens": 393216,
           "discoveryUrl": "https://api.deepseek.com/models",
           "triggerRatio": 0.75,
-          "note": "Anthropic 兼容协议不代表支持 Anthropic 原生压缩；按 DeepSeek 路由使用结构化摘要。",
+          "note": "Anthropic 兼容协议不代表支持 Anthropic 原生压缩；按 DeepSeek 路由使用结构化摘要。 压缩使用 DeepSeek Harness 的同路由前缀回放与官方摘要指令。",
           "limitSource": "supplier"
         }
       }
@@ -94,10 +96,9 @@
         "conversation_history",
         "ask_user_question",
         "present_output",
-        "long_term_memory",
+        "markdown",
         "web_search",
-        "load_skill",
-        "update_skill",
+        "skills",
         "proactive_tasks",
         "view_session_image"
       ],

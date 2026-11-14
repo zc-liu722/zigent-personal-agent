@@ -14,7 +14,7 @@ export class CodexService {
     this.store = new CodexStore(options);
   }
   static fromConfig(config: AgentConfig, verifyProactiveRun?: (context: ToolExecutionContext) => boolean, model?: ModelGateway) {
-    if (!config.allowedTools.includes("codex")) return undefined;
+    if (config.id !== "deepmind" || !config.allowedTools.includes("codex")) return undefined;
     const owner = config.web?.ownerUserId ?? config.notifications?.ownerUserId ?? config.toolSettings?.google_drive?.ownerUserId;
     if (!owner) return undefined;
     return new CodexService({ databasePath: config.memoryStoragePath + ".codex.sqlite", agentId: config.id, ownerUserId: owner }, verifyProactiveRun, model);
@@ -26,6 +26,7 @@ export class CodexService {
       && context.taskRunId && context.taskLeaseToken && !context.signal?.aborted && this.verifyProactiveRun?.(context));
   }
   async prepareDelegation(value: unknown, context: ToolExecutionContext) {
+    this.store.assertScope(context);
     const input = object(value);
     if (!["dispatch", "message"].includes(String(input.action))) return { input: value, context };
     const task = object(input.task);
@@ -68,8 +69,6 @@ export class CodexService {
       throw new Error("发送内容与已确认提示词不一致");
     if (!context?.delegationRequest && !context?.taskRunId) throw new Error("缺少用户原始要求，请重新提出派发");
     const parsed = dispatchSchema.parse(value);
-    const project = this.store.devices(scope).find(d => d.id === parsed.deviceId)?.projects.find(p => p.id === parsed.projectId);
-    if (project?.executor && !this.store.executionGrant(scope, parsed.deviceId, parsed.projectId, !this.canAutomate(context!))) throw new Error("该执行器项目的首次任务需要在网页确认");
     const task = this.store.create(scope, parsed, key, Date.now(), context?.taskRunId, { originalRequest: context?.delegationRequest, model: context?.model, reasoningEfforts: context?.reasoningEfforts });
     return task;
   }
@@ -79,7 +78,7 @@ export class CodexService {
     if (approved?.action !== "message" || approved.id !== id || approved.text !== text || approved.reviewAfterCompletion !== reviewAfterCompletion) throw new Error("发送内容与已确认提示词不一致");
     if (!context?.delegationRequest && !context?.taskRunId) throw new Error("缺少用户原始要求，请重新提出继续任务");
     const task = this.store.owned(scope, id);
-    if (task.project?.executor && !this.store.executionGrant(scope, task.deviceId, task.projectId, !this.canAutomate(context!))) throw new Error("项目范围已变化，需要在网页重新确认");
+    if (task.execution?.mode !== "direct") throw new Error("此会话属于已退役的执行器，资料已保留；请在原执行环境恢复或新建桌面委派");
     if (!task.threadId) throw new Error("原会话尚未建立，请等待接单");
     if (["running", "waiting_user"].includes(task.state)) {
       this.store.update(id, current => {
@@ -92,7 +91,7 @@ export class CodexService {
     }
     this.store.stopReview(scope, task.id);
     if (!["succeeded", "blocked", "cancelled"].includes(task.state)) throw new Error("原执行状态待核对，请稍后再发送");
-    const next = this.store.create(scope, { deviceId: task.deviceId, projectId: task.projectId, title: task.title,
+    const next = this.store.create(scope, { deviceId: task.deviceId, projectId: task.projectId, directory: task.project?.directory, title: task.title,
       prompt: text, continueTaskId: task.id, reviewAfterCompletion: reviewAfterCompletion ?? false, timeoutMinutes: 120 }, key, Date.now(), context?.taskRunId, { originalRequest: context?.delegationRequest, model: context?.model, reasoningEfforts: context?.reasoningEfforts });
     return { status: "queued", task: this.statusTask(next) };
   }

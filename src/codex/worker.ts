@@ -1,24 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { delegationPrompt } from "./delegation.js";
 import { CodexRpc } from "./rpc.js";
-import { PROJECT_LIMIT, workerEventSchema, type CodexDisplay, type CodexTask, type WorkerEvent } from "./types.js";
+import { workerEventSchema, type CodexDisplay, type CodexTask, type WorkerEvent } from "./types.js";
 import { itemDisplay, safeDisplay } from "./display.js";
-import { codexProjects, type WorkerProject } from "./projects.js";
-import { agentId, spaces } from "../project-spaces/policy.js";
-import { assertProjectWorkspace, prepareWorkspace, completeWorkspace, projectExecutionScope } from "../project-spaces/workspace.js";
+import { executionSchema } from "../project-spaces/workspace.js";
 
 export const workerConfigSchema = z.object({
   endpoint: z.string().url().refine(value => { const u = new URL(value); return !u.username && !u.password && !u.search && !u.hash && /^\/v1\/codex\/[a-z][a-z0-9-]*\/$/.test(u.pathname) && (u.protocol === "https:" || u.protocol === "http:" && u.hostname === "127.0.0.1"); }),
   token: z.string().regex(/^[A-Za-z0-9_-]{43,128}$/), name: z.string().min(1).max(80), statePath: z.string().min(1),
-  codexCommand: z.string().min(1), codexArgs: z.array(z.string()).default(["app-server", "proxy"]),
-  projectSource: z.enum(["codex", "manual", "spaces"]).default("codex"),
-  managed: z.object({ agent: agentId, registry: z.string().min(1) }).strict().optional(),
-  projects: z.array(z.object({ id: z.string().regex(/^[a-z0-9_-]{1,80}$/), name: z.string().min(1).max(80), path: z.string().refine(isAbsolute) }).strict()).max(PROJECT_LIMIT).default([])
+  desktopEndpoint: z.string().url().refine(value => { const u = new URL(value); return u.protocol === "ws:" && u.hostname === "127.0.0.1" && !u.username && !u.password && !u.search && !u.hash; })
 }).strict();
 export type WorkerConfig = z.infer<typeof workerConfigSchema>;
 type LocalTask = { task: CodexTask; status: "running" | "finishing" | "done" | "blocked"; result?: string; fenced?: boolean };
@@ -43,10 +38,7 @@ export class CodexWorker {
   private locked = false;
   private displayTimer?: ReturnType<typeof setInterval>;
   private historyJob?: Promise<void>;
-  private projects: WorkerProject[] = [];
-  private projectsJob?: Promise<void>;
-  private projectTimer?: ReturnType<typeof setTimeout>;
-  private nextProjectReadAt = 0;
+
   private publishedCatalog = "";
   private readonly displayItems = new Map<string, { task: CodexTask; value: CodexDisplay; dirty: boolean }>();
   private streamAbort = new AbortController();
@@ -62,7 +54,7 @@ export class CodexWorker {
     for (const row of this.db.prepare("SELECT id,payload FROM outbox").all() as { id: string; payload: string }[]) {
       if (!workerEventSchema.safeParse(JSON.parse(row.payload)).success) this.db.prepare("DELETE FROM outbox WHERE id=?").run(row.id);
     }
-    this.rpc = rpc ?? new CodexRpc(config.codexCommand, config.codexArgs);
+    this.rpc = rpc ?? new CodexRpc("", [], undefined, config.desktopEndpoint);
     this.rpc.on("notification", message => this.notification(message).catch(() => {}));
     this.rpc.on("closed", () => { for (const waiter of this.waiters.values()) waiter.reject(new Error("Codex connection closed")); this.waiters.clear(); });
     this.rpc.on("request", (message: { id: number | string; method: string; params: Record<string, unknown> }) => {
@@ -163,41 +155,26 @@ export class CodexWorker {
     this.jobs.set(task.id, promise);
   }
   private async run(local: LocalTask) {
-    await this.refreshProjects({ force: true });
     const task = local.task;
-    if (task.protocol !== "text-v1") throw new Error("Unconfirmed legacy task");
-    const project = this.projects.find(project => project.id === task.projectId);
-    if (!project || project.available === false) throw new Error("Project is not available in Codex");
-    if (task.project?.directory && task.project.directory !== project.path) throw new Error("Project directory changed; confirm a new message");
-    if (task.project?.codexProjectId && task.project.codexProjectId !== project.codexProjectId) throw new Error("Codex project identity changed");
-    if (task.project?.roots && JSON.stringify(task.project.roots) !== JSON.stringify(project.roots)) throw new Error("Codex project roots changed; confirm a new message");
-    if (task.project?.scopeVersion !== project.scopeVersion) throw new Error("Project authorization scope changed; confirm a new message");
+    if (task.protocol !== "text-v1" || !task.project?.directory) throw new Error("Task location is missing");
+    if (task.execution && task.execution.mode !== "direct") throw new Error("Retired executor session requires supported migration");
+    const account = await this.rpc.call<{ account?: { type?: string } }>("account/read", { refreshToken: false });
+    if (account.account?.type !== "chatgpt") throw new Error("The desktop Codex login is unavailable");
+    const cwd = await realpath(task.project.directory);
+    if (!(await stat(cwd)).isDirectory()) throw new Error("Task directory is unavailable");
     if (this.local(task.id)?.status === "done") return;
-    if (this.config.projectSource === "spaces") {
-      if (!this.config.managed || process.platform !== "win32") throw new Error("Managed Codex projects only execute on Windows");
-      const account = await this.rpc.call<{ account?: { type?: string } }>("account/read", { refreshToken: false });
-      if (account.account?.type !== "chatgpt") throw new Error("This executor requires its authorized ChatGPT subscription login");
-      const space = (await spaces(this.config.managed.agent, this.config.managed.registry)).find(s => s.id === task.projectId);
-      if (!space) throw new Error("Unregistered project");
-      if (!task.execution) {
-        const readiness = await this.request<{ state: string; inputVersion: string }>("space-readiness", { projectId: space.id });
-        if (readiness.state !== "ready") throw new Error("Project inputs are still syncing");
-        task.execution = await prepareWorkspace(space, dirname(this.config.statePath), task.id, readiness.inputVersion);
-        this.save(local);
-      } else {
-        await assertProjectWorkspace(space, task.execution);
-      }
-    }
-    const cwd = task.execution?.directory ?? project.path;
-    const context = { cwd, approvalPolicy: "never", sandbox: "workspace-write" };
+    task.execution = executionSchema.parse({ executor: "windows-codex", host: "windows", directory: cwd, mode: "direct" });
+    this.save(local);
+    const context = { cwd, approvalPolicy: "never", sandbox: "danger-full-access" };
     if (task.threadId) {
       const read = await this.rpc.call<{ thread: { cwd?: string; status?: { type?: string } } }>("thread/read", { threadId: task.threadId });
       if (read.thread.cwd && read.thread.cwd !== cwd) throw new Error("Thread project changed");
       if (read.thread.status?.type === "active") throw new Error("Original thread is still active");
-      await this.rpc.call("thread/resume", { threadId: task.threadId, ...context });
+      const resumed = await this.rpc.call<{ sandbox?: { type?: string }; approvalPolicy?: string }>("thread/resume", { threadId: task.threadId, ...context });
+      if (resumed.sandbox?.type !== "dangerFullAccess" || resumed.approvalPolicy !== "never") throw new Error("Desktop Codex did not accept full access");
     } else {
-      const started = await this.rpc.call<{ thread: { id: string } }>("thread/start", { ...context, ephemeral: false,
-        ...(project.codexProjectId ? { projectId: project.codexProjectId } : {}) });
+      const started = await this.rpc.call<{ thread: { id: string }; sandbox?: { type?: string }; approvalPolicy?: string }>("thread/start", { ...context, ephemeral: false });
+      if (started.sandbox?.type !== "dangerFullAccess" || started.approvalPolicy !== "never") throw new Error("Desktop Codex did not accept full access");
       task.threadId = started.thread.id; await this.rpc.call("thread/name/set", { threadId: task.threadId, name: task.title });
     }
     this.save(local);
@@ -208,9 +185,9 @@ export class CodexWorker {
     for (const key of this.finalMessages.keys()) if (key.startsWith(task.threadId + ":")) this.finalMessages.delete(key);
     const started = await this.rpc.call<{ turn: { id: string } }>("turn/start", { threadId: task.threadId,
       clientUserMessageId: task.id.slice(0, 24) + task.attempt.toString().padStart(12, "0"),
-      input: [{ type: "text", text: delegationPrompt(task.prompt, task.originalRequest, task.intent)
-        + (task.execution?.mode === "project" ? "\nWork directly in this registered project directory. Read and edit the actual project files, following its rules. Save deliverables in the relevant existing topic. Do not create results/, task-ID folders, return manifests or task reports as a substitute for the requested work. Changes are saved in place; describe the actual file paths in your reply." : "") }],
-      sandboxPolicy: { type: "workspaceWrite", writableRoots: task.execution ? [cwd] : project.roots ?? [cwd], networkAccess: true } });
+      cwd, approvalPolicy: "never",
+      input: [{ type: "text", text: delegationPrompt(task.prompt, task.originalRequest, task.intent) }],
+      sandboxPolicy: { type: "dangerFullAccess" } });
     task.turnId = started.turn.id; this.save(local);
     await this.emit(task, "started", { threadId: task.threadId, turnId: task.turnId, phase: "执行中" });
     local.result = await finished; this.waiters.delete(task.threadId!);
@@ -222,10 +199,6 @@ export class CodexWorker {
     await this.finish(local);
   }
   private async notification(message: { method: string; params: Record<string, unknown> }) {
-    if (message.method === "project/changed" && this.config.projectSource === "codex") {
-      if (this.projectTimer) clearTimeout(this.projectTimer);
-      this.projectTimer = setTimeout(() => { void this.refreshProjects({ force: true }).catch(() => {}); }, 250); this.projectTimer.unref(); return;
-    }
     const params = message.params, threadId = String(params.threadId ?? ""), local = this.locals().find(local => local.task.threadId === threadId && (local.status === "running" || message.method === "thread/tokenUsage/updated" && local.status === "finishing"));
     if (!local || params.turnId && local.task.turnId && params.turnId !== local.task.turnId) return;
     if (message.method === "thread/tokenUsage/updated" && local.task.execution) {
@@ -270,27 +243,12 @@ export class CodexWorker {
       if (turn.status === "completed") waiter?.resolve(final); else waiter?.reject(new Error("Codex turn did not complete"));
     }
   }
-  private projectCatalog() { return this.projects.map(({ path: _path, ...project }) => project); }
+  private projectCatalog() { return []; }
   async refreshProjects(options: { force?: boolean; publish?: boolean } = {}): Promise<void> {
-    if (this.projectsJob) return this.projectsJob;
-    this.projectsJob = (async () => {
-      if (options.force || Date.now() >= this.nextProjectReadAt) {
-        if (this.config.projectSource === "spaces") {
-          if (!this.config.managed || process.platform !== "win32") throw new Error("Managed projects require the registered Windows worker");
-          this.projects = await Promise.all((await spaces(this.config.managed.agent, this.config.managed.registry)).filter(s => s.executors.includes("windows-codex")).map(async space => {
-            const path = await realpath(space.windows!);
-            return { id: space.id, name: space.name, path, directory: path, roots: [path], executor: "windows-codex" as const, host: "windows" as const, scopeVersion: projectExecutionScope(space), available: true };
-          }));
-        } else if (this.config.projectSource === "codex") { await this.rpc.start(); this.projects = await codexProjects(this.rpc); }
-        else this.projects = await Promise.all(this.config.projects.map(async project => {
-          const path = await realpath(project.path); if (!(await stat(path)).isDirectory()) throw new Error("授权项目不存在");
-          return { ...project, path, directory: path, available: true };
-        }));
-        this.nextProjectReadAt = Date.now() + 30000;
-      }
-      const catalog = this.projectCatalog(), serialized = JSON.stringify(catalog);
-      if (options.publish !== false && serialized !== this.publishedCatalog) { await this.request("projects", { projects: catalog }); this.publishedCatalog = serialized; }
-    })().finally(() => { this.projectsJob = undefined; }); return this.projectsJob;
+    // Devices advertise availability, never a project admission catalogue.
+    if (options.publish !== false && !this.publishedCatalog) {
+      await this.request("projects", { projects: [] }); this.publishedCatalog = "[]";
+    }
   }
   private async syncDisplayHistory() {
     for (const local of this.locals().filter(item => item.task.threadId && item.task.createdAt > Date.now() - 7 * 86400000).slice(-20)) {
@@ -358,14 +316,7 @@ export class CodexWorker {
   }
   private async finish(local: LocalTask) {
     if (this.local(local.task.id)?.status === "done") return;
-    if (local.task.execution && this.config.managed) {
-      const space = (await spaces(this.config.managed.agent, this.config.managed.registry)).find(s => s.id === local.task.projectId);
-      if (!space || projectExecutionScope(space) !== local.task.project?.scopeVersion || await realpath(space.windows!) !== local.task.project.directory) {
-        local.status = "blocked"; this.save(local);
-        await this.emit(local.task, "blocked", { phase: "项目范围已变化", summary: "已保存的项目文件保留；请核对项目范围后重新确认。" }); return;
-      }
-      local.task.execution = await completeWorkspace(space, dirname(this.config.statePath), local.task.id, local.task.execution); this.save(local);
-    }
+    if (local.task.execution) { local.task.execution.publication = "published"; this.save(local); }
     await this.emit(local.task, "completed", { summary: (local.result ?? "").slice(0, 100000), ...(local.task.execution ? { execution: local.task.execution } : {}) });
   }
   async heartbeat() {
@@ -461,16 +412,12 @@ export class CodexWorker {
         this.waiters.get(local.task.threadId ?? "")?.reject(new Error("Interrupted by user"));
         await this.emit(local.task, "interrupted", { phase: "已中断" });
       } else {
-        await this.refreshProjects({ force: true });
-        const project = this.projects.find(project => project.id === local.task.projectId);
-        if (!project || project.available === false || local.task.protocol !== "text-v1"
-          || local.task.project?.directory && project.path !== local.task.project.directory
-          || local.task.project?.scopeVersion !== project.scopeVersion || local.task.project?.roots && JSON.stringify(project.roots) !== JSON.stringify(local.task.project.roots)) throw new Error("Project changed");
+        if (local.task.execution?.mode !== "direct" || !local.task.project?.directory) throw new Error("Retired executor session");
         const server = await this.request<{ task: CodexTask }>("task", { id: local.task.id });
         if (!["running", "waiting_user"].includes(server.task.state) || !this.jobs.has(local.task.id)
           || server.task.threadId !== local.task.threadId || (server.task.leaseUntil ?? 0) <= Date.now()) throw new Error("Original turn is no longer active");
         const read = await this.rpc.call<{ thread: { cwd?: string } }>("thread/read", { threadId: local.task.threadId });
-        if (read.thread.cwd && read.thread.cwd !== (local.task.execution?.directory ?? project.path)) throw new Error("Thread project changed");
+        if (read.thread.cwd && read.thread.cwd !== local.task.execution.directory) throw new Error("Thread project changed");
         const question = this.pendingQuestions.get(local.task.id);
         if (question) {
           const questions = Array.isArray(question.params.questions) ? question.params.questions.map(record) : [];
@@ -517,10 +464,9 @@ export class CodexWorker {
     throw new Error("Original turn has not stopped");
   }
   async close() {
-    if (this.projectTimer) clearTimeout(this.projectTimer);
     if (this.displayTimer) clearInterval(this.displayTimer); this.flushDisplay();
     this.stopping = true; if (this.timer) clearInterval(this.timer); if (this.guard) clearInterval(this.guard); this.streamAbort.abort(); this.rpc.close();
-    await Promise.allSettled([...this.jobs.values(), this.heartbeating, this.syncPromise, this.flushing, this.historyJob, this.projectsJob]); this.db.close();
+    await Promise.allSettled([...this.jobs.values(), this.heartbeating, this.syncPromise, this.flushing, this.historyJob]); this.db.close();
     if (this.locked) { rmSync(this.config.statePath + ".lock", { recursive: true, force: true }); this.locked = false; }
   }
 }
