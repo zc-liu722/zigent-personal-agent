@@ -14,7 +14,7 @@ export class CodexService {
     this.store = new CodexStore(options);
   }
   static fromConfig(config: AgentConfig, verifyProactiveRun?: (context: ToolExecutionContext) => boolean, model?: ModelGateway) {
-    if (config.id !== "deepmind" || !config.allowedTools.includes("codex")) return undefined;
+    if (!config.allowedTools.includes("codex")) return undefined;
     const owner = config.web?.ownerUserId ?? config.notifications?.ownerUserId ?? config.toolSettings?.google_drive?.ownerUserId;
     if (!owner) return undefined;
     return new CodexService({ databasePath: config.memoryStoragePath + ".codex.sqlite", agentId: config.id, ownerUserId: owner }, verifyProactiveRun, model);

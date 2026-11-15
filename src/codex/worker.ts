@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { delegationPrompt } from "./delegation.js";
@@ -13,7 +13,9 @@ import { executionSchema } from "../project-spaces/workspace.js";
 export const workerConfigSchema = z.object({
   endpoint: z.string().url().refine(value => { const u = new URL(value); return !u.username && !u.password && !u.search && !u.hash && /^\/v1\/codex\/[a-z][a-z0-9-]*\/$/.test(u.pathname) && (u.protocol === "https:" || u.protocol === "http:" && u.hostname === "127.0.0.1"); }),
   token: z.string().regex(/^[A-Za-z0-9_-]{43,128}$/), name: z.string().min(1).max(80), statePath: z.string().min(1),
-  desktopEndpoint: z.string().url().refine(value => { const u = new URL(value); return u.protocol === "ws:" && u.hostname === "127.0.0.1" && !u.username && !u.password && !u.search && !u.hash; })
+  desktopEndpoint: z.string().url().refine(value => { const u = new URL(value); return u.protocol === "ws:" && u.hostname === "127.0.0.1" && !u.username && !u.password && !u.search && !u.hash; }),
+  // Pin a non-default desktop profile explicitly; otherwise use this worker's local Codex home.
+  desktopCodexHome: z.string().trim().min(1).refine(value => win32.isAbsolute(value), "desktopCodexHome must be an absolute Windows path").optional()
 }).strict();
 export type WorkerConfig = z.infer<typeof workerConfigSchema>;
 type LocalTask = { task: CodexTask; status: "running" | "finishing" | "done" | "blocked"; result?: string; fenced?: boolean };
@@ -54,7 +56,7 @@ export class CodexWorker {
     for (const row of this.db.prepare("SELECT id,payload FROM outbox").all() as { id: string; payload: string }[]) {
       if (!workerEventSchema.safeParse(JSON.parse(row.payload)).success) this.db.prepare("DELETE FROM outbox WHERE id=?").run(row.id);
     }
-    this.rpc = rpc ?? new CodexRpc("", [], undefined, config.desktopEndpoint);
+    this.rpc = rpc ?? new CodexRpc("", [], undefined, config.desktopEndpoint, config.desktopCodexHome);
     this.rpc.on("notification", message => this.notification(message).catch(() => {}));
     this.rpc.on("closed", () => { for (const waiter of this.waiters.values()) waiter.reject(new Error("Codex connection closed")); this.waiters.clear(); });
     this.rpc.on("request", (message: { id: number | string; method: string; params: Record<string, unknown> }) => {

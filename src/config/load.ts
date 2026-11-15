@@ -99,9 +99,10 @@ export async function loadCodexBrokerConfigs(environment: Environment = process.
   manifestPath = environment.AGENTS_CONFIG_PATH ?? "config/agents.json") {
   const manifest = await readManifest(manifestPath, "zod");
   assertAgentIsolation(manifest, false);
-  return manifest.agents.filter(profile => profile.id === "deepmind" && profile.enabled && profile.allowedTools.includes("codex")).map(profile => {
+  return manifest.agents.filter(profile => profile.enabled && profile.allowedTools.includes("codex")).map(profile => {
     const ownerUserId = optionalEnv(environment, `${profile.envPrefix}_WEB_OWNER_USER_ID`)
-      ?? optionalEnv(environment, `${profile.envPrefix}_NOTIFICATION_OWNER_USER_ID`) ?? optionalEnv(environment, "HEALTH_OWNER_USER_ID");
+      ?? optionalEnv(environment, `${profile.envPrefix}_NOTIFICATION_OWNER_USER_ID`)
+      ?? (profile.id === "deepmind" ? optionalEnv(environment, "HEALTH_OWNER_USER_ID") : undefined);
     if (!ownerUserId) throw new Error(`${profile.id}: Codex owner is not configured`);
     return { agentId: profile.id, ownerUserId, databasePath: resolve(profile.storage.sqlite) + ".codex.sqlite" };
   });

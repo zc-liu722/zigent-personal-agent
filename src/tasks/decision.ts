@@ -81,8 +81,12 @@ export async function resolveTaskResult(agent: Pick<AgentExecutor, "run">, reply
       return { reply: { ...reply, text, usage }, outcome, decision };
     } catch (error) {
       if (!(error instanceof TaskResultFormatError)) throw error;
-      if (attempt === maxRepairs) return { reply: { ...reply, usage }, outcome: "failed", formatValidationFailed: true,
-        decision: { summary: taskFormatFailureSummary, notify: false } };
+      if (attempt === maxRepairs) {
+        const notify = requiresMessage && canRepair();
+        return { reply: { ...reply, usage }, outcome: "failed", formatValidationFailed: true,
+          decision: { summary: taskFormatFailureSummary, notify,
+            ...(notify ? { message: taskFormatFailureSummary + " 请查看任务记录；为避免重复操作，未重新执行任务。" } : {}) } };
+      }
       if (!canRepair()) return { reply: { ...reply, usage }, outcome: "failed",
         decision: { summary: "任务已失效，未继续整理结果。", notify: false } };
 

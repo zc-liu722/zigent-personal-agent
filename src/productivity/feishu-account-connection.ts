@@ -32,7 +32,8 @@ export class FeishuAccountConnectionCoordinator {
     private readonly root = join(dirname(resolve(process.env.AGENTS_CONFIG_PATH ?? "config/agents.json")), "feishu-account-connections"),
     private readonly personal = new FeishuUserAuthorizationCoordinator(undefined, undefined, undefined, undefined, FEISHU_CONNECTED_USER_SCOPES),
     private readonly register = (options: Parameters<typeof registerFeishuApplication>[0]) => registerFeishuApplication(options, FEISHU_CONNECTED_USER_SCOPES),
-    private readonly request: typeof fetch = fetch
+    private readonly request: typeof fetch = fetch,
+    private readonly legacy = new FeishuUserAuthorizationCoordinator()
   ) {}
 
   private path(owner: FeishuUserIdentity): string {
@@ -74,6 +75,14 @@ export class FeishuAccountConnectionCoordinator {
   }
   async getConnections(owner: FeishuUserIdentity): Promise<FeishuAccountConnection[]> {
     const record = await this.record(owner);
+    // Before independent data applications were introduced, grants belonged to
+    // the owner's configured bot app and only requested FEISHU_USER_SCOPES.
+    // Keep those grants usable until a replacement application is configured;
+    // do not require the newer document scopes or upgrade their read identity.
+    if (!record.applications.length && validCredentials(owner)) {
+      const accessToken = await this.legacy.getAccessToken(owner);
+      return accessToken ? [{ appId: owner.appId, appSecret: owner.appSecret, accessToken, readDocumentsAsUser: false }] : [];
+    }
     const ordered = [...record.applications].sort((a, b) => Number(b.appId === record.defaultAppId) - Number(a.appId === record.defaultAppId));
     const connections: FeishuAccountConnection[] = [];
     const failures: unknown[] = [];
@@ -103,6 +112,8 @@ export class FeishuAccountConnectionCoordinator {
     const record = await this.record(owner);
     const app = record.applications.find(app => app.appId === (appId ?? record.defaultAppId));
     if (app) await this.personal.invalidate({ ...owner, ...app });
+    else if (!record.applications.length && validCredentials(owner) && (!appId || appId === owner.appId))
+      await this.legacy.invalidate(owner);
   }
   cancel(owner: FeishuUserIdentity): void { this.active.get(this.path(owner))?.controller.abort(); }
   start(owner: FeishuUserIdentity, send: (prompt: Prompt) => Promise<void>,
@@ -238,6 +249,8 @@ export class FeishuAccountConnectionCoordinator {
   /** Supported maintenance: verify saved grants and consolidate one connection per tenant. */
   async summary(owner: FeishuUserIdentity): Promise<{ accounts: Array<{ team: string; authorized: boolean }>; applications: number }> {
     const record = await this.record(owner), connections = await this.getConnections(owner);
+    if (!record.applications.length && connections.length)
+      return { applications: connections.length, accounts: connections.map(() => ({ team: "原有应用", authorized: true })) };
     return { applications: record.applications.length, accounts: record.applications.map(app => ({
       team: app.tenantName ?? "待确认团队", authorized: connections.some(connection => connection.appId === app.appId)
     })) };

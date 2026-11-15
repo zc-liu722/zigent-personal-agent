@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import WebSocket from "ws";
 
 type Message = { id?: number | string; method?: string; params?: Record<string, unknown>; result?: unknown; error?: { message?: string } };
@@ -13,7 +13,8 @@ export class CodexRpc extends EventEmitter {
   private buffer = "";
   private starting?: Promise<void>;
   private readonly pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
-  constructor(readonly command: string, readonly args: string[] = ["app-server", "proxy"], readonly cwd?: string, readonly desktopEndpoint?: string) { super(); }
+  constructor(readonly command: string, readonly args: string[] = ["app-server", "proxy"], readonly cwd?: string, readonly desktopEndpoint?: string,
+    readonly desktopCodexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex")) { super(); }
   get connected() { return Boolean(this.child || this.socket?.readyState === WebSocket.OPEN); }
   async start() {
     if (this.starting) return this.starting; if (this.connected) return;
@@ -50,7 +51,12 @@ export class CodexRpc extends EventEmitter {
         child.on("close", () => { if (this.child === child) this.close(); }); child.on("error", () => { if (this.child === child) this.close(); });
       }
       const identity = await this.call<{ codexHome?: string; platformFamily?: string }>("initialize", { clientInfo: { name: "zigent-worker", title: "Zigent desktop connector", version: "0.1.0" }, capabilities: { experimentalApi: true } });
-      if (this.desktopEndpoint && (identity.codexHome?.replaceAll("\\", "/").toLowerCase() !== "c:/users/dell/.codex" || identity.platformFamily !== "windows")) throw new Error("The endpoint is not the Windows desktop Codex home");
+      if (this.desktopEndpoint) {
+        const normalizeHome = (value: string) => win32.normalize(value).replace(/[\\/]+$/, "").toLowerCase();
+        if (identity.platformFamily !== "windows" || !identity.codexHome || !win32.isAbsolute(identity.codexHome)
+          || !win32.isAbsolute(this.desktopCodexHome) || normalizeHome(identity.codexHome) !== normalizeHome(this.desktopCodexHome))
+          throw new Error("The endpoint does not match the configured Windows desktop Codex home");
+      }
       this.notify("initialized", {});
     } catch (error) { this.close(); throw error; }
   }
