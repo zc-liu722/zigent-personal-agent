@@ -763,7 +763,7 @@
     ],
     [
       "src/codex/http.ts",
-      "5d64a66fc6be348f444ca3dac5e16becb8de395072f42e216938bd793c289e15"
+      "80af328f030fc52ee067b102d7ec750acff25d4f703f9dd7efc787e9dea70acb"
     ],
     [
       "src/codex/review.ts",
@@ -771,15 +771,15 @@
     ],
     [
       "src/codex/rpc.ts",
-      "a4ae1c8ff636fdc8911ad482dd69b02ab436891fd0e400187f8b8820d98ddcc7"
+      "315e23d2cbf34798af743b97129e1e2345da620f59e9f8e14ab0f73aeeddb1f2"
     ],
     [
       "src/codex/service.ts",
-      "870e28e585bfc705e89f744421feb4df94e411ebefef70d2fd05d3ca151d95e3"
+      "08cda45d7216490f36d6e72378411492ae7bbb93441c665e6ecc97ae45eaf923"
     ],
     [
       "src/codex/store.ts",
-      "85a8b3d02478e759b27858fa6030f2c204a50d2c9d366add4aa7fe3766a3a7b4"
+      "32520a36dee02de5a8878d4ef94d76fb2bbd689e09e95a5ec3f8576ecdca5885"
     ],
     [
       "src/codex/supervisor.ts",
@@ -795,7 +795,7 @@
     ],
     [
       "src/codex/worker.ts",
-      "43d2dc646633a923674aa86ffd4c7fddf049e95e3b5e1d4a432d29793a2932f0"
+      "724d6bea9cf4ef67b758398ffcdd730e0bc56316935d95f9d1a888bccadde096"
     ],
     [
       "src/config.ts",
@@ -807,7 +807,7 @@
     ],
     [
       "src/config/load.ts",
-      "cfdcf53dbe7884b9aef4d4cfdf6cf175cca4d37b027a4df7f8006c39ca52e87a"
+      "49ce72a86744ad27806924a7f24373890664fe8b5d2a8a59010f02ee3362457c"
     ],
     [
       "src/config/manifest.ts",
@@ -1015,7 +1015,7 @@
     ],
     [
       "src/health/store.ts",
-      "5dfce0e89559d627ecaf192c160b678469d6c432c9bb873b340660e617696b6c"
+      "fbc3de30e04bcbfc9d6d57a4b3da43ce49ccb27aaeb4186d74649dd2251a4d49"
     ],
     [
       "src/image-generation-policy.ts",
@@ -1299,7 +1299,7 @@
     ],
     [
       "src/models/context-summary.ts",
-      "83b1a8687682449fee3288d85ce8b4aa3507685abd33f8f5b73ecf465cfefa7c"
+      "cdaf799d59bf02968068f707bb3b06eef2daa81cb2c8f87fa85e09bd955999be"
     ],
     [
       "src/models/currency.ts",
@@ -1659,7 +1659,7 @@
     ],
     [
       "src/productivity/feishu-account-connection.ts",
-      "a6e99e7710461e1fd423a944215b20aba98dc26c4ba0214f71ed097fac17c942"
+      "87f0ad82f6b41e76529a5a795ce57ddbf495939cb4a51916acbd2daaf837ce6b"
     ],
     [
       "src/productivity/feishu-authorization-protocol.ts",
@@ -1815,7 +1815,7 @@
     ],
     [
       "src/tasks/decision.ts",
-      "e8e3249b5d3eb7a5bb518785802ff044c305e85968aa17e33615d527201b2faf"
+      "9d469879f6c94d439d69c1c7547b72f1e8431ec9b1a955de931ab3bffe044e7e"
     ],
     [
       "src/tasks/external-events.ts",
@@ -2063,7 +2063,7 @@
     ],
     [
       "src/tools/tool-execution.ts",
-      "79678c017826655af29d3a08914098f2ee329b3beb1ce007e0b620f58e90e472"
+      "38485c80ce48616d083f177e79c8fc4e4e36312fd119c687fd6f52f32b9ae88d"
     ],
     [
       "src/tools/trigger-maintenance.ts",
@@ -2699,7 +2699,7 @@
     ],
     [
       "web/markdown.js",
-      "6a0e6d0ea1e822d2a4b7f37419cad89f4fb6fa0291a270af7dd75c4f58747384"
+      "3ef46c7c5668129612f107ae3f27b981dadb95e66b158fde78379c522fe4edd4"
     ],
     [
       "web/mermaid-frame.css",

@@ -46,7 +46,10 @@ export class HealthStore {
       } catch (error) { db.exec("ROLLBACK"); db.close(); throw error; }
     }
     if (process.platform !== "win32") await chmod(path, 0o600);
-    return new HealthStore(db, agentId);
+    const store = new HealthStore(db, agentId);
+    try { store.migrateSleepSegmentIdentities(); }
+    catch (error) { db.close(); throw error; }
+    return store;
   }
   close(): void { closeSqlite(this.db); }
   pruneRejectedUploads(now = Date.now()): void {
@@ -69,6 +72,58 @@ export class HealthStore {
   }
   private transaction<T>(operation: () => T, mode: "read" | "write" = "write"): T {
     return sqliteTransaction(this.db, operation, mode);
+  }
+  /** Rekey pre-stage sleep identities without advancing or rewinding change cursors. */
+  private migrateSleepSegmentIdentities(): void {
+    const key = "migration:sleep-segment-stage-identity-v1";
+    this.transaction(() => {
+      if (prepareSql(this.db, "SELECT 1 FROM health_state WHERE key=?").get(key)) return;
+      const migrate = (row: HealthObservation): HealthObservation | undefined => {
+        if (row.kind !== "sleep_segment" || row.metric !== "sleep_analysis"
+          || row.provenance !== "health_auto_export" || typeof row.values.value !== "string"
+          || !row.values.value.trim() || row.id !== hash(canonical([row.stream, row.metric, row.observedAt]))) return;
+        return { ...row, id: hash(canonical([row.stream, row.metric, [row.observedAt, row.values.value.trim()]])) };
+      };
+      // Preserve the newest revision if a deployment already ingested the new
+      // identity before upgrading. Never collapse distinct In Bed/stage rows.
+      let cursor = "";
+      for (;;) {
+        const rows = prepareSql(this.db, `SELECT id,observation_json FROM health_observations
+          WHERE id>? AND metric='sleep_analysis' ORDER BY id LIMIT 500`).all(cursor) as { id: string; observation_json: string }[];
+        if (!rows.length) break;
+        cursor = rows.at(-1)!.id;
+        for (const stored of rows) {
+          const row = migrate(JSON.parse(stored.observation_json) as HealthObservation);
+          if (!row) continue;
+          const current = prepareSql(this.db, "SELECT seq FROM health_observations WHERE id=?").get(row.id) as { seq: number } | undefined;
+          if (!current || current.seq < row.seq) {
+            const contentHash = hash(canonical({ ...row, seq: 0, receivedAt: 0 }));
+            prepareSql(this.db, `INSERT INTO health_observations(id,seq,metric,stream,observed_at,end_at,received_at,content_hash,observation_json)
+              VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET seq=excluded.seq,metric=excluded.metric,stream=excluded.stream,
+              observed_at=excluded.observed_at,end_at=excluded.end_at,received_at=excluded.received_at,content_hash=excluded.content_hash,observation_json=excluded.observation_json`)
+              .run(row.id, row.seq, row.metric, row.stream, row.observedAt, row.endAt ?? null, row.receivedAt, contentHash, JSON.stringify(row));
+          }
+          prepareSql(this.db, "DELETE FROM health_observations WHERE id=?").run(stored.id);
+        }
+      }
+      // Historical changes retain their sequence and measurement, but expose the
+      // same identity as current rows to consumers resuming from an older cursor.
+      let sequence = 0;
+      for (;;) {
+        const rows = prepareSql(this.db, `SELECT seq,observation_json FROM health_changes
+          WHERE seq>? AND json_extract(observation_json,'$.kind')='sleep_segment' ORDER BY seq LIMIT 500`)
+          .all(sequence) as { seq: number; observation_json: string }[];
+        if (!rows.length) break;
+        sequence = rows.at(-1)!.seq;
+        for (const stored of rows) {
+          const row = migrate(JSON.parse(stored.observation_json) as HealthObservation);
+          if (!row) continue;
+          prepareSql(this.db, "UPDATE health_changes SET observation_id=?,content_hash=?,observation_json=? WHERE seq=?")
+            .run(row.id, hash(canonical({ ...row, seq: 0, receivedAt: 0 })), JSON.stringify(row), stored.seq);
+        }
+      }
+      prepareSql(this.db, "INSERT INTO health_state(key,value) VALUES(?,?)").run(key, "complete");
+    });
   }
   private upsert(row: HealthObservation): boolean {
     const contentHash = hash(canonical({ ...row, seq: 0, receivedAt: 0 }));

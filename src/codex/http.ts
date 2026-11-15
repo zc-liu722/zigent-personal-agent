@@ -20,7 +20,6 @@ export function createCodexHttp(services: ReadonlyMap<string, CodexService>) {
     const match = /^\/v1\/codex\/([a-z][a-z0-9-]*)\/([a-z-]+)$/.exec(url.pathname);
     if (!match) return false;
     res.setHeader("Cache-Control", "no-store"); res.setHeader("X-Content-Type-Options", "nosniff");
-    if (match[1] !== "deepmind") { json(res, 403, { error: "codex_agent_forbidden" }); return true; }
     const service = services.get(match[1]!);
     if (!service) { json(res, 404, { error: "not_found" }); return true; }
     if (req.headers.origin || req.headers.cookie) { json(res, 403, { error: "device_endpoint_only" }); return true; }

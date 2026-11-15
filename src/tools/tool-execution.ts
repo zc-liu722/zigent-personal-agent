@@ -36,7 +36,7 @@ export function createToolExecutor(options: {
       && (!input || typeof input !== "object" || (input as Record<string, unknown>).action !== "get")) {
       throw new Error("Background tasks may only read location; binding and deletion require a user turn");
     }
-    if ((context.taskRunId || context.backgroundTaskKind) && name === "skills" && !["list", "load", "read_resource", "updates"].includes(String(object(input).action)))
+    if ((context.taskRunId || context.backgroundTaskKind) && name === "skills" && !["list", "load", "read_resource", "files", "updates"].includes(String(object(input).action)))
       throw new Error("Background skill access is read-only; persistent changes require a user turn");
     if (hostedCatalog.has(name)) {
       throw new Error(`Hosted tool ${name} is executed by the model provider, not the local registry`);

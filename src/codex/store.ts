@@ -45,7 +45,7 @@ export class CodexStore extends EventEmitter {
   }
   close() { this.removeAllListeners(); closeSqlite(this.db); }
   assertScope(scope: CodexScope) {
-    if (scope.agentId !== "deepmind" || this.options.agentId !== "deepmind" || scope.agentId !== this.options.agentId || scope.userId !== this.options.ownerUserId || scope.conversationKind !== "p2p") throw new Error("Codex 只能由 deepmind 在所属用户的私聊中使用");
+    if (scope.agentId !== this.options.agentId || scope.userId !== this.options.ownerUserId || scope.conversationKind !== "p2p") throw new Error("Codex 只能由所属 Agent 在所属用户的私聊中使用");
   }
   private tx<T>(action: () => T): T { this.db.exec("BEGIN IMMEDIATE"); try { const result = action(); this.db.exec("COMMIT"); return result; } catch (error) { this.db.exec("ROLLBACK"); throw error; } }
   limit(key: string, max: number, now = Date.now()) {

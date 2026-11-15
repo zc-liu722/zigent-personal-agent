@@ -4,12 +4,14 @@ import { loadScript, loadStyle, versionsReady } from './lazy-assets.js';
 
 let mermaidModule;
 function loadMermaid() {
-  mermaidModule ||= versionsReady.then(() => import('./mermaid.js'));
+  mermaidModule ||= versionsReady.then(() => import('./mermaid.js')).catch(error => {
+    mermaidModule = undefined; throw error;
+  });
   return mermaidModule;
 }
 export function clearMermaidPreviews() {
   if (!mermaidModule) return;
-  void mermaidModule.then(module => module.clearMermaidPreviews());
+  void mermaidModule.then(module => module.clearMermaidPreviews()).catch(() => {});
 }
 
 let mathReady = false, mathDownload;
@@ -112,9 +114,25 @@ export function createMarkdownRenderer({ copyText, openConversationDocument, toa
         update();
         if (position) { restoreReadingPosition(position, false, true); rememberReadingPosition?.(); }
       } };
-      void loadMermaid().then(module => {
-        if (placeholder.isConnected) placeholder.replaceWith(module.mermaidBlock(code, options));
-      }).catch(() => { if (placeholder.isConnected) status.textContent = '图表未能绘制，请重试。'; });
+      const source = codeBlock(code, 'mermaid', preserveLayout, false);
+      const retry = el('button', '', '重新绘制');
+      retry.type = 'button';
+      retry.onclick = () => render();
+      function render() {
+        retry.disabled = true;
+        status.textContent = '正在绘制图表…';
+        void loadMermaid().then(module => {
+          if (placeholder.isConnected) options.resize(() => placeholder.replaceWith(module.mermaidBlock(code, options)));
+        }).catch(() => {
+          if (!placeholder.isConnected) return;
+          options.resize(() => {
+            status.textContent = '图表未能绘制，可重试或复制下方源码。';
+            retry.disabled = false;
+            placeholder.append(retry, source);
+          });
+        });
+      }
+      render();
       return placeholder;
     }
     const block = el('div', `code-block${preserveLayout ? ' preserve-layout' : ''}`), heading = el('div', 'code-heading'), copy = contentButton('copy', '复制代码', 'code-copy'), pre = el('pre');
